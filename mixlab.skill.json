@@ -1,0 +1,34 @@
+{
+  "name": "mixlab",
+  "description": "AI-powered DJ crate assistant. Reads a Rekordbox collection, filters played tracks, clusters by genre, and generates mix concepts via LLM.",
+  "triggers": [
+    {
+      "pattern": "^!mixlab$",
+      "command": "python -m mixlab",
+      "description": "Run full pipeline across all genres"
+    },
+    {
+      "pattern": "^!mixlab ([a-zA-Z &]+)$",
+      "command": "python -m mixlab --genre \"$1\"",
+      "description": "Run pipeline scoped to a single genre"
+    },
+    {
+      "pattern": "^!mixlab ([a-zA-Z &]+) (\\d+)$",
+      "command": "python -m mixlab --genre \"$1\" --duration $2",
+      "description": "Run pipeline scoped to a genre with a target set duration"
+    }
+  ],
+  "env": [
+    "CHANGSTA_API_KEY",
+    "DISCORD_BOT_TOKEN",
+    "DISCORD_GUILD_ID",
+    "MIXLAB_DISCORD_CHANNEL",
+    "MINIMAX_API_KEY",
+    "GROQ_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "ANTHROPIC_API_KEY"
+  ],
+  "working_directory": ".",
+  "python_path": "src"
+}

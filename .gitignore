@@ -205,3 +205,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# MixLab
+import/rekordbox.xml
+.mixlab_genres.json
