@@ -133,7 +133,9 @@ async def run(genre: str | None, duration: int | None) -> None:  # noqa: ARG001 
     # 7. LLM Stage 2 — full report.
     report = await stage2_report(all_concepts, tracks_by_id)
     elapsed = time.monotonic() - t_start
-    report += f"\n\n---\n\n⏱ Generated in {elapsed:.0f}s"
+    mins, secs = divmod(int(elapsed), 60)
+    elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+    report += f"\n\n---\n\n⏱ Generated in {elapsed_str}"
 
     print(report)
 

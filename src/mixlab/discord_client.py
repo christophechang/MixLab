@@ -52,16 +52,18 @@ def format_report(
         genre = first_track.genre if first_track else "_default"
 
         lines.append(f"🎵 **{genre} · {concept.title}**")
-        lines.append(f"_{concept.mood}_\n")
+        lines.append(f"_{concept.mood}_")
 
-        for idx, tid in enumerate(concept.track_ids, start=1):
-            if tid in tracks_by_id:
-                t = tracks_by_id[tid]
-                lines.append(f"{idx}. {t.artist} — {t.title} [{t.camelot_key} · {t.bpm} BPM]")
+        if not report:
+            lines.append("")
+            for idx, tid in enumerate(concept.track_ids, start=1):
+                if tid in tracks_by_id:
+                    t = tracks_by_id[tid]
+                    lines.append(f"{idx}. {t.artist} — {t.title} [{t.camelot_key} · {t.bpm} BPM]")
 
-        warning = _shortfall_warning(concept, genre)
-        if warning:
-            lines.append(f"\n{warning}")
+            warning = _shortfall_warning(concept, genre)
+            if warning:
+                lines.append(f"\n{warning}")
 
         lines.append("")
 

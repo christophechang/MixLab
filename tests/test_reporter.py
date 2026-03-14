@@ -115,6 +115,16 @@ def test_outliers_appear_after_concepts() -> None:
     assert concept_pos < outlier_pos, "Outlier section must appear after all concepts"
 
 
+def test_track_listings_shown_when_no_report() -> None:
+    text = format_report("", _make_concepts(), _make_tracks_by_id(), [])
+    assert "Calibre" in text
+
+
+def test_track_listings_hidden_when_report_present() -> None:
+    text = format_report("⏱ Generated in 42s", _make_concepts(), _make_tracks_by_id(), [])
+    assert "Calibre" not in text
+
+
 def test_report_text_included_in_output() -> None:
     text = format_report("⏱ Generated in 42s", _make_concepts(), _make_tracks_by_id(), [])
     assert "⏱ Generated in 42s" in text
