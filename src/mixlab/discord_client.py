@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 
 import httpx
@@ -135,7 +136,28 @@ class DiscordClient:
             resp.raise_for_status()
             return
 
-    async def post(self, message: str) -> bool:
+    async def _post_with_files(
+        self,
+        client: httpx.AsyncClient,
+        channel_id: str,
+        content: str,
+        attachments: list[tuple[str, bytes]],
+    ) -> None:
+        url = f"{_DISCORD_API}/channels/{channel_id}/messages"
+        # Multipart upload — httpx sets Content-Type with boundary automatically
+        headers = {k: v for k, v in self._headers.items() if k.lower() != "content-type"}
+        files = {f"files[{i}]": (name, data, "application/xml") for i, (name, data) in enumerate(attachments)}
+        data = {"payload_json": json.dumps({"content": content})}
+        while True:
+            resp = await client.post(url, headers=headers, data=data, files=files)
+            if resp.status_code == 429:
+                retry_after = float(resp.json().get("retry_after", 1.0))
+                await asyncio.sleep(retry_after + _RATE_LIMIT_BUFFER)
+                continue
+            resp.raise_for_status()
+            return
+
+    async def post(self, message: str, attachments: list[tuple[str, bytes]] | None = None) -> bool:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 channel_id = await self._resolve_channel(client)
@@ -144,6 +166,11 @@ class DiscordClient:
                     await self._post_raw(client, channel_id, chunk)
                     if i < len(chunks) - 1:
                         await asyncio.sleep(_CHUNK_SLEEP)
+                # One message per concept so each file is clearly labelled.
+                for filename, data in attachments or []:
+                    await asyncio.sleep(_CHUNK_SLEEP)
+                    label = filename.removesuffix(".xml").replace("_", " ")
+                    await self._post_with_files(client, channel_id, f"🎵 **{label}**", [(filename, data)])
             return True
         except Exception as exc:  # noqa: BLE001 — never crash the pipeline
             print(f"Discord delivery failed: {exc}")
@@ -170,6 +197,7 @@ async def send_report(
     tracks_by_id: dict[str, Track] | None = None,
     skipped: int = 0,
     counts: dict[str, tuple[int, int]] | None = None,
+    attachments: list[tuple[str, bytes]] | None = None,
 ) -> bool:
     client = make_discord_client()
     if client is None:
@@ -179,4 +207,4 @@ async def send_report(
         tracks_by_id = {}
 
     full_text = format_report(report, concepts, tracks_by_id, outliers, skipped, counts)
-    return await client.post(full_text)
+    return await client.post(full_text, attachments)

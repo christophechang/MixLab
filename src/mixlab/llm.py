@@ -11,7 +11,8 @@ from mixlab.config import TRACK_COUNT_TARGETS
 from mixlab.models import MixConcept, Track
 
 _MAX_TRACKS_PER_CALL = 40
-_MIN_CONCEPT_TRACKS = 4
+_MIN_SHORTLIST_TRACKS = 8  # Stage 1: minimum candidates per pool
+_MIN_CONCEPT_TRACKS = 4  # Stage 2: minimum tracks in a final curated set
 
 # Strip inline thinking blocks emitted by reasoning models (e.g. MiniMax M2.5).
 _THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
@@ -22,20 +23,28 @@ def _strip_thinking(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Stage 1 — mix concept generation (provider cascade)
+# Stage 1 — candidate shortlisting (provider cascade)
 # ---------------------------------------------------------------------------
 
-_STAGE1_SYSTEM = (
-    "You are an expert DJ and music curator. Given a list of tracks from a DJ's collection, "
-    "generate 2–3 distinct mix concepts. Each concept should have a creative title, a one-line "
-    "mood descriptor, and a curated selection of track IDs from the provided list. "
-    "Keep each concept's BPM range tight — no more than ±6 BPM from the concept's median tempo — "
-    "so every track can be mixed without excessive pitch shifting. "
-    "Aim for a coherent Camelot key journey within each concept — prefer adjacent moves (±1, same number opposite mode). "
-    "Occasional 2-step jumps are fine as deliberate energy shifts, but avoid scattering tracks across unrelated keys. "
-    "Respond ONLY with a JSON array matching this schema: "
-    '[{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]'
-)
+_STAGE1_SYSTEM = """\
+You are a music data analyst pre-screening a DJ's track collection to build candidate shortlists for mix concepts.
+
+Your task is purely technical pre-screening — not creative curation.
+
+For each shortlist you create:
+- Group tracks that are plausibly technically compatible: similar BPM (±6 BPM within the pool) and harmonically \
+related keys (adjacent or nearby Camelot positions).
+- Each shortlist should contain 15–25 candidate tracks that a DJ could plausibly draw from for one mix concept.
+- Generate 2–3 distinct shortlists with different BPM centres or key characters so they serve different mood directions.
+- Do NOT make final ordering decisions. Do NOT decide openers or closers. Simply group technically compatible tracks.
+- Exclude obvious outliers: tracks more than 8 BPM from the group median, or in keys with no harmonic relationship \
+to the rest of the pool.
+
+Give each shortlist a rough descriptive title (e.g. "Deep 122 BPM / 4A–7A Pool") and a one-line sonic mood.
+
+Respond ONLY with a JSON array matching this schema:
+[{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]\
+"""
 
 
 def _tracks_to_text(tracks: list[Track]) -> str:
@@ -145,12 +154,11 @@ async def _call_stage1_once(tracks: list[Track], genre: str) -> list[MixConcept]
             result = await provider(prompt)
             if result is not None:
                 concepts = _parse_concepts(result)
-                # Strip hallucinated IDs, then drop concepts below minimum viable length.
                 cleaned = [
                     MixConcept(title=c.title, mood=c.mood, track_ids=[tid for tid in c.track_ids if tid in valid_ids])
                     for c in concepts
                 ]
-                return [c for c in cleaned if len(c.track_ids) >= _MIN_CONCEPT_TRACKS]
+                return [c for c in cleaned if len(c.track_ids) >= _MIN_SHORTLIST_TRACKS]
         except Exception as exc:  # noqa: BLE001 — cascade, swallow and try next
             print(f"Provider {provider.__name__} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             continue
@@ -169,15 +177,56 @@ async def stage1_concepts(cluster: list[Track], genre: str) -> list[MixConcept]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 — report generation (Anthropic direct HTTP, no fallback)
+# Stage 2 — creative curation + report (Anthropic, single call, no fallback)
 # ---------------------------------------------------------------------------
 
-_STAGE2_SYSTEM = (
-    "You are an experienced DJ writing a mix planning report for a fellow DJ. "
-    "Write with authority and specificity — peer-to-peer, no marketing language, no filler. "
-    "For each mix concept: provide a 2–3 sentence creative brief, then list the tracks in "
-    "Camelot key order with their BPM. Use plain text with minimal formatting."
-)
+_STAGE2_SYSTEM = """\
+Act as a world-class DJ and mix curator. You will receive candidate shortlists of tracks that have been \
+pre-screened for technical compatibility. Your job is to curate and narrate — select the best tracks from \
+each shortlist, decide the play order, and write the full mix report.
+
+For each shortlist provided:
+- SELECT the best 8–12 tracks from the pool for a coherent DJ set. Exclude tracks that weaken the journey.
+- ORDER them as the intended play sequence: opener first, closer last.
+- The opener must set the tone, create intrigue, and leave room to build. Do not open with the most energetic track.
+- The closer must provide resolution and feel like a final statement.
+- Design an intentional energy curve: tension, build, peak, release, landing.
+- Allow bold moves — larger key jumps, tempo pivots — when they serve the narrative.
+- Do NOT optimise only for BPM and key. Optimise for flow, tension, release, memorability, and emotional payoff.
+
+Your output must be a JSON array where each element has exactly this schema:
+{
+  "title": "...",
+  "mood": "...",
+  "track_ids": ["id1", "id2", ...],
+  "report": "..."
+}
+
+Give each concept a compelling creative name — not the pool name from Stage 1.
+The track_ids must be the final selected tracks in play order.
+The "report" value must be a single string (with \\n for line breaks) in this exact format:
+
+CONCEPT: [title]
+
+[2–3 sentence creative brief]
+
+Track order (Camelot / BPM):
+[Artist — Title [Key · BPM] for each track in play order]
+
+Arc: [energy shape, emotional journey, and structural logic across the full set — name specific moments]
+
+Opener: [why this track works first — tone, identity, room to build]
+
+Closer: [why this track works last — resolution, emotional weight, final statement]
+
+Standout transitions or calculated risks: [1–3 specific moves worth naming — be precise about which tracks]
+
+Assumptions: [what was inferred from metadata where audio analysis was not possible]
+
+Be opinionated, musical, and honest. Peer-to-peer, no marketing language, no filler.
+
+Respond ONLY with the JSON array.\
+"""
 
 _SHORTFALL_THRESHOLD = 4
 
@@ -191,31 +240,61 @@ def _shortfall_warning(concept: MixConcept, genre: str) -> str | None:
     return None
 
 
-async def stage2_report(concepts: list[MixConcept], tracks_by_id: dict[str, Track]) -> str:
+def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConcept], str]:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
+        raw = re.sub(r"\n?```\s*$", "", raw)
+    data: list[dict[str, object]] = json.loads(raw.strip())
+
+    curated: list[MixConcept] = []
+    report_parts: list[str] = []
+
+    for item in data:
+        raw_ids = item.get("track_ids")
+        track_ids = [str(tid) for tid in (raw_ids if isinstance(raw_ids, list) else []) if str(tid) in valid_ids]
+        if len(track_ids) < _MIN_CONCEPT_TRACKS:
+            continue
+        curated.append(
+            MixConcept(title=str(item.get("title", "")), mood=str(item.get("mood", "")), track_ids=track_ids)
+        )
+        report_parts.append(str(item.get("report", "")))
+
+    return curated, "\n\n---\n\n".join(report_parts)
+
+
+async def stage2_curate_and_report(
+    shortlists: list[MixConcept],
+    tracks_by_id: dict[str, Track],
+) -> tuple[list[MixConcept], str]:
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set — Stage 2 report generation requires Anthropic.")
+        raise RuntimeError("ANTHROPIC_API_KEY is not set — Stage 2 curation requires Anthropic.")
 
     sections: list[str] = []
-    for concept in concepts:
-        track_lines = []
-        for tid in concept.track_ids:
-            if tid in tracks_by_id:
-                t = tracks_by_id[tid]
-                track_lines.append(f"  {t.artist} — {t.title} [{t.camelot_key} · {t.bpm} BPM]")
-        sections.append(f"Concept: {concept.title}\nMood: {concept.mood}\nTracks:\n" + "\n".join(track_lines))
+    for shortlist in shortlists:
+        track_lines = [
+            f"  ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key}"
+            for tid in shortlist.track_ids
+            if (t := tracks_by_id.get(tid)) is not None
+        ]
+        if track_lines:
+            sections.append(
+                f"Shortlist: {shortlist.title}\nCharacter: {shortlist.mood}\nCandidates:\n" + "\n".join(track_lines)
+            )
 
-    prompt = "Write a mix planning report for the following concepts:\n\n" + "\n\n".join(sections)
+    prompt = "Curate and narrate a mix report from the following candidate shortlists.\n\n" + "\n\n".join(sections)
 
     try:
-        report = await _call_anthropic_http(
-            key, "claude-sonnet-4-6", _STAGE2_SYSTEM, prompt, max_tokens=8192, timeout=300
-        )
+        raw = await _call_anthropic_http(key, "claude-sonnet-4-6", _STAGE2_SYSTEM, prompt, max_tokens=8192, timeout=300)
     except Exception as exc:
-        raise RuntimeError(f"Stage 2 report generation failed: {exc}") from exc
+        raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc
+
+    valid_ids = set(tracks_by_id.keys())
+    curated, report = _parse_curated_concepts(raw, valid_ids)
 
     warnings: list[str] = []
-    for concept in concepts:
+    for concept in curated:
         if not concept.track_ids:
             continue
         track = tracks_by_id.get(concept.track_ids[0])
@@ -226,4 +305,5 @@ async def stage2_report(concepts: list[MixConcept], tracks_by_id: dict[str, Trac
 
     if warnings:
         report += "\n\n---\n\nSHORTFALL WARNINGS\n" + "\n".join(warnings)
-    return report
+
+    return curated, report

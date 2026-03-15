@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import os
 import sys
 import time
@@ -21,9 +22,10 @@ from mixlab.clustering import (
 )
 from mixlab.config import GENRE_MAP, IGNORED_GENRES
 from mixlab.discord_client import send_report
-from mixlab.llm import stage1_concepts, stage2_report
+from mixlab.llm import stage1_concepts, stage2_curate_and_report
 from mixlab.matcher import filter_unplayed
 from mixlab.models import MixConcept, PlayedTrack, Track
+from mixlab.playlist_exporter import export_merged_xml, generate_merged_xml_bytes, parse_raw_tracks
 from mixlab.reader import apply_bpm_corrections, parse_collection
 
 _XML_PATH = Path("import/rekordbox.xml")
@@ -74,7 +76,7 @@ def _show_cached_genres() -> None:
     print()
 
 
-async def run(genre: str | None, duration: int | None) -> None:  # noqa: ARG001 — duration reserved
+async def run(genre: str | None, duration: int | None, export_dir: Path | None) -> None:  # noqa: ARG001 — duration reserved
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
     tracks = apply_bpm_corrections(tracks)
@@ -106,32 +108,33 @@ async def run(genre: str | None, duration: int | None) -> None:  # noqa: ARG001 
         print(f"No unplayed tracks found for genre '{genre}'.", file=sys.stderr)
         sys.exit(1)
 
-    # 6. LLM Stage 1 — generate concepts.
+    # 6. LLM Stage 1 — build candidate shortlists via cascade (MiniMax / Groq / etc.).
     t_start = time.monotonic()
-    all_concepts: list[MixConcept] = []
+    all_shortlists: list[MixConcept] = []
     for genre_label, cluster_tracks in clusters.items():
         sorted_tracks = sort_by_camelot(filter_by_bpm(cluster_tracks))
-        concepts = await stage1_concepts(sorted_tracks, genre_label)
-        all_concepts.extend(concepts)
+        all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label))
 
-    # Outliers ≥ 4 within this genre scope — pass as Misc.
+    # Outliers ≥ 4 within this genre scope — shortlist as Misc.
     genre_outliers = [t for t in outliers if t.genre.lower() == genre.lower()]
     if len(genre_outliers) >= 4:
-        misc_concepts = await stage1_concepts(genre_outliers, "Misc")
-        all_concepts.extend(misc_concepts)
+        all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc"))
 
-    if not all_concepts:
-        print("No concepts generated — all tracks may have been excluded.", file=sys.stderr)
+    if not all_shortlists:
+        print("No shortlists generated — all tracks may have been excluded.", file=sys.stderr)
         sys.exit(1)
 
-    # Cap concepts sent to Stage 2 — keep the richest (most tracks) to avoid truncation.
+    # Cap shortlists sent to Stage 2 — keep the richest pools.
     tracks_by_id = _build_tracks_by_id(tracks)
-    max_stage2_concepts = 6
-    all_concepts = [c for c in all_concepts if any(tid in tracks_by_id for tid in c.track_ids)]
-    all_concepts = sorted(all_concepts, key=lambda c: len(c.track_ids), reverse=True)[:max_stage2_concepts]
+    max_shortlists = 6
+    all_shortlists = [s for s in all_shortlists if any(tid in tracks_by_id for tid in s.track_ids)]
+    all_shortlists = sorted(all_shortlists, key=lambda s: len(s.track_ids), reverse=True)[:max_shortlists]
 
-    # 7. LLM Stage 2 — full report.
-    report = await stage2_report(all_concepts, tracks_by_id)
+    # 7. LLM Stage 2 — creative curation + full report (single Anthropic call).
+    all_concepts, report = await stage2_curate_and_report(all_shortlists, tracks_by_id)
+    if not all_concepts:
+        print("Stage 2 returned no curated concepts.", file=sys.stderr)
+        sys.exit(1)
     elapsed = time.monotonic() - t_start
     mins, secs = divmod(int(elapsed), 60)
     elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
@@ -139,9 +142,23 @@ async def run(genre: str | None, duration: int | None) -> None:  # noqa: ARG001 
 
     print(report)
 
-    # 8. Discord delivery.
+    # 8. Generate merged Rekordbox XML (one file — for Discord attachment and optional disk export).
+    raw_tracks_xml = parse_raw_tracks(_XML_PATH)
+    today = datetime.date.today().isoformat()
+    folder_name = f"Mix Lab - {genre} - {today}"
+    merged_bytes = generate_merged_xml_bytes(all_concepts, raw_tracks_xml, folder_name)
+    xml_attachments: list[tuple[str, bytes]] = (
+        [("rekordbox_export.xml", merged_bytes)] if merged_bytes is not None else []
+    )
+
+    if export_dir is not None:
+        out_path = export_merged_xml(all_concepts, raw_tracks_xml, export_dir / "rekordbox_export.xml", folder_name)
+        if out_path is not None:
+            print(f"Exported: {out_path}")
+
+    # 9. Discord delivery.
     filtered_outliers = [t for t in outliers if t.genre not in IGNORED_GENRES]
-    await send_report(report, all_concepts, filtered_outliers, tracks_by_id, counts=counts)
+    await send_report(report, all_concepts, filtered_outliers, tracks_by_id, counts=counts, attachments=xml_attachments)
 
 
 def main() -> None:
@@ -150,11 +167,30 @@ def main() -> None:
     parser.add_argument("--genre", type=str, default=None, help="Genre to target (e.g. drum_and_bass, house)")
     parser.add_argument("--duration", type=int, default=None, help="Target set duration in minutes")
     parser.add_argument("--genres", action="store_true", help="Show available genres from last run (no API calls)")
+    parser.add_argument(
+        "--export",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="Export merged Rekordbox XML (rekordbox_export.xml) to DIR",
+    )
+    parser.add_argument(
+        "--export-playlists",
+        action="store_true",
+        help="Export merged Rekordbox XML to output/playlists/rekordbox_export.xml",
+    )
     args = parser.parse_args()
     if args.genres:
         _show_cached_genres()
         return
-    asyncio.run(run(args.genre, args.duration))
+
+    export_dir: Path | None = None
+    if args.export is not None:
+        export_dir = Path(args.export)
+    elif args.export_playlists:
+        export_dir = Path("output/playlists")
+
+    asyncio.run(run(args.genre, args.duration, export_dir))
 
 
 if __name__ == "__main__":
