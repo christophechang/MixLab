@@ -29,7 +29,6 @@ from mixlab.playlist_exporter import export_merged_xml, generate_merged_xml_byte
 from mixlab.reader import apply_bpm_corrections, parse_collection
 
 _XML_PATH = Path("import/rekordbox.xml")
-_CHANGSTA_BASE = "https://api.changsta.com"
 
 
 def _build_tracks_by_id(tracks: list[Track]) -> dict[str, Track]:
@@ -83,11 +82,13 @@ async def run(genre: str | None, duration: int | None, export_dir: Path | None) 
 
     # 2. Fetch played tracks and filter.
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
+    catalog_url = os.environ.get("CATALOG_API_URL", "")
     played: list[PlayedTrack] = []
-    try:
-        played = await fetch_played_tracks(api_key, _CHANGSTA_BASE)
-    except Exception as exc:
-        print(f"WARNING: Could not fetch played tracks — proceeding without exclusion: {exc}", file=sys.stderr)
+    if catalog_url:
+        try:
+            played = await fetch_played_tracks(api_key, catalog_url)
+        except Exception as exc:
+            print(f"WARNING: Could not fetch played tracks — proceeding without exclusion: {exc}", file=sys.stderr)
     unplayed = filter_unplayed(tracks, played)
 
     # 3. Always print the availability table (deterministic, no LLM cost).

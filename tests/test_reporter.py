@@ -9,7 +9,7 @@ from mixlab.models import MixConcept, Track
 
 _GUILD_ID = "123456789"
 _CHANNEL_NAME = "mix-lab"
-_CHANNEL_ID = "1482325879257301124"
+_CHANNEL_ID = "999999999999999999"
 _CHANNELS_URL = f"https://discord.com/api/v10/guilds/{_GUILD_ID}/channels"
 _MESSAGES_URL = f"https://discord.com/api/v10/channels/{_CHANNEL_ID}/messages"
 

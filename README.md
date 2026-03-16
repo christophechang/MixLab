@@ -7,7 +7,7 @@ AI-powered DJ crate assistant. Point it at your Rekordbox collection, pick a gen
 ## How it works
 
 1. Parses your exported Rekordbox XML collection
-2. Fetches your play history from the Changsta API and filters out already-played tracks
+2. Fetches your play history from your catalog API (if `CATALOG_API_URL` is set) and filters out already-played tracks
 3. Prints a crate availability table (no LLM cost)
 4. If a genre is specified, clusters the unplayed tracks, runs them through an LLM cascade to generate mix concepts, then writes a full mix planning report via a second LLM call
 5. Sends the report to a Discord channel
@@ -17,10 +17,11 @@ AI-powered DJ crate assistant. Point it at your Rekordbox collection, pick a gen
 ## Requirements
 
 - Python 3.12+
-- A Rekordbox XML export (see below)
-- A Changsta API key
-- At least one LLM API key (Anthropic required for Stage 2; any cascade provider works for Stage 1)
-- A Discord bot token (optional — report still prints to stdout without it)
+- A Rekordbox XML export (see [Setup](#4-export-your-rekordbox-collection))
+- `ANTHROPIC_API_KEY` — required for Stage 2 report generation
+- At least one Stage 1 LLM key (MiniMax, Groq, Gemini, OpenRouter, or Anthropic)
+- A catalog API URL + key (optional — for filtering already-played tracks)
+- A Discord bot token (optional — report prints to stdout without it)
 
 ---
 
@@ -51,8 +52,9 @@ cp .env.example .env
 
 | Variable | Required | Description |
 |---|---|---|
-| `CHANGSTA_API_KEY` | Yes | Fetches your play history for track exclusion |
-| `ANTHROPIC_API_KEY` | Yes | Stage 2 report generation (Claude) |
+| `ANTHROPIC_API_KEY` | Yes | Stage 2 report generation (Claude Sonnet) |
+| `CATALOG_API_URL` | No | Base URL of your catalog/play-history API |
+| `CHANGSTA_API_KEY` | No | Bearer token for `CATALOG_API_URL` (if your API requires auth) |
 | `MINIMAX_API_KEY` | No | Stage 1 provider (tried first) |
 | `GROQ_API_KEY` | No | Stage 1 provider (fallback) |
 | `GEMINI_API_KEY` | No | Stage 1 provider (fallback) |
@@ -62,17 +64,23 @@ cp .env.example .env
 | `MIXLAB_DISCORD_CHANNEL_ID` | No | Target channel ID (preferred over name) |
 | `MIXLAB_DISCORD_CHANNEL` | No | Target channel name (default: `mix-lab`) |
 
-At minimum you need `CHANGSTA_API_KEY` and `ANTHROPIC_API_KEY` to run a full report. Without a Discord token the report is printed to stdout only.
+`ANTHROPIC_API_KEY` is the only required key. Without a catalog API URL, played-track exclusion is skipped and your full unplayed collection is used. Without a Discord token the report is printed to stdout only.
+
+#### Catalog API
+
+The catalog API MixLab integrates with for play-history filtering is also open source: [soundcloud-ai-mix-recommender-api](https://github.com/christophechang/soundcloud-ai-mix-recommender-api). Set `CATALOG_API_URL` to your deployed instance to enable played-track exclusion.
 
 ### 4. Export your Rekordbox collection
+
+> **Rekordbox 6:** XML export must be enabled before it appears in the menu. Go to **Preferences → Advanced → rekordbox xml** and tick **Export rekordbox xml**. Restart Rekordbox if needed.
 
 In Rekordbox:
 
 1. Go to **File → Export Collection in xml format**
-2. Select the playlist you want to export (typically your master "All" playlist)
-3. Save the file to `import/rekordbox.xml`
+2. Choose a save location and export
+3. Move or copy the exported file to `import/rekordbox.xml` in the project root
 
-> **Note:** Rekordbox always exports the full COLLECTION regardless of which playlist you select. Tracks not assigned to any playlist will still appear in the XML but will be filtered out automatically (SoundCloud cloud tracks are also excluded). Re-export whenever you add new tracks to your collection.
+> **Note:** Rekordbox exports your full COLLECTION — all tracks, not just a playlist. Tracks not tagged to any playlist will still appear in the XML (MixLab uses genre tags, not playlist membership). SoundCloud cloud tracks are excluded automatically. Re-export whenever you add new tracks.
 
 ---
 
@@ -84,7 +92,7 @@ In Rekordbox:
 python -m mixlab
 ```
 
-Prints unplayed vs total counts per genre, sorted by availability. Only the Changsta API is called.
+Prints unplayed vs total counts per genre, sorted by availability. Only the catalog API is called (if configured).
 
 ### Generate a mix report for a specific genre
 
@@ -122,11 +130,7 @@ Pass the label (left column) to `--genre`. The right column shows the Rekordbox 
 
 You can also pass a Rekordbox genre tag directly (case-insensitive), e.g. `--genre "Deep House"`.
 
-**Best genres to test with** — run `python -m mixlab` first to see your current availability counts. The genres with the most unplayed tracks will produce the richest concepts. Based on a typical collection size:
-
-- `house` — largest crate, most concept variety
-- `drum_and_bass` — second largest, good for testing BPM correction logic
-- `breakbeat` — solid depth, distinct from the above
+Run `python -m mixlab` first to see your availability counts — genres with the most unplayed tracks produce the richest concepts.
 
 ---
 
@@ -137,7 +141,7 @@ You can also pass a Rekordbox genre tag directly (case-insensitive), e.g. `--gen
 - Source: `import/rekordbox.xml` — read fresh on every run, never cached
 - Tracks missing BPM or Camelot key are excluded with a warning printed to stderr
 - SoundCloud tracks (Location starting with `file://localhostsoundcloud`) are excluded silently
-- Tracks in your Changsta play history are excluded — fuzzy-matched on artist + title with unicode normalisation, dash normalisation, and feat. stripping
+- Tracks in your catalog play history are excluded — fuzzy-matched on artist + title with unicode normalisation, dash normalisation, and feat. stripping
 
 ### BPM correction
 
@@ -219,7 +223,7 @@ MixLab/
 ├── src/mixlab/
 │   ├── __main__.py        # CLI entry point and pipeline orchestration
 │   ├── reader.py          # Rekordbox XML parsing and BPM correction
-│   ├── client.py          # Changsta API (played track history)
+│   ├── client.py          # Catalog API client (played track history, optional)
 │   ├── matcher.py         # Fuzzy played-track exclusion
 │   ├── clustering.py      # Genre grouping, BPM filtering, Camelot sort
 │   ├── llm.py             # Stage 1 provider cascade + Stage 2 Anthropic report

@@ -4,12 +4,11 @@ import httpx
 
 from mixlab.models import PlayedTrack
 
-_BASE_URL = "https://api.changsta.com"
 _TRACKS_PATH = "/api/catalog/tracks"
 _PAGE_SIZE = 100
 
 
-async def fetch_played_tracks(api_key: str = "", base_url: str = _BASE_URL) -> list[PlayedTrack]:
+async def fetch_played_tracks(api_key: str = "", base_url: str = "") -> list[PlayedTrack]:
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -25,7 +24,7 @@ async def fetch_played_tracks(api_key: str = "", base_url: str = _BASE_URL) -> l
             )
 
             if response.status_code != 200:
-                raise RuntimeError(f"changsta.com API returned {response.status_code}: {response.text}")
+                raise RuntimeError(f"Catalog API returned {response.status_code}: {response.text}")
 
             data: dict[str, object] = response.json()
             items: list[dict[str, object]] = data.get("items", [])  # type: ignore[assignment]
