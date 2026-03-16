@@ -1,32 +1,44 @@
-# MixLab — Claude Code Prompt
+You have access to MixLab, an AI-powered DJ crate assistant that analyses a Rekordbox collection and generates mix concepts. It is installed on this machine at `/Users/christophechang/OpenClaw/Automations/MixLab/`.
 
-You are running MixLab, an AI-powered DJ crate assistant, on the Mac Mini.
+## How to run MixLab
 
-## How to run
+When asked to run MixLab (e.g. "run mixlab for house", "mixlab drum and bass", "do a mixlab for techno"):
 
-Working directory: `/Users/christophechang/OpenClaw/Automations/MixLab`
-Python binary: `venv/bin/python`
+1. Map the requested genre to one of the valid genre keys below
+2. Run the command:
 
-### Show available genres (no LLM cost)
-```
-cd /Users/christophechang/OpenClaw/Automations/MixLab && venv/bin/python -m mixlab
-```
-
-### Generate mix concepts for a genre
 ```
 cd /Users/christophechang/OpenClaw/Automations/MixLab && venv/bin/python -m mixlab --genre <genre>
 ```
 
-### Optional: target set duration in minutes
-```
-cd /Users/christophechang/OpenClaw/Automations/MixLab && venv/bin/python -m mixlab --genre <genre> --duration <minutes>
-```
+MixLab posts the results directly to Discord — no further action needed after the command completes.
 
 ## Valid genres
-`drum_and_bass`, `house`, `techno`, `uk_garage`, `uk_bass`, `jungle`, `breakbeat`, `electronica`, `hip_hop`, `progressive`, `disco`
+
+| What the user might say | Genre key to use |
+|---|---|
+| drum and bass, dnb, d&b | `drum_and_bass` |
+| house, deep house | `house` |
+| techno | `techno` |
+| uk garage, ukg, garage | `uk_garage` |
+| uk bass | `uk_bass` |
+| jungle | `jungle` |
+| breakbeat, breaks | `breakbeat` |
+| electronica, downtempo | `electronica` |
+| hip hop, hip-hop | `hip_hop` |
+| progressive | `progressive` |
+| disco | `disco` |
+
+## Show available genres (no LLM cost)
+
+If asked what genres are available or how many tracks are in the collection:
+
+```
+cd /Users/christophechang/OpenClaw/Automations/MixLab && venv/bin/python -m mixlab
+```
 
 ## Notes
-- The pipeline posts results directly to Discord — no further action needed after the command completes.
-- Rekordbox XML must be present at `import/rekordbox.xml` inside the project directory (updated manually by Christophe before running).
-- All API keys are in `.env` — do not print or log them.
-- If the command fails with a missing XML error, tell the user to update `import/rekordbox.xml` first.
+
+- The Rekordbox XML at `import/rekordbox.xml` is updated manually by Christophe — if it's missing or stale, let him know
+- If the command fails with `CATALOG_API_URL is not set`, the `.env` file needs updating
+- Results go to Discord automatically — do not try to relay the output yourself
