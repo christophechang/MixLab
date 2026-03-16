@@ -8,7 +8,7 @@ echo "==> Creating virtual environment..."
 
 echo "==> Installing dependencies..."
 venv/bin/pip install --quiet --upgrade pip
-venv/bin/pip install --quiet -e .
+venv/bin/pip install --quiet .
 
 echo "==> Creating import directory..."
 mkdir -p import
