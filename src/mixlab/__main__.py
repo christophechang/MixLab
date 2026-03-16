@@ -83,12 +83,14 @@ async def run(genre: str | None, duration: int | None, export_dir: Path | None) 
     # 2. Fetch played tracks and filter.
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
     catalog_url = os.environ.get("CATALOG_API_URL", "")
-    played: list[PlayedTrack] = []
-    if catalog_url:
-        try:
-            played = await fetch_played_tracks(api_key, catalog_url)
-        except Exception as exc:
-            print(f"WARNING: Could not fetch played tracks — proceeding without exclusion: {exc}", file=sys.stderr)
+    if not catalog_url:
+        print("ERROR: CATALOG_API_URL is not set — cannot filter played tracks. Aborting.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        played = await fetch_played_tracks(api_key, catalog_url)
+    except Exception as exc:
+        print(f"ERROR: Could not fetch played tracks — aborting: {exc}", file=sys.stderr)
+        sys.exit(1)
     unplayed = filter_unplayed(tracks, played)
 
     # 3. Always print the availability table (deterministic, no LLM cost).
