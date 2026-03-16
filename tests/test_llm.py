@@ -170,6 +170,7 @@ async def test_stage2_returns_curated_concepts_and_report(monkeypatch: pytest.Mo
     assert concepts[0].title == "Dark Rollers"
     assert concepts[0].track_ids == ["1", "2", "3", "4"]
     assert "CONCEPT: Dark Rollers" in report
+    assert "Claude Sonnet 4.6" in report
 
 
 @respx.mock
@@ -217,10 +218,51 @@ async def test_stage2_raises_if_key_missing(monkeypatch: pytest.MonkeyPatch) -> 
     from mixlab.llm import stage2_curate_and_report
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("STAGE2_PROVIDER", raising=False)
     shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1"])]
     tracks_by_id: dict[str, Track] = {}
 
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        await stage2_curate_and_report(shortlists, tracks_by_id)
+
+
+@respx.mock
+async def test_stage2_uses_minimax_when_stage2_provider_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("STAGE2_PROVIDER", "minimax")
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-key")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    respx.post(_MINIMAX_URL).mock(
+        return_value=Response(200, json={"choices": [{"message": {"content": _curated_payload()}}]})
+    )
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(
+            track_id=str(i), artist=f"Artist {i}", title=f"Title {i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass"
+        )
+        for i in range(1, 5)
+    }
+
+    concepts, report = await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    assert len(concepts) == 1
+    assert concepts[0].title == "Dark Rollers"
+    assert "CONCEPT: Dark Rollers" in report
+    assert "MiniMax M2.5" in report
+
+
+async def test_stage2_raises_if_minimax_key_missing_when_provider_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("STAGE2_PROVIDER", "minimax")
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1"])]
+    tracks_by_id: dict[str, Track] = {}
+
+    with pytest.raises(RuntimeError, match="MINIMAX_API_KEY"):
         await stage2_curate_and_report(shortlists, tracks_by_id)
 
 

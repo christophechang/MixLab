@@ -24,7 +24,7 @@ from mixlab.config import GENRE_MAP, IGNORED_GENRES
 from mixlab.discord_client import send_report
 from mixlab.llm import stage1_concepts, stage2_curate_and_report
 from mixlab.matcher import filter_unplayed
-from mixlab.models import MixConcept, PlayedTrack, Track
+from mixlab.models import MixConcept, Track
 from mixlab.playlist_exporter import export_merged_xml, generate_merged_xml_bytes, parse_raw_tracks
 from mixlab.reader import apply_bpm_corrections, parse_collection
 

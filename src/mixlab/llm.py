@@ -62,12 +62,18 @@ def _parse_concepts(raw: str) -> list[MixConcept]:
 
 
 async def _call_openai_compat(
-    base_url: str, api_key: str, model: str, prompt: str, path: str = "/v1/chat/completions", timeout: int = 60
+    base_url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    path: str = "/v1/chat/completions",
+    timeout: int = 60,
+    system: str = _STAGE1_SYSTEM,
 ) -> str:
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": model,
-        "messages": [{"role": "system", "content": _STAGE1_SYSTEM}, {"role": "user", "content": prompt}],
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
         "temperature": 0.7,
     }
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -267,9 +273,19 @@ async def stage2_curate_and_report(
     shortlists: list[MixConcept],
     tracks_by_id: dict[str, Track],
 ) -> tuple[list[MixConcept], str]:
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if not key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set — Stage 2 curation requires Anthropic.")
+    provider = os.environ.get("STAGE2_PROVIDER", "anthropic").lower()
+    use_minimax = provider == "minimax"
+
+    if use_minimax:
+        stage2_key = os.environ.get("MINIMAX_API_KEY")
+        if not stage2_key:
+            raise RuntimeError("STAGE2_PROVIDER=minimax but MINIMAX_API_KEY is not set.")
+        stage2_model_display = "MiniMax M2.5"
+    else:
+        stage2_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not stage2_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not set — Stage 2 curation requires Anthropic.")
+        stage2_model_display = "Claude Sonnet 4.6"
 
     sections: list[str] = []
     for shortlist in shortlists:
@@ -283,10 +299,27 @@ async def stage2_curate_and_report(
                 f"Shortlist: {shortlist.title}\nCharacter: {shortlist.mood}\nCandidates:\n" + "\n".join(track_lines)
             )
 
-    prompt = "Curate and narrate a mix report from the following candidate shortlists.\n\n" + "\n\n".join(sections)
+    n = len(sections)
+    prompt = (
+        f"Curate and narrate a mix report from the following {n} candidate shortlists. "
+        f"Your JSON array MUST contain exactly {n} objects — one per shortlist, in the order given. "
+        f"Do not merge, skip, or consolidate shortlists.\n\n" + "\n\n".join(sections)
+    )
 
     try:
-        raw = await _call_anthropic_http(key, "claude-sonnet-4-6", _STAGE2_SYSTEM, prompt, max_tokens=8192, timeout=300)
+        if use_minimax:
+            raw = await _call_openai_compat(
+                "https://api.minimaxi.chat",
+                stage2_key,
+                "MiniMax-M2.5",
+                prompt,
+                timeout=300,
+                system=_STAGE2_SYSTEM,
+            )
+        else:
+            raw = await _call_anthropic_http(
+                stage2_key, "claude-sonnet-4-6", _STAGE2_SYSTEM, prompt, max_tokens=8192, timeout=300
+            )
     except Exception as exc:
         raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc
 
@@ -305,5 +338,7 @@ async def stage2_curate_and_report(
 
     if warnings:
         report += "\n\n---\n\nSHORTFALL WARNINGS\n" + "\n".join(warnings)
+
+    report += f"\n\n---\n\nMain brain: {stage2_model_display}"
 
     return curated, report
