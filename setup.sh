@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PYTHON=${PYTHON:-python3}
+PYTHON=${PYTHON:-$(which python3.13 || which python3.12 || echo python3)}
 
 echo "==> Creating virtual environment..."
 "$PYTHON" -m venv venv
