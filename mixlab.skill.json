@@ -16,6 +16,11 @@
       "pattern": "^!mixlab ([a-zA-Z &]+) (\\d+)$",
       "command": "python -m mixlab --genre \"$1\" --duration $2",
       "description": "Run pipeline scoped to a genre with a target set duration"
+    },
+    {
+      "pattern": "^!mixlab ([a-zA-Z_]+) minimax$",
+      "command": "python -m mixlab --genre \"$1\" --stage2-provider minimax",
+      "description": "Run pipeline for a genre using MiniMax M2.5 for Stage 2 curation"
     }
   ],
   "env": [
@@ -27,7 +32,8 @@
     "GROQ_API_KEY",
     "GEMINI_API_KEY",
     "OPENROUTER_API_KEY",
-    "ANTHROPIC_API_KEY"
+    "ANTHROPIC_API_KEY",
+    "STAGE2_PROVIDER"
   ],
   "working_directory": ".",
   "python_path": "src"

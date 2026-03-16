@@ -75,7 +75,9 @@ def _show_cached_genres() -> None:
     print()
 
 
-async def run(genre: str | None, duration: int | None, export_dir: Path | None) -> None:  # noqa: ARG001 — duration reserved
+async def run(
+    genre: str | None, duration: int | None, export_dir: Path | None, stage2_provider: str | None = None
+) -> None:  # noqa: ARG001 — duration reserved
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
     tracks = apply_bpm_corrections(tracks)
@@ -134,7 +136,7 @@ async def run(genre: str | None, duration: int | None, export_dir: Path | None) 
     all_shortlists = sorted(all_shortlists, key=lambda s: len(s.track_ids), reverse=True)[:max_shortlists]
 
     # 7. LLM Stage 2 — creative curation + full report (single Anthropic call).
-    all_concepts, report = await stage2_curate_and_report(all_shortlists, tracks_by_id)
+    all_concepts, report = await stage2_curate_and_report(all_shortlists, tracks_by_id, stage2_provider)
     if not all_concepts:
         print("Stage 2 returned no curated concepts.", file=sys.stderr)
         sys.exit(1)
@@ -182,6 +184,12 @@ def main() -> None:
         action="store_true",
         help="Export merged Rekordbox XML to output/playlists/rekordbox_export.xml",
     )
+    parser.add_argument(
+        "--stage2-provider",
+        type=str,
+        default=None,
+        help="Stage 2 LLM provider: anthropic (default) or minimax",
+    )
     args = parser.parse_args()
     if args.genres:
         _show_cached_genres()
@@ -193,7 +201,7 @@ def main() -> None:
     elif args.export_playlists:
         export_dir = Path("output/playlists")
 
-    asyncio.run(run(args.genre, args.duration, export_dir))
+    asyncio.run(run(args.genre, args.duration, export_dir, args.stage2_provider))
 
 
 if __name__ == "__main__":

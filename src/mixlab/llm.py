@@ -272,8 +272,9 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
 async def stage2_curate_and_report(
     shortlists: list[MixConcept],
     tracks_by_id: dict[str, Track],
+    stage2_provider: str | None = None,
 ) -> tuple[list[MixConcept], str]:
-    provider = os.environ.get("STAGE2_PROVIDER", "anthropic").lower()
+    provider = (stage2_provider or os.environ.get("STAGE2_PROVIDER", "anthropic")).lower()
     use_minimax = provider == "minimax"
 
     if use_minimax:
