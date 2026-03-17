@@ -128,17 +128,25 @@ async def run(
     if not all_shortlists:
         print("No shortlists generated — all tracks may have been excluded.", file=sys.stderr)
         sys.exit(1)
+    if len(all_shortlists) < 3:
+        print(
+            f"⚠️  Stage 1 produced only {len(all_shortlists)} shortlist(s) — pool may be too thin for 3–6 concepts.",
+            file=sys.stderr,
+        )
 
     # Cap shortlists sent to Stage 2 — keep the richest pools.
     tracks_by_id = _build_tracks_by_id(tracks)
     max_shortlists = 6
     all_shortlists = [s for s in all_shortlists if any(tid in tracks_by_id for tid in s.track_ids)]
     all_shortlists = sorted(all_shortlists, key=lambda s: len(s.track_ids), reverse=True)[:max_shortlists]
+    if not all_shortlists:
+        print("No shortlists survived track resolution — collection may be out of sync.", file=sys.stderr)
+        sys.exit(1)
 
     # 7. LLM Stage 2 — creative curation + full report (single Anthropic call).
     all_concepts, report = await stage2_curate_and_report(all_shortlists, tracks_by_id, stage2_provider)
     if not all_concepts:
-        print("Stage 2 returned no curated concepts.", file=sys.stderr)
+        print(report, file=sys.stderr)
         sys.exit(1)
     elapsed = time.monotonic() - t_start
     mins, secs = divmod(int(elapsed), 60)

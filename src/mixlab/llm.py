@@ -35,7 +35,9 @@ For each shortlist you create:
 - Group tracks that are plausibly technically compatible: similar BPM (±6 BPM within the pool) and harmonically \
 related keys (adjacent or nearby Camelot positions).
 - Each shortlist should contain 15–25 candidate tracks that a DJ could plausibly draw from for one mix concept.
-- Generate 2–3 distinct shortlists with different BPM centres or key characters so they serve different mood directions.
+- Generate 3–5 distinct shortlists with different BPM centres or key characters so they serve different mood directions. \
+If the material only supports 1 or 2 distinct shortlists, produce what the material supports — do not pad. \
+If no coherent shortlist of 8+ tracks can be formed, return an empty array [].
 - Do NOT make final ordering decisions. Do NOT decide openers or closers. Simply group technically compatible tracks.
 - Exclude obvious outliers: tracks more than 8 BPM from the group median, or in keys with no harmonic relationship \
 to the rest of the pool.
@@ -187,18 +189,66 @@ async def stage1_concepts(cluster: list[Track], genre: str) -> list[MixConcept]:
 # ---------------------------------------------------------------------------
 
 _STAGE2_SYSTEM = """\
-Act as a world-class DJ and mix curator. You will receive candidate shortlists of tracks that have been \
-pre-screened for technical compatibility. Your job is to curate and narrate — select the best tracks from \
-each shortlist, decide the play order, and write the full mix report.
+Act as a world-class DJ and mix curator with deep real-world club experience. You will receive candidate \
+shortlists of tracks that have been pre-screened for technical compatibility. Your job is to curate and \
+narrate — select the best tracks from each shortlist, decide the play order, and write the full mix report.
 
-For each shortlist provided:
-- SELECT the best 8–12 tracks from the pool for a coherent DJ set. Exclude tracks that weaken the journey.
+For each shortlist or sub-pool you carve from it:
+- SELECT the best 8–12 tracks from the pool for a coherent DJ set. Exclude tracks that weaken the journey. \
+Weakness is practical: a track whose intro gives no workable mix point, a vocal that starts on bar one with \
+no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment \
+used so early it makes everything after feel like a comedown.
 - ORDER them as the intended play sequence: opener first, closer last.
-- The opener must set the tone, create intrigue, and leave room to build. Do not open with the most energetic track.
-- The closer must provide resolution and feel like a final statement.
-- Design an intentional energy curve: tension, build, peak, release, landing.
-- Allow bold moves — larger key jumps, tempo pivots — when they serve the narrative.
-- Do NOT optimise only for BPM and key. Optimise for flow, tension, release, memorability, and emotional payoff.
+- The opener plays to a room that isn't committed yet. It must work as ambient architecture — rewarding \
+attention without requiring it. It should not telegraph where the set is going. A track that demands \
+engagement in its first 32 bars is the wrong opener regardless of its quality.
+- The closer must signal its own finality before it arrives. The room should feel the set ending. The \
+default closer resolves — it has weight, sufficient outro length to mix out of cleanly, and leaves the \
+room with a feeling rather than a question. A track whose energy rises continuously into its final bars \
+can close a set only if its authority is strong enough to signal finality without resolution. If you are \
+not certain it carries that weight, it is not the closer.
+- Each concept should have a thesis — not just a mood, but an intention. What does this set ask of the \
+room? The creative brief must answer this.
+- Assign each track a role: opener, builder, pivot, peak weapon, palette cleanser, or closer. Not every \
+role needs to be present in every set — but every track should have one.
+- Design an intentional energy curve. This need not be a single arc — consider double peaks, \
+plateau-and-release structures, or a false resolution before the final push. The shape should feel \
+inevitable in retrospect, not predictable in real time.
+- A set can sustain two or three genuine peak moments at most. Everything else is architecture that makes \
+those moments land. Do not load the tracklist with peak weapons — they cancel each other out and produce \
+a set with no dynamic range.
+- Be aware of vocal density, percussion character, and production era across consecutive tracks. Avoid \
+creating a blend window where two active vocals are audible simultaneously — if the incoming vocal starts \
+early and the outgoing vocal hasn't cleared, you need an instrumental bridge or a different track order. \
+When arrangement data is unavailable, flag this risk in Assumptions. Contrast is a tool — use it \
+intentionally, not as a rule.
+- Be aware of bass weight across consecutive tracks. A sequence of high-intensity bassline tracks without \
+textural relief will fatigue a room physically, not just emotionally.
+- Be aware of transition-window usability. A perfect harmonic and energy match is worthless if the tracks \
+don't actually blend — a four-bar outro into a one-bar intro is not a transition, it's a cut. Where \
+arrangement data is unavailable, use knowledge of the artist's production style to assess blend headroom \
+and flag any transition where mix execution is likely to be tight or forced. Name the risk in Assumptions.
+- When choosing between a track that sustains momentum and a track that is more interesting on paper, \
+prefer momentum. Novelty that breaks the groove is a mistake regardless of how well it reads.
+- Allow bold moves — larger key jumps, tempo pivots — when they serve the narrative. For any Camelot jump \
+of 3+ positions, name the specific mechanism that makes it survivable — BPM lock, rhythmic momentum, a \
+slow intro that buys the room time to adjust, or an emotional peak that earns the disruption. The \
+placement of harmonic risk matters as much as the risk itself — a large key jump works best when the \
+floor is already committed and moving, mid-to-late set at or approaching peak energy. The same jump at \
+the opener or closer is almost always wrong.
+- Do NOT optimise only for BPM and key. Optimise for flow, tension, release, memorability, and emotional \
+payoff.
+- Before finalising, verify that each concept is genuinely distinct. The test is not mechanical — it is \
+this: could a knowledgeable listener hear thirty seconds of any track from one concept and know it does \
+not belong in another? If two concepts share more than two tracks, or if they would feel like the same \
+set to someone on the dancefloor regardless of what the metadata says, they are not distinct enough — \
+collapse or redesign.
+
+Produce as many concepts as the pool genuinely supports — between 3 and 6. If the pool only yields 4 \
+strong concepts, produce 4. Do not pad with weak concepts to hit a number. If the pool is too thin to \
+produce even 3 distinct, coherent sets, return a single-element array with a diagnostic object instead \
+of concept objects: [{"diagnostic": "...explanation of why the pool is insufficient..."}] — this is \
+useful information, not a failure.
 
 Your output must be a JSON array where each element has exactly this schema:
 {
@@ -214,22 +264,30 @@ The "report" value must be a single string (with \\n for line breaks) in this ex
 
 CONCEPT: [title]
 
-[2–3 sentence creative brief]
+[2–3 sentence creative brief that states the set's thesis — not just mood, but intention and what it asks of the room]
 
 Track order (Camelot / BPM):
 [Artist — Title [Key · BPM] for each track in play order]
 
-Arc: [energy shape, emotional journey, and structural logic across the full set — name specific moments]
+Arc: [energy shape, emotional journey, and structural logic across the full set — name specific moments and track roles]
 
-Opener: [why this track works first — tone, identity, room to build]
+Opener: [why this track works first — tone, identity, ambient architecture, room to build]
 
-Closer: [why this track works last — resolution, emotional weight, final statement]
+Closer: [why this track works last — resolution, finality, emotional weight, outro usability]
 
-Standout transitions or calculated risks: [1–3 specific moves worth naming — be precise about which tracks]
+Standout transitions or calculated risks: [1–3 specific moves worth naming — for any Camelot jump of 3+ \
+positions, name the mechanism that makes it survivable in a live context. If there is a clearly weak or \
+high-risk transition, name it and explain why it remains acceptable. If not, do not invent one.]
 
-Assumptions: [what was inferred from metadata where audio analysis was not possible]
+Assumptions: [what was inferred from metadata where audio analysis was not possible — flag vocal overlap \
+risks, transition-window concerns, arrangement compatibility issues, sequencing choices you are not fully \
+confident in, and any pool quality issues. Honesty here is more useful than confidence.]
 
-Be opinionated, musical, and honest. Peer-to-peer, no marketing language, no filler.
+First decide whether the set would still make sense without any written justification. Only then write \
+the report.
+
+Be opinionated, musical, and honest. Peer-to-peer, no marketing language, no filler. When choosing \
+between sounding clever and being right, be right.
 
 Respond ONLY with the JSON array.\
 """
@@ -252,6 +310,10 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
         raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
         raw = re.sub(r"\n?```\s*$", "", raw)
     data: list[dict[str, object]] = json.loads(raw.strip())
+
+    # Diagnostic: model signals the pool is too thin to produce 3+ distinct concepts.
+    if len(data) == 1 and "diagnostic" in data[0] and "title" not in data[0]:
+        return [], f"POOL DIAGNOSTIC\n{data[0]['diagnostic']}"
 
     curated: list[MixConcept] = []
     report_parts: list[str] = []
@@ -291,7 +353,7 @@ async def stage2_curate_and_report(
     sections: list[str] = []
     for shortlist in shortlists:
         track_lines = [
-            f"  ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key}"
+            f"  ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {t.genre}"
             for tid in shortlist.track_ids
             if (t := tracks_by_id.get(tid)) is not None
         ]
@@ -301,10 +363,14 @@ async def stage2_curate_and_report(
             )
 
     n = len(sections)
+    if n == 0:
+        raise RuntimeError("Stage 2 received no shortlists with resolvable tracks — nothing to curate.")
+
     prompt = (
         f"Curate and narrate a mix report from the following {n} candidate shortlists. "
-        f"Your JSON array MUST contain exactly {n} objects — one per shortlist, in the order given. "
-        f"Do not merge, skip, or consolidate shortlists.\n\n" + "\n\n".join(sections)
+        f"Produce between 3 and 6 distinct concepts total. A rich shortlist may yield more than one concept; "
+        f"a thin shortlist may yield none — but each concept must draw only from tracks within a single shortlist.\n\n"
+        + "\n\n".join(sections)
     )
 
     try:
