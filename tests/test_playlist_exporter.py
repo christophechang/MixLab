@@ -359,6 +359,80 @@ def test_build_merged_xml_folder_node_contains_all_playlists(tmp_path: Path) -> 
     assert names == ["Set A", "Set B"]
 
 
+def test_build_merged_xml_unplayed_ids_adds_playlist(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _SAMPLE_XML)
+    raw = parse_raw_tracks(xml_path)
+    concepts = [_make_concept("Set A", ["101"])]
+
+    root = build_merged_xml(concepts, raw, unplayed_ids=["101", "102"])
+
+    assert root is not None
+    folder = root.find(".//PLAYLISTS/NODE/NODE[@Name='Generated Playlists']")
+    assert folder is not None
+    playlist_nodes = folder.findall("NODE")
+    assert len(playlist_nodes) == 2
+    names = [n.get("Name") for n in playlist_nodes]
+    assert "All Unplayed Tunes" in names
+
+
+def test_build_merged_xml_unplayed_ids_playlist_contains_all_tracks(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _SAMPLE_XML)
+    raw = parse_raw_tracks(xml_path)
+    concepts = [_make_concept("Set A", ["101"])]
+
+    root = build_merged_xml(concepts, raw, unplayed_ids=["101", "102"])
+
+    assert root is not None
+    unplayed_node = root.find(".//PLAYLISTS//NODE[@Name='All Unplayed Tunes']")
+    assert unplayed_node is not None
+    assert unplayed_node.get("Entries") == "2"
+    keys = [el.get("Key") for el in unplayed_node.findall("TRACK")]
+    assert set(keys) == {"101", "102"}
+
+
+def test_build_merged_xml_unplayed_ids_extra_tracks_added_to_collection(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _SAMPLE_XML)
+    raw = parse_raw_tracks(xml_path)
+    # Concept only uses 101; unplayed includes 102 as well.
+    concepts = [_make_concept("Set A", ["101"])]
+
+    root = build_merged_xml(concepts, raw, unplayed_ids=["101", "102"])
+
+    assert root is not None
+    collection = root.find("COLLECTION")
+    assert collection is not None
+    track_ids = {el.get("TrackID") for el in collection.findall("TRACK")}
+    assert track_ids == {"101", "102"}
+    assert collection.get("Entries") == "2"
+
+
+def test_build_merged_xml_unplayed_ids_ignores_unknown_track_ids(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _SAMPLE_XML)
+    raw = parse_raw_tracks(xml_path)
+    concepts = [_make_concept("Set A", ["101"])]
+
+    root = build_merged_xml(concepts, raw, unplayed_ids=["101", "999"])
+
+    assert root is not None
+    unplayed_node = root.find(".//PLAYLISTS//NODE[@Name='All Unplayed Tunes']")
+    assert unplayed_node is not None
+    keys = [el.get("Key") for el in unplayed_node.findall("TRACK")]
+    assert "999" not in keys
+    assert keys == ["101"]
+
+
+def test_build_merged_xml_no_unplayed_ids_omits_playlist(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _SAMPLE_XML)
+    raw = parse_raw_tracks(xml_path)
+    concepts = [_make_concept("Set A", ["101"])]
+
+    root = build_merged_xml(concepts, raw)
+
+    assert root is not None
+    unplayed_node = root.find(".//PLAYLISTS//NODE[@Name='All Unplayed Tunes']")
+    assert unplayed_node is None
+
+
 # ---------------------------------------------------------------------------
 # generate_merged_xml_bytes
 # ---------------------------------------------------------------------------

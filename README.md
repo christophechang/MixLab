@@ -7,10 +7,11 @@ AI-powered DJ crate assistant. Point it at your Rekordbox collection, pick a gen
 ## How it works
 
 1. Parses your exported Rekordbox XML collection
-2. Fetches your play history from your catalog API (if `CATALOG_API_URL` is set) and filters out already-played tracks
+2. If `CATALOG_API_URL` is set, fetches your play history and filters out already-played tracks; otherwise uses the full collection
 3. Prints a crate availability table (no LLM cost)
-4. If a genre is specified, clusters the unplayed tracks, runs them through an LLM cascade to generate mix concepts, then writes a full mix planning report via a second LLM call
-5. Sends the report to a Discord channel
+4. If a genre is specified, clusters the tracks, runs them through an LLM cascade to generate mix concepts, then writes a full mix planning report via a second LLM call
+5. Exports a Rekordbox-compatible XML file containing one playlist per concept plus an **All Unplayed Tunes** playlist with the full genre pool
+6. Sends the report and XML to a Discord channel
 
 ---
 
@@ -64,7 +65,7 @@ cp .env.example .env
 | `MIXLAB_DISCORD_CHANNEL_ID` | No | Target channel ID (preferred over name) |
 | `MIXLAB_DISCORD_CHANNEL` | No | Target channel name (default: `mix-lab`) |
 
-`ANTHROPIC_API_KEY` is the only required key. Without a catalog API URL, played-track exclusion is skipped and your full unplayed collection is used. Without a Discord token the report is printed to stdout only.
+`ANTHROPIC_API_KEY` is the only required key. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only.
 
 #### Catalog API
 
@@ -100,7 +101,17 @@ Prints unplayed vs total counts per genre, sorted by availability. Only the cata
 python -m mixlab --genre house
 ```
 
-Runs the full pipeline: parse → filter played → cluster → Stage 1 concepts → Stage 2 report → Discord.
+Runs the full pipeline: parse → filter played → cluster → Stage 1 concepts → Stage 2 report → Discord. A Rekordbox-compatible XML file is attached to the Discord message containing one playlist per concept plus an **All Unplayed Tunes** playlist with the full genre pool.
+
+To also write the XML to disk:
+
+```bash
+python -m mixlab --genre house --export-playlists
+# writes to output/playlists/rekordbox_export.xml
+
+python -m mixlab --genre house --export /path/to/dir
+# writes to /path/to/dir/rekordbox_export.xml
+```
 
 ### View cached genre counts from the last run (no API calls at all)
 
@@ -141,7 +152,7 @@ Run `python -m mixlab` first to see your availability counts — genres with the
 - Source: `import/rekordbox.xml` — read fresh on every run, never cached
 - Tracks missing BPM or Camelot key are excluded with a warning printed to stderr
 - SoundCloud tracks (Location starting with `file://localhostsoundcloud`) are excluded silently
-- Tracks in your catalog play history are excluded — fuzzy-matched on artist + title with unicode normalisation, dash normalisation, and feat. stripping
+- If `CATALOG_API_URL` is set, tracks in your catalog play history are excluded — fuzzy-matched on artist + title with unicode normalisation, dash normalisation, and feat. stripping; otherwise all tracks are treated as unplayed
 
 ### BPM correction
 

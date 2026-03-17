@@ -385,7 +385,7 @@ async def stage2_curate_and_report(
             )
         else:
             raw = await _call_anthropic_http(
-                stage2_key, "claude-sonnet-4-6", _STAGE2_SYSTEM, prompt, max_tokens=8192, timeout=300
+                stage2_key, "claude-sonnet-4-6", _STAGE2_SYSTEM, prompt, max_tokens=16000, timeout=300
             )
     except Exception as exc:
         raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc

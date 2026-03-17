@@ -124,8 +124,14 @@ def build_merged_xml(
     concepts: list[MixConcept],
     raw_tracks: dict[str, etree._Element],
     folder_name: str = "Generated Playlists",
+    unplayed_ids: list[str] | None = None,
 ) -> etree._Element | None:
-    """Build one DJ_PLAYLISTS XML tree with a shared COLLECTION and all concepts as playlists."""
+    """Build one DJ_PLAYLISTS XML tree with a shared COLLECTION and all concepts as playlists.
+
+    If unplayed_ids is provided, an 'All Unplayed Tunes' playlist is appended to the folder
+    containing all those tracks. Any tracks not already included via concepts are added to the
+    COLLECTION so that playlist references are valid.
+    """
     ordered_ids: list[str] = []
     seen_ids: set[str] = set()
     for concept in concepts:
@@ -134,23 +140,36 @@ def build_merged_xml(
                 ordered_ids.append(tid)
                 seen_ids.add(tid)
 
-    if not ordered_ids:
+    # Collect unplayed tracks: build the full playlist list and find extras not in any concept.
+    unplayed_playlist_ids: list[str] = []
+    extra_ids: list[str] = []
+    if unplayed_ids:
+        for tid in unplayed_ids:
+            if tid in raw_tracks:
+                unplayed_playlist_ids.append(tid)
+                if tid not in seen_ids:
+                    extra_ids.append(tid)
+                    seen_ids.add(tid)
+
+    all_ordered_ids = ordered_ids + extra_ids
+    if not all_ordered_ids:
         return None
 
-    unique_tracks = {tid: copy.deepcopy(raw_tracks[tid]) for tid in ordered_ids}
+    unique_tracks = {tid: copy.deepcopy(raw_tracks[tid]) for tid in all_ordered_ids}
 
     dj_playlists = etree.Element("DJ_PLAYLISTS", Version="1.0.0")
     etree.SubElement(dj_playlists, "PRODUCT", Name="rekordbox", Version="7.2.11", Company="AlphaTheta")
 
     collection = etree.SubElement(dj_playlists, "COLLECTION", Entries=str(len(unique_tracks)))
-    for tid in ordered_ids:
+    for tid in all_ordered_ids:
         collection.append(unique_tracks[tid])
 
     valid_concepts = [c for c in concepts if any(tid in unique_tracks for tid in c.track_ids)]
+    folder_count = len(valid_concepts) + (1 if unplayed_playlist_ids else 0)
 
     playlists_el = etree.SubElement(dj_playlists, "PLAYLISTS")
     root_node = etree.SubElement(playlists_el, "NODE", Type="0", Name="ROOT", Count="1")
-    folder_node = etree.SubElement(root_node, "NODE", Type="0", Name=folder_name, Count=str(len(valid_concepts)))
+    folder_node = etree.SubElement(root_node, "NODE", Type="0", Name=folder_name, Count=str(folder_count))
 
     for concept in valid_concepts:
         concept_track_ids = [tid for tid in concept.track_ids if tid in unique_tracks]
@@ -165,6 +184,18 @@ def build_merged_xml(
         for tid in concept_track_ids:
             etree.SubElement(playlist_node, "TRACK", Key=tid)
 
+    if unplayed_playlist_ids:
+        unplayed_node = etree.SubElement(
+            folder_node,
+            "NODE",
+            Name="All Unplayed Tunes",
+            Type="1",
+            KeyType="0",
+            Entries=str(len(unplayed_playlist_ids)),
+        )
+        for tid in unplayed_playlist_ids:
+            etree.SubElement(unplayed_node, "TRACK", Key=tid)
+
     return dj_playlists
 
 
@@ -172,8 +203,9 @@ def generate_merged_xml_bytes(
     concepts: list[MixConcept],
     raw_tracks: dict[str, etree._Element],
     folder_name: str = "Generated Playlists",
+    unplayed_ids: list[str] | None = None,
 ) -> bytes | None:
-    root = build_merged_xml(concepts, raw_tracks, folder_name)
+    root = build_merged_xml(concepts, raw_tracks, folder_name, unplayed_ids)
     if root is None:
         return None
     return bytes(etree.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=True))
@@ -184,8 +216,9 @@ def export_merged_xml(
     raw_tracks: dict[str, etree._Element],
     output_path: Path,
     folder_name: str = "Generated Playlists",
+    unplayed_ids: list[str] | None = None,
 ) -> Path | None:
-    root = build_merged_xml(concepts, raw_tracks, folder_name)
+    root = build_merged_xml(concepts, raw_tracks, folder_name, unplayed_ids)
     if root is None:
         return None
     output_path.parent.mkdir(parents=True, exist_ok=True)

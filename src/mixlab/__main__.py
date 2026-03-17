@@ -85,15 +85,16 @@ async def run(
     # 2. Fetch played tracks and filter.
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
     catalog_url = os.environ.get("CATALOG_API_URL", "")
-    if not catalog_url:
-        print("ERROR: CATALOG_API_URL is not set — cannot filter played tracks. Aborting.", file=sys.stderr)
-        sys.exit(1)
-    try:
-        played = await fetch_played_tracks(api_key, catalog_url)
-    except Exception as exc:
-        print(f"ERROR: Could not fetch played tracks — aborting: {exc}", file=sys.stderr)
-        sys.exit(1)
-    unplayed = filter_unplayed(tracks, played)
+    if catalog_url:
+        try:
+            played = await fetch_played_tracks(api_key, catalog_url)
+        except Exception as exc:
+            print(f"ERROR: Could not fetch played tracks — aborting: {exc}", file=sys.stderr)
+            sys.exit(1)
+        unplayed = filter_unplayed(tracks, played)
+    else:
+        print("No CATALOG_API_URL set — skipping played-track filter, using full collection.")
+        unplayed = list(tracks)
 
     # 3. Always print the availability table (deterministic, no LLM cost).
     counts, outlier_count, outlier_genres = _print_availability(tracks, unplayed)
@@ -159,13 +160,18 @@ async def run(
     raw_tracks_xml = parse_raw_tracks(_XML_PATH)
     today = datetime.date.today().isoformat()
     folder_name = f"Mix Lab - {genre} - {today}"
-    merged_bytes = generate_merged_xml_bytes(all_concepts, raw_tracks_xml, folder_name)
+    # All unplayed tracks scoped to this genre: cluster tracks + same-genre outliers.
+    genre_unplayed_track_ids = [t.track_id for cluster_tracks in clusters.values() for t in cluster_tracks]
+    genre_unplayed_track_ids += [t.track_id for t in genre_outliers]
+    merged_bytes = generate_merged_xml_bytes(all_concepts, raw_tracks_xml, folder_name, genre_unplayed_track_ids)
     xml_attachments: list[tuple[str, bytes]] = (
         [("rekordbox_export.xml", merged_bytes)] if merged_bytes is not None else []
     )
 
     if export_dir is not None:
-        out_path = export_merged_xml(all_concepts, raw_tracks_xml, export_dir / "rekordbox_export.xml", folder_name)
+        out_path = export_merged_xml(
+            all_concepts, raw_tracks_xml, export_dir / "rekordbox_export.xml", folder_name, genre_unplayed_track_ids
+        )
         if out_path is not None:
             print(f"Exported: {out_path}")
 
