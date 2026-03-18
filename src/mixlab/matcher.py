@@ -25,8 +25,8 @@ def normalise(text: str) -> str:
 
 
 def is_played(track: Track, played: list[PlayedTrack]) -> bool:
-    needle = normalise(track.artist + " " + track.title)
-    return any(normalise(p.artist + " " + p.title) == needle for p in played)
+    needle = normalise(track.artist) + " " + normalise(track.title)
+    return any(normalise(p.artist) + " " + normalise(p.title) == needle for p in played)
 
 
 def filter_unplayed(tracks: list[Track], played: list[PlayedTrack]) -> list[Track]:

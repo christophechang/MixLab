@@ -44,8 +44,17 @@ def test_normalise_feat_in_parens_preserves_remix() -> None:
 
 
 def test_is_played_matches_feat_in_parens_with_different_bracket_styles() -> None:
+    # Rekordbox: feat. in title parens; catalog: feat. stripped from title
     track = _track("Kraak & Smaak", "Sweet Time (feat. Izo FitzRoy) [Yuksek Remix]")
     played = [_played("Kraak & Smaak", "Sweet Time (Yuksek Remix)")]
+    assert is_played(track, played) is True
+
+
+def test_is_played_matches_feat_in_artist_field() -> None:
+    # Real catalog format: artist="Kraak & Smaak feat. Izo FitzRoy", title="Sweet Time (Yuksek Remix)"
+    # Rekordbox format:    artist="Kraak & Smaak",                   title="Sweet Time (feat. Izo FitzRoy) [Yuksek Remix]"
+    track = _track("Kraak & Smaak", "Sweet Time (feat. Izo FitzRoy) [Yuksek Remix]")
+    played = [_played("Kraak & Smaak feat. Izo FitzRoy", "Sweet Time (Yuksek Remix)")]
     assert is_played(track, played) is True
 
 
