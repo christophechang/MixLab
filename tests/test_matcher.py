@@ -35,6 +35,20 @@ def test_normalise_removes_feat_variants(feat_token: str) -> None:
     assert "guest" not in result
 
 
+def test_normalise_feat_in_parens_preserves_remix() -> None:
+    # Rekordbox stores "Sweet Time (feat. Izo FitzRoy) [Yuksek Remix]"
+    # Catalog may store "Sweet Time (Yuksek Remix)" — both must normalise identically.
+    xml_title = normalise("Kraak & Smaak Sweet Time (feat. Izo FitzRoy) [Yuksek Remix]")
+    catalog_title = normalise("Kraak & Smaak Sweet Time (Yuksek Remix)")
+    assert xml_title == catalog_title
+
+
+def test_is_played_matches_feat_in_parens_with_different_bracket_styles() -> None:
+    track = _track("Kraak & Smaak", "Sweet Time (feat. Izo FitzRoy) [Yuksek Remix]")
+    played = [_played("Kraak & Smaak", "Sweet Time (Yuksek Remix)")]
+    assert is_played(track, played) is True
+
+
 def test_is_played_returns_true_for_matched_track() -> None:
     track = _track("Calibre", "All Good")
     played = [_played("Calibre", "All Good")]

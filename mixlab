@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Thin wrapper — always uses the project venv regardless of which Python is active.
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$DIR/.venv/bin/python" -m mixlab "$@"

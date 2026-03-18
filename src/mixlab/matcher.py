@@ -5,7 +5,11 @@ import unicodedata
 
 from mixlab.models import PlayedTrack, Track
 
-_FEAT_RE = re.compile(r"\s+(?:feat\.|ft\.|featuring)\s+\S+(?:\s+\S+)*", re.IGNORECASE)
+_FEAT_RE = re.compile(
+    r"\s*[\(\[]\s*(?:feat\.|ft\.|featuring)[^\)\]]*[\)\]]"  # (feat. ...) or [feat. ...]
+    r"|\s+(?:feat\.|ft\.|featuring)\s+\S+(?:\s+\S+)*",  # bare feat. at end of string
+    re.IGNORECASE,
+)
 _PUNCT_RE = re.compile(r"[^\w\s-]")
 _DASH_RE = re.compile(r"[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]")
 

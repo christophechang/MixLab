@@ -25,6 +25,9 @@ dev = [
     "lxml-stubs",
 ]
 
+[project.scripts]
+mixlab = "mixlab.__main__:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

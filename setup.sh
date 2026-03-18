@@ -3,12 +3,12 @@ set -euo pipefail
 
 PYTHON=${PYTHON:-$(which python3.13 || which python3.12 || echo python3)}
 
-echo "==> Creating virtual environment..."
-"$PYTHON" -m venv venv
+echo "==> Creating virtual environment (.venv)..."
+"$PYTHON" -m venv .venv
 
-echo "==> Installing dependencies..."
-venv/bin/pip install --quiet --upgrade pip
-venv/bin/pip install --quiet .
+echo "==> Installing dependencies (editable + dev extras)..."
+.venv/bin/pip install --quiet --upgrade pip
+.venv/bin/pip install --quiet -e ".[dev]"
 
 echo "==> Creating import directory..."
 mkdir -p import
@@ -23,4 +23,4 @@ fi
 
 echo ""
 echo "Done. Run with:"
-echo "  cd $(pwd) && venv/bin/python -m mixlab --genre drum_and_bass"
+echo "  ./mixlab --genre house"
