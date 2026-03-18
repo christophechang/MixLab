@@ -3,28 +3,34 @@
   "description": "AI-powered DJ crate assistant. Reads a Rekordbox collection, filters played tracks, clusters by genre, and generates mix concepts via LLM.",
   "triggers": [
     {
-      "pattern": "^!mixlab$",
-      "command": "python -m mixlab",
-      "description": "Run full pipeline across all genres"
+      "pattern": "^!mixlab genres$",
+      "command": "./mixlab --genres",
+      "description": "Show cached genre availability from last run (no API calls)"
     },
     {
-      "pattern": "^!mixlab ([a-zA-Z &]+)$",
-      "command": "python -m mixlab --genre \"$1\"",
-      "description": "Run pipeline scoped to a single genre"
+      "pattern": "^!mixlab ([a-zA-Z_&]+)$",
+      "command": "./mixlab --genre \"$1\" --export-playlists",
+      "description": "Run pipeline scoped to a single genre (Anthropic Stage 2)"
     },
     {
-      "pattern": "^!mixlab ([a-zA-Z &]+) (\\d+)$",
-      "command": "python -m mixlab --genre \"$1\" --duration $2",
-      "description": "Run pipeline scoped to a genre with a target set duration"
+      "pattern": "^!mixlab ([a-zA-Z_&]+) minimax$",
+      "command": "./mixlab --genre \"$1\" --stage2-provider minimax --export-playlists",
+      "description": "Run pipeline for a genre using MiniMax for Stage 2 (cheaper)"
     },
     {
-      "pattern": "^!mixlab ([a-zA-Z_]+) minimax$",
-      "command": "python -m mixlab --genre \"$1\" --stage2-provider minimax",
-      "description": "Run pipeline for a genre using MiniMax M2.5 for Stage 2 curation"
+      "pattern": "^!mixlab ([a-zA-Z_&]+) (\\d+)$",
+      "command": "./mixlab --genre \"$1\" --duration $2 --export-playlists",
+      "description": "Run pipeline for a genre with a target set duration (minutes)"
+    },
+    {
+      "pattern": "^!mixlab ([a-zA-Z_&]+) (\\d+) minimax$",
+      "command": "./mixlab --genre \"$1\" --duration $2 --stage2-provider minimax --export-playlists",
+      "description": "Run pipeline for a genre with duration and MiniMax Stage 2"
     }
   ],
   "env": [
     "CHANGSTA_API_KEY",
+    "CATALOG_API_URL",
     "DISCORD_BOT_TOKEN",
     "DISCORD_GUILD_ID",
     "MIXLAB_DISCORD_CHANNEL",
@@ -32,9 +38,7 @@
     "GROQ_API_KEY",
     "GEMINI_API_KEY",
     "OPENROUTER_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "STAGE2_PROVIDER"
+    "ANTHROPIC_API_KEY"
   ],
-  "working_directory": ".",
-  "python_path": "src"
+  "working_directory": "/Users/christophechang/OpenClaw/Automations/MixLab"
 }
