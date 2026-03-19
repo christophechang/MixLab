@@ -103,6 +103,37 @@ MixLab reads Rekordbox track colours and maps them to energy tiers passed to the
 
 Colour-code your tracks in Rekordbox manually to give the AI an additional signal beyond the Mixed In Key energy score. Mixed In Key can also set colours automatically based on energy level if you configure it to do so.
 
+#### The `/* tags */` block — an example tagging setup
+
+MixLab reads whatever is inside the `/* ... */` block in the Comments field and passes it verbatim to the AI as track descriptors. There is no fixed schema — it is plain text and you can structure it however you like. The AI will reason from whatever you put there.
+
+The following is the tagging structure used in this project, shared as a concrete example rather than a prescription.
+
+**Tagging layers**
+
+Tracks are described across four independent layers:
+
+| Layer | Where | What it captures |
+|---|---|---|
+| Genre | Rekordbox Genre field | Primary genre (House, Drum & Bass, etc.) |
+| Playlists | Rekordbox Playlists | Tracks used in a SoundCloud mix — "battle-tested" markers |
+| Energy | MIK energy score in Comments | Intensity level on a 1–8 scale |
+| Mood | `/* */` block in Comments | Vibe, character, and feel of the track |
+
+**Mood tag vocabulary**
+
+The mood tags in this collection are a vibe-based layer that sits on top of genre and energy — describing not what a track *is*, but what feeling it brings to a mix:
+
+`acid` · `aggressive` · `big` · `brooding` · `builder` · `carnival` · `dark` · `dirty` · `driving` · `druggy` · `dreamy` · `emotional` · `energetic` · `funky` · `grimy` · `happy` · `heavy` · `in the groove` · `Latino` · `melancholic` · `old skool` · `raga` · `rave` · `soulful` · `street` · `trippy` · `vocal`
+
+A typical Comments field with this setup looks like:
+
+```
+8A - Energy 7 /* Drum & Bass / dark / driving */
+```
+
+MIK writes the key and energy score; the `/* */` block is added manually in Rekordbox. You can use as many or as few tags as feel useful — the AI treats them as hints, not hard rules.
+
 #### Record label (optional)
 
 The `Label` field in Rekordbox is passed to the AI as context. Useful if your collection is tagged by label and you want the AI to reason about label character (e.g. Defected, Nervous, Peacefrog).
