@@ -11,7 +11,6 @@ class Track(BaseModel):
     camelot_key: str
     genre: str
     energy: int | None = None
-    colour: str | None = None
     label: str = ""
     play_count: int = 0
     tags: list[str] = Field(default_factory=list)

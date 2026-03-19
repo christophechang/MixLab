@@ -248,7 +248,7 @@ the opener or closer is almost always wrong.
 - Do NOT optimise only for BPM and key. Optimise for flow, tension, release, memorability, and emotional \
 payoff.
 - Some tracks include supplementary metadata when the DJ has set it: `energy:N/8` (Mixed in Key automated \
-score, 0=lowest, 8=highest), a colour tier (`Red`=high energy, `Orange`=mid, `Green`=chill), `unplayed` \
+score, 0=lowest, 8=highest), `unplayed` \
 (never played live — available for debut), a record label, and comma-separated tags that mix Genre, Mood, \
 and Subgenre descriptors (e.g. `Breakbeat, Acid, Dark, Driving`). Use these when present to inform the \
 energy arc, track character, and narrative — but many tracks will be missing some or all of this data. \
@@ -402,8 +402,6 @@ async def stage2_curate_and_report(
             extras: list[str] = []
             if t.energy is not None:
                 extras.append(f"energy:{t.energy}/8")
-            if t.colour:
-                extras.append(t.colour)
             if t.play_count == 0:
                 extras.append("unplayed")
             if t.label:

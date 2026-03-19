@@ -118,7 +118,6 @@ def _make_track(
     camelot_key: str = "8A",
     genre: str = "Drum & Bass",
     energy: int | None = None,
-    colour: str | None = None,
     label: str = "",
     play_count: int = 0,
     tags: list[str] | None = None,
@@ -131,7 +130,6 @@ def _make_track(
         camelot_key=camelot_key,
         genre=genre,
         energy=energy,
-        colour=colour,
         label=label,
         play_count=play_count,
         tags=tags or [],
@@ -216,20 +214,6 @@ def test_parse_collection_energy_is_none_when_comments_empty(tmp_path: Path) -> 
     by_id = {t.track_id: t for t in tracks}
     assert by_id["12"].energy is None
 
-
-def test_parse_collection_extracts_colour(tmp_path: Path) -> None:
-    xml_path = _write_xml(tmp_path, _ENRICHED_XML)
-    tracks = parse_collection(xml_path)
-    by_id = {t.track_id: t for t in tracks}
-    assert by_id["10"].colour == "Red"
-    assert by_id["11"].colour == "Orange"
-
-
-def test_parse_collection_colour_is_none_for_unknown_hex(tmp_path: Path) -> None:
-    xml_path = _write_xml(tmp_path, _ENRICHED_XML)
-    tracks = parse_collection(xml_path)
-    by_id = {t.track_id: t for t in tracks}
-    assert by_id["13"].colour is None
 
 
 def test_parse_collection_extracts_label_and_playcount(tmp_path: Path) -> None:

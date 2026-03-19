@@ -18,16 +18,6 @@ def _parse_mik_energy(comments: str) -> int | None:
     return int(m.group(1))
 
 
-_COLOUR_TO_NAME: dict[str, str] = {
-    "0XFF0000": "Red",
-    "0XFFA500": "Orange",
-    "0X00FF00": "Green",
-}
-
-
-def _colour_to_name(raw: str) -> str | None:
-    return _COLOUR_TO_NAME.get(raw.strip().upper()) if raw else None
-
 
 _TAGS_RE: re.Pattern[str] = re.compile(r"/\*\s*(.+?)\s*\*/")
 
@@ -91,7 +81,6 @@ def parse_collection(xml_path: Path) -> list[Track]:
                 camelot_key=key_raw,
                 genre=genre,
                 energy=_parse_mik_energy(comments),
-                colour=_colour_to_name(element.get("Colour", "")),
                 label=element.get("Label", ""),
                 play_count=int(play_count_raw) if play_count_raw.isdigit() else 0,
                 tags=_parse_tags(comments),
