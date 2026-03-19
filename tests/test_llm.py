@@ -9,7 +9,7 @@ from httpx import Response
 from mixlab.models import MixConcept, Track
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-_MINIMAX_URL = "https://api.minimaxi.chat/v1/chat/completions"
+_MINIMAX_URL = "https://api.minimax.io/v1/text/chatcompletion_v2"
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
@@ -205,6 +205,7 @@ async def test_stage2_raises_loudly_on_failure(monkeypatch: pytest.MonkeyPatch) 
     from mixlab.llm import stage2_curate_and_report
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "bad-key")
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
     respx.post(_ANTHROPIC_URL).mock(return_value=Response(401, json={"error": "unauthorized"}))
 
     shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1"])]
@@ -212,6 +213,32 @@ async def test_stage2_raises_loudly_on_failure(monkeypatch: pytest.MonkeyPatch) 
 
     with pytest.raises(RuntimeError):
         await stage2_curate_and_report(shortlists, tracks_by_id)
+
+
+@respx.mock
+async def test_stage2_falls_back_to_minimax_on_anthropic_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "bad-key")
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-key")
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(402, json={"error": "credit_limit"}))
+    respx.post(_MINIMAX_URL).mock(
+        return_value=Response(200, json={"choices": [{"message": {"content": _curated_payload()}}]})
+    )
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(
+            track_id=str(i), artist=f"Artist {i}", title=f"Title {i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass"
+        )
+        for i in range(1, 5)
+    }
+
+    concepts, report = await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    assert len(concepts) == 1
+    assert concepts[0].title == "Dark Rollers"
+    assert "MiniMax M2.7 (Anthropic fallback)" in report
 
 
 async def test_stage2_raises_if_key_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -251,7 +278,7 @@ async def test_stage2_uses_minimax_when_stage2_provider_set(monkeypatch: pytest.
     assert len(concepts) == 1
     assert concepts[0].title == "Dark Rollers"
     assert "CONCEPT: Dark Rollers" in report
-    assert "MiniMax M2.5" in report
+    assert "MiniMax M2.7" in report
 
 
 async def test_stage2_raises_if_minimax_key_missing_when_provider_set(monkeypatch: pytest.MonkeyPatch) -> None:

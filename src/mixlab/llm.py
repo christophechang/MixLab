@@ -14,7 +14,7 @@ _MAX_TRACKS_PER_CALL = 40
 _MIN_SHORTLIST_TRACKS = 8  # Stage 1: minimum candidates per pool
 _MIN_CONCEPT_TRACKS = 4  # Stage 2: minimum tracks in a final curated set
 
-# Strip inline thinking blocks emitted by reasoning models (e.g. MiniMax M2.5).
+# Strip inline thinking blocks emitted by reasoning models (e.g. MiniMax M2.7).
 _THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
 
 
@@ -121,7 +121,9 @@ async def _try_minimax(prompt: str) -> str | None:
     key = os.environ.get("MINIMAX_API_KEY")
     if not key:
         return None
-    return await _call_openai_compat("https://api.minimaxi.chat", key, "MiniMax-M2.5", prompt, timeout=240)
+    return await _call_openai_compat(
+        "https://api.minimax.io/v1", key, "MiniMax-M2.7", prompt, path="/text/chatcompletion_v2", timeout=240
+    )
 
 
 async def _try_groq(prompt: str) -> str | None:
@@ -158,7 +160,7 @@ async def _try_anthropic(prompt: str) -> str | None:
     return await _call_anthropic_http(key, "claude-sonnet-4-6", _STAGE1_SYSTEM, prompt)
 
 
-_CASCADE = [_try_groq, _try_gemini, _try_openrouter, _try_minimax, _try_anthropic]
+_CASCADE = [_try_minimax, _try_groq, _try_gemini, _try_openrouter, _try_anthropic]
 
 
 async def _call_stage1_once(tracks: list[Track], genre: str) -> list[MixConcept]:
@@ -383,7 +385,7 @@ async def stage2_curate_and_report(
         stage2_key = os.environ.get("MINIMAX_API_KEY")
         if not stage2_key:
             raise RuntimeError("STAGE2_PROVIDER=minimax but MINIMAX_API_KEY is not set.")
-        stage2_model_display = "MiniMax M2.5"
+        stage2_model_display = "MiniMax M2.7"
     else:
         stage2_key = os.environ.get("ANTHROPIC_API_KEY")
         if not stage2_key:
@@ -428,22 +430,48 @@ async def stage2_curate_and_report(
         + "\n\n".join(sections)
     )
 
-    try:
-        if use_minimax:
+    raw: str
+    if use_minimax:
+        try:
             raw = await _call_openai_compat(
-                "https://api.minimaxi.chat",
+                "https://api.minimax.io/v1",
                 stage2_key,
-                "MiniMax-M2.5",
+                "MiniMax-M2.7",
                 prompt,
+                path="/text/chatcompletion_v2",
                 timeout=300,
                 system=_STAGE2_SYSTEM,
             )
-        else:
+        except Exception as exc:
+            raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc
+    else:
+        try:
             raw = await _call_anthropic_http(
                 stage2_key, "claude-sonnet-4-6", _STAGE2_SYSTEM, prompt, max_tokens=32000, timeout=600
             )
-    except Exception as exc:
-        raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc
+        except Exception as anthropic_exc:
+            print(
+                f"Stage 2 Anthropic failed ({type(anthropic_exc).__name__}: {anthropic_exc}), trying MiniMax M2.7 fallback...",
+                file=sys.stderr,
+            )
+            minimax_key = os.environ.get("MINIMAX_API_KEY")
+            if not minimax_key:
+                raise RuntimeError(f"Stage 2 curation failed: {anthropic_exc}") from anthropic_exc
+            try:
+                raw = await _call_openai_compat(
+                    "https://api.minimax.io/v1",
+                    minimax_key,
+                    "MiniMax-M2.7",
+                    prompt,
+                    path="/text/chatcompletion_v2",
+                    timeout=300,
+                    system=_STAGE2_SYSTEM,
+                )
+            except Exception as minimax_exc:
+                raise RuntimeError(
+                    f"Stage 2 curation failed (Anthropic and MiniMax both failed): {minimax_exc}"
+                ) from minimax_exc
+            stage2_model_display = "MiniMax M2.7 (Anthropic fallback)"
 
     valid_ids = set(tracks_by_id.keys())
     curated, report = _parse_curated_concepts(raw, valid_ids)
