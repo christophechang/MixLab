@@ -331,6 +331,17 @@ def test_parse_curated_concepts_handles_markdown_fences() -> None:
     assert len(concepts) == 1
 
 
+def test_parse_curated_concepts_repairs_literal_newlines_in_strings() -> None:
+    from mixlab.llm import _parse_curated_concepts
+
+    # Simulate model outputting literal newlines inside a JSON string value.
+    broken = '[{"title":"T","mood":"m","track_ids":["1","2","3","4"],"report":"line one\nline two\nline three"}]'
+    concepts, report = _parse_curated_concepts(broken, {"1", "2", "3", "4"})
+    assert len(concepts) == 1
+    assert "line one" in report
+    assert "line two" in report
+
+
 # ---------------------------------------------------------------------------
 # Shortfall warning
 # ---------------------------------------------------------------------------

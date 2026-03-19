@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Track(BaseModel):
@@ -10,6 +10,11 @@ class Track(BaseModel):
     bpm: float
     camelot_key: str
     genre: str
+    energy: int | None = None
+    colour: str | None = None
+    label: str = ""
+    play_count: int = 0
+    tags: list[str] = Field(default_factory=list)
 
 
 class PlayedTrack(BaseModel):

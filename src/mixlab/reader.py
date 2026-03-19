@@ -1,11 +1,42 @@
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
 from lxml import etree
 
 from mixlab.models import Track
+
+_MIK_ENERGY_RE: re.Pattern[str] = re.compile(r"\bEnergy\s+(\d+)", re.IGNORECASE)
+
+
+def _parse_mik_energy(comments: str) -> int | None:
+    m = _MIK_ENERGY_RE.search(comments)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+_COLOUR_TO_NAME: dict[str, str] = {
+    "0XFF0000": "Red",
+    "0XFFA500": "Orange",
+    "0X00FF00": "Green",
+}
+
+
+def _colour_to_name(raw: str) -> str | None:
+    return _COLOUR_TO_NAME.get(raw.strip().upper()) if raw else None
+
+
+_TAGS_RE: re.Pattern[str] = re.compile(r"/\*\s*(.+?)\s*\*/")
+
+
+def _parse_tags(comments: str) -> list[str]:
+    m = _TAGS_RE.search(comments)
+    if not m:
+        return []
+    return [t.strip() for t in m.group(1).split("/") if t.strip()]
 
 
 def parse_collection(xml_path: Path) -> list[Track]:
@@ -49,6 +80,8 @@ def parse_collection(xml_path: Path) -> list[Track]:
             excluded += 1
             continue
 
+        comments = element.get("Comments", "")
+        play_count_raw = element.get("PlayCount", "0")
         tracks.append(
             Track(
                 track_id=track_id,
@@ -57,6 +90,11 @@ def parse_collection(xml_path: Path) -> list[Track]:
                 bpm=float(bpm_raw),
                 camelot_key=key_raw,
                 genre=genre,
+                energy=_parse_mik_energy(comments),
+                colour=_colour_to_name(element.get("Colour", "")),
+                label=element.get("Label", ""),
+                play_count=int(play_count_raw) if play_count_raw.isdigit() else 0,
+                tags=_parse_tags(comments),
             )
         )
 

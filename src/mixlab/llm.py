@@ -44,13 +44,20 @@ to the rest of the pool.
 
 Give each shortlist a rough descriptive title (e.g. "Deep 122 BPM / 4A–7A Pool") and a one-line sonic mood.
 
+Some tracks include supplementary metadata: `energy:N/8` is a Mixed in Key automated score (0=lowest, 8=highest) and can help signal intensity. Treat it as a useful hint when present — not all tracks will have it, and its absence says nothing about the track's quality or suitability.
+
 Respond ONLY with a JSON array matching this schema:
 [{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]\
 """
 
 
 def _tracks_to_text(tracks: list[Track]) -> str:
-    lines = [f"ID:{t.track_id} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key}" for t in tracks]
+    lines = []
+    for t in tracks:
+        line = f"ID:{t.track_id} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key}"
+        if t.energy is not None:
+            line += f" | energy:{t.energy}/5"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -114,7 +121,7 @@ async def _try_minimax(prompt: str) -> str | None:
     key = os.environ.get("MINIMAX_API_KEY")
     if not key:
         return None
-    return await _call_openai_compat("https://api.minimaxi.chat", key, "MiniMax-M2.1", prompt, timeout=120)
+    return await _call_openai_compat("https://api.minimaxi.chat", key, "MiniMax-M2.5", prompt, timeout=240)
 
 
 async def _try_groq(prompt: str) -> str | None:
@@ -151,7 +158,7 @@ async def _try_anthropic(prompt: str) -> str | None:
     return await _call_anthropic_http(key, "claude-sonnet-4-6", _STAGE1_SYSTEM, prompt)
 
 
-_CASCADE = [_try_minimax, _try_groq, _try_gemini, _try_openrouter, _try_anthropic]
+_CASCADE = [_try_groq, _try_gemini, _try_openrouter, _try_minimax, _try_anthropic]
 
 
 async def _call_stage1_once(tracks: list[Track], genre: str) -> list[MixConcept]:
@@ -238,6 +245,13 @@ floor is already committed and moving, mid-to-late set at or approaching peak en
 the opener or closer is almost always wrong.
 - Do NOT optimise only for BPM and key. Optimise for flow, tension, release, memorability, and emotional \
 payoff.
+- Some tracks include supplementary metadata when the DJ has set it: `energy:N/8` (Mixed in Key automated \
+score, 0=lowest, 8=highest), a colour tier (`Red`=high energy, `Orange`=mid, `Green`=chill), `unplayed` \
+(never played live — available for debut), a record label, and comma-separated tags that mix Genre, Mood, \
+and Subgenre descriptors (e.g. `Breakbeat, Acid, Dark, Driving`). Use these when present to inform the \
+energy arc, track character, and narrative — but many tracks will be missing some or all of this data. \
+Absence of metadata is not a verdict on quality; reason from BPM, key, genre, and artist knowledge when \
+supplementary data is unavailable.
 - Before finalising, verify that each concept is genuinely distinct. The test is not mechanical — it is \
 this: could a knowledgeable listener hear thirty seconds of any track from one concept and know it does \
 not belong in another? If two concepts share more than two tracks, or if they would feel like the same \
@@ -267,21 +281,19 @@ CONCEPT: [title]
 [2–3 sentence creative brief that states the set's thesis — not just mood, but intention and what it asks of the room]
 
 Track order (Camelot / BPM):
-[Artist — Title [Key · BPM] for each track in play order]
+[Artist — Title [Key · BPM] for each track in play order, one track per line]
 
-Arc: [energy shape, emotional journey, and structural logic across the full set — name specific moments and track roles]
+Arc: [One sentence describing the overall energy shape and structural logic of the set.]
+
+[Then one paragraph per track in play order. Each paragraph: Artist — Title (role, Key, BPM) — what it does at this point in the set, why it is placed here, and how it connects to the next track. Separate each paragraph with a blank line.]
 
 Opener: [why this track works first — tone, identity, ambient architecture, room to build]
 
 Closer: [why this track works last — resolution, finality, emotional weight, outro usability]
 
-Standout transitions or calculated risks: [1–3 specific moves worth naming — for any Camelot jump of 3+ \
-positions, name the mechanism that makes it survivable in a live context. If there is a clearly weak or \
-high-risk transition, name it and explain why it remains acceptable. If not, do not invent one.]
+Standout transitions or calculated risks: [One item per transition worth naming, each on its own paragraph separated by a blank line. For any Camelot jump of 3+ positions, name the mechanism that makes it survivable in a live context. If there is a clearly weak or high-risk transition, name it and explain why it remains acceptable. If there are no notable transitions, do not invent one.]
 
-Assumptions: [what was inferred from metadata where audio analysis was not possible — flag vocal overlap \
-risks, transition-window concerns, arrangement compatibility issues, sequencing choices you are not fully \
-confident in, and any pool quality issues. Honesty here is more useful than confidence.]
+Assumptions: [One assumption per paragraph, separated by blank lines. Flag vocal overlap risks, transition-window concerns, arrangement compatibility issues, sequencing choices you are not fully confident in, and pool quality issues. Honesty here is more useful than confidence.]
 
 First decide whether the set would still make sense without any written justification. Only then write \
 the report.
@@ -304,12 +316,40 @@ def _shortfall_warning(concept: MixConcept, genre: str) -> str | None:
     return None
 
 
+def _fix_json_strings(raw: str) -> str:
+    """Escape literal newlines and carriage returns inside JSON string values."""
+    result: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in raw:
+        if escaped:
+            result.append(ch)
+            escaped = False
+        elif ch == "\\":
+            result.append(ch)
+            escaped = True
+        elif ch == '"':
+            result.append(ch)
+            in_string = not in_string
+        elif in_string and ch == "\n":
+            result.append("\\n")
+        elif in_string and ch == "\r":
+            result.append("\\r")
+        else:
+            result.append(ch)
+    return "".join(result)
+
+
 def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConcept], str]:
     raw = raw.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
         raw = re.sub(r"\n?```\s*$", "", raw)
-    data: list[dict[str, object]] = json.loads(raw.strip())
+    raw = raw.strip()
+    try:
+        data: list[dict[str, object]] = json.loads(raw)
+    except json.JSONDecodeError:
+        data = json.loads(_fix_json_strings(raw))
 
     # Diagnostic: model signals the pool is too thin to produce 3+ distinct concepts.
     if len(data) == 1 and "diagnostic" in data[0] and "title" not in data[0]:
@@ -352,11 +392,26 @@ async def stage2_curate_and_report(
 
     sections: list[str] = []
     for shortlist in shortlists:
-        track_lines = [
-            f"  ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {t.genre}"
-            for tid in shortlist.track_ids
-            if (t := tracks_by_id.get(tid)) is not None
-        ]
+        track_lines = []
+        for tid in shortlist.track_ids:
+            t = tracks_by_id.get(tid)
+            if t is None:
+                continue
+            extras: list[str] = []
+            if t.energy is not None:
+                extras.append(f"energy:{t.energy}/8")
+            if t.colour:
+                extras.append(t.colour)
+            if t.play_count == 0:
+                extras.append("unplayed")
+            if t.label:
+                extras.append(t.label)
+            if t.tags:
+                extras.append(", ".join(t.tags))
+            extra_str = " | " + " | ".join(extras) if extras else ""
+            track_lines.append(
+                f"  ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {t.genre}{extra_str}"
+            )
         if track_lines:
             sections.append(
                 f"Shortlist: {shortlist.title}\nCharacter: {shortlist.mood}\nCandidates:\n" + "\n".join(track_lines)
@@ -385,7 +440,7 @@ async def stage2_curate_and_report(
             )
         else:
             raw = await _call_anthropic_http(
-                stage2_key, "claude-sonnet-4-6", _STAGE2_SYSTEM, prompt, max_tokens=16000, timeout=300
+                stage2_key, "claude-sonnet-4-6", _STAGE2_SYSTEM, prompt, max_tokens=32000, timeout=600
             )
     except Exception as exc:
         raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc

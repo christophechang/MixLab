@@ -2,6 +2,8 @@
 
 AI-powered DJ crate assistant. Point it at your Rekordbox collection, pick a genre, and get a set of ready-to-use mix concepts with Camelot-ordered track listings — delivered to Discord.
 
+For background on why this was built and how it works in practice, read the [MixLab case study](https://www.soltechconsulting.co.uk/case-studies/mixlab).
+
 ---
 
 ## How it works
@@ -20,7 +22,7 @@ AI-powered DJ crate assistant. Point it at your Rekordbox collection, pick a gen
 - Python 3.12+
 - A Rekordbox XML export (see [Setup](#4-export-your-rekordbox-collection))
 - `ANTHROPIC_API_KEY` — required for Stage 2 report generation
-- At least one Stage 1 LLM key (MiniMax, Groq, Gemini, OpenRouter, or Anthropic)
+- At least one Stage 1 LLM key (Groq, Gemini, OpenRouter, MiniMax, or Anthropic)
 - A catalog API URL + key (optional — for filtering already-played tracks)
 - A Discord bot token (optional — report prints to stdout without it)
 
@@ -28,22 +30,17 @@ AI-powered DJ crate assistant. Point it at your Rekordbox collection, pick a gen
 
 ## Setup
 
-### 1. Clone and create a virtual environment
+### 1. Clone and run setup
 
 ```bash
 git clone <repo-url>
 cd MixLab
-python3.12 -m venv .venv
-source .venv/bin/activate
+./setup.sh
 ```
 
-### 2. Install dependencies
+`setup.sh` creates the virtual environment, installs all dependencies, and copies `.env.example` to `.env` if it doesn't already exist.
 
-```bash
-pip install -e ".[dev]"
-```
-
-### 3. Configure environment variables
+### 2. Configure environment variables
 
 Copy `.env.example` to `.env` and fill in your keys:
 
@@ -56,10 +53,10 @@ cp .env.example .env
 | `ANTHROPIC_API_KEY` | Yes | Stage 2 report generation (Claude Sonnet) |
 | `CATALOG_API_URL` | No | Base URL of your catalog/play-history API |
 | `CHANGSTA_API_KEY` | No | Bearer token for `CATALOG_API_URL` (if your API requires auth) |
-| `MINIMAX_API_KEY` | No | Stage 1 provider (tried first) |
-| `GROQ_API_KEY` | No | Stage 1 provider (fallback) |
+| `GROQ_API_KEY` | No | Stage 1 provider (tried first) |
 | `GEMINI_API_KEY` | No | Stage 1 provider (fallback) |
 | `OPENROUTER_API_KEY` | No | Stage 1 provider (fallback) |
+| `MINIMAX_API_KEY` | No | Stage 1 provider (last fallback) + Stage 2 alternative (`--stage2-provider minimax`) |
 | `DISCORD_BOT_TOKEN` | No | Discord delivery |
 | `DISCORD_GUILD_ID` | No | Discord server ID |
 | `MIXLAB_DISCORD_CHANNEL_ID` | No | Target channel ID (preferred over name) |
@@ -67,9 +64,56 @@ cp .env.example .env
 
 `ANTHROPIC_API_KEY` is the only required key. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only.
 
-#### Catalog API
+#### Catalog API (optional)
 
-The catalog API MixLab integrates with for play-history filtering is also open source: [soundcloud-ai-mix-recommender-api](https://github.com/christophechang/soundcloud-ai-mix-recommender-api). Set `CATALOG_API_URL` to your deployed instance to enable played-track exclusion.
+The catalog API is used to fetch your play history and exclude already-played tracks from recommendations. Without it, every track in your collection is treated as unplayed — you still get full mix concepts, but the tool cannot distinguish tracks you've played before from ones you haven't. The unplayed count in the crate table will equal the total collection count.
+
+The catalog API MixLab integrates with is also open source: [soundcloud-ai-mix-recommender-api](https://github.com/christophechang/soundcloud-ai-mix-recommender-api). Set `CATALOG_API_URL` to your deployed instance to enable played-track exclusion.
+
+### 3. Enrich your Rekordbox collection (recommended)
+
+MixLab works from your Rekordbox XML export. The core fields — BPM and Camelot key — are required and must be set for every track. The following enrichment layers are optional but significantly improve the quality of the AI-generated concepts.
+
+#### Camelot keys (required)
+
+Every track must have a Camelot key set in Rekordbox (`Tonality` field). The easiest way to populate these at scale is **Mixed In Key** — it analyses your files and writes Camelot keys directly into Rekordbox.
+
+#### Mixed In Key — energy scores and tags (strongly recommended)
+
+[Mixed In Key](https://mixedinkey.com) writes two additional pieces of data into the Rekordbox `Comments` field that MixLab reads:
+
+| Data | Format in Comments | What MixLab does with it |
+|---|---|---|
+| Energy score | `Energy 7` (1–8 scale) | Passed to the AI to inform the energy arc and peak placement |
+| Genre/mood tags | `/* Deep House / Soulful / Melodic */` | Passed to the AI as track character descriptors |
+
+To populate these, run Mixed In Key on your collection, enable **Write to Rekordbox**, and let it analyse. After analysis completes, re-export your Rekordbox XML.
+
+Tracks without energy scores or tags still work — MixLab reasons from BPM, key, genre, and artist knowledge when supplementary data is absent.
+
+#### Track colours (optional)
+
+MixLab reads Rekordbox track colours and maps them to energy tiers passed to the AI:
+
+| Colour | Tier | Meaning |
+|---|---|---|
+| Red | High energy | Peak / floor-filling track |
+| Orange | Mid energy | Builder or transition track |
+| Green | Chill | Opener, palette cleanser, or warm-up |
+
+Colour-code your tracks in Rekordbox manually to give the AI an additional signal beyond the Mixed In Key energy score. Mixed In Key can also set colours automatically based on energy level if you configure it to do so.
+
+#### Record label (optional)
+
+The `Label` field in Rekordbox is passed to the AI as context. Useful if your collection is tagged by label and you want the AI to reason about label character (e.g. Defected, Nervous, Peacefrog).
+
+#### Summary — what to do before your first run
+
+1. Analyse your collection with Mixed In Key and write Camelot keys, energy scores, and tags back to Rekordbox
+2. Optionally colour-code tracks in Rekordbox (or let Mixed In Key do it by energy level)
+3. Export your collection: **File → Export Collection in xml format**
+4. Move the file to `import/rekordbox.xml`
+5. Re-export after any library changes (new tracks, updated tags)
 
 ### 4. Export your Rekordbox collection
 
@@ -90,15 +134,15 @@ In Rekordbox:
 ### View crate availability (no LLM calls)
 
 ```bash
-python -m mixlab
+./mixlab
 ```
 
-Prints unplayed vs total counts per genre, sorted by availability. Only the catalog API is called (if configured).
+Prints unplayed vs total counts per genre, sorted by availability. Only the catalog API is called (if configured). Without a catalog API, shows total collection counts.
 
 ### Generate a mix report for a specific genre
 
 ```bash
-python -m mixlab --genre house
+./mixlab --genre house
 ```
 
 Runs the full pipeline: parse → filter played → cluster → Stage 1 concepts → Stage 2 report → Discord. A Rekordbox-compatible XML file is attached to the Discord message containing one playlist per concept plus an **All Unplayed Tunes** playlist with the full genre pool.
@@ -106,17 +150,17 @@ Runs the full pipeline: parse → filter played → cluster → Stage 1 concepts
 To also write the XML to disk:
 
 ```bash
-python -m mixlab --genre house --export-playlists
+./mixlab --genre house --export-playlists
 # writes to output/playlists/rekordbox_export.xml
 
-python -m mixlab --genre house --export /path/to/dir
+./mixlab --genre house --export /path/to/dir
 # writes to /path/to/dir/rekordbox_export.xml
 ```
 
 ### View cached genre counts from the last run (no API calls at all)
 
 ```bash
-python -m mixlab --genres
+./mixlab --genres
 ```
 
 ---
@@ -141,7 +185,7 @@ Pass the label (left column) to `--genre`. The right column shows the Rekordbox 
 
 You can also pass a Rekordbox genre tag directly (case-insensitive), e.g. `--genre "Deep House"`.
 
-Run `python -m mixlab` first to see your availability counts — genres with the most unplayed tracks produce the richest concepts.
+Run `./mixlab` first to see your availability counts — genres with the most unplayed tracks produce the richest concepts.
 
 ---
 
@@ -175,7 +219,7 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 ### LLM Stage 1 — concept generation
 
 - Provider cascade tried in order, falling through on error or missing key:
-  **MiniMax → Groq → Gemini → OpenRouter → Anthropic**
+  **Groq → Gemini → OpenRouter → MiniMax → Anthropic**
 - Clusters larger than 40 tracks are chunked; each chunk is called independently and concepts merged
 - Concepts with fewer than 4 valid track IDs (after stripping hallucinated IDs) are discarded
 - Up to 6 concepts, ranked by track count, are forwarded to Stage 2
