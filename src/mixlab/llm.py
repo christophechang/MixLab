@@ -44,7 +44,7 @@ to the rest of the pool.
 
 Give each shortlist a rough descriptive title (e.g. "Deep 122 BPM / 4A–7A Pool") and a one-line sonic mood.
 
-Some tracks include supplementary metadata: `energy:N/8` is a Mixed in Key automated score (0=lowest, 8=highest) and can help signal intensity. Treat it as a useful hint when present — not all tracks will have it, and its absence says nothing about the track's quality or suitability.
+Some tracks include supplementary metadata: `energy:N/8` is a Mixed in Key automated score (0=lowest, 8=highest) and can help signal intensity. Treat it as a useful hint when present — not all tracks will have it, and its absence says nothing about the track's quality or suitability. When Year is present, you may form era-coherent groupings (e.g. a 1994–1997 pool alongside a 2018–present pool) as an alternative dimension to BPM-centre variation — but only when the material clearly separates into eras.
 
 Respond ONLY with a JSON array matching this schema:
 [{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]\
@@ -55,8 +55,10 @@ def _tracks_to_text(tracks: list[Track]) -> str:
     lines = []
     for t in tracks:
         line = f"ID:{t.track_id} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key}"
+        if t.year is not None:
+            line += f" | {t.year}"
         if t.energy is not None:
-            line += f" | energy:{t.energy}/5"
+            line += f" | energy:{t.energy}/8"
         lines.append(line)
     return "\n".join(lines)
 
@@ -229,8 +231,7 @@ a set with no dynamic range.
 - Be aware of vocal density, percussion character, and production era across consecutive tracks. Avoid \
 creating a blend window where two active vocals are audible simultaneously — if the incoming vocal starts \
 early and the outgoing vocal hasn't cleared, you need an instrumental bridge or a different track order. \
-When arrangement data is unavailable, flag this risk in Assumptions. Contrast is a tool — use it \
-intentionally, not as a rule.
+When arrangement data is unavailable, flag this risk in Assumptions.
 - Be aware of bass weight across consecutive tracks. A sequence of high-intensity bassline tracks without \
 textural relief will fatigue a room physically, not just emotionally.
 - Be aware of transition-window usability. A perfect harmonic and energy match is worthless if the tracks \
@@ -243,17 +244,25 @@ prefer momentum. Novelty that breaks the groove is a mistake regardless of how w
 of 3+ positions, name the specific mechanism that makes it survivable — BPM lock, rhythmic momentum, a \
 slow intro that buys the room time to adjust, or an emotional peak that earns the disruption. The \
 placement of harmonic risk matters as much as the risk itself — a large key jump works best when the \
-floor is already committed and moving, mid-to-late set at or approaching peak energy. The same jump at \
-the opener or closer is almost always wrong.
+floor is already committed and moving, mid-to-late set at or approaching peak energy.
 - Do NOT optimise only for BPM and key. Optimise for flow, tension, release, memorability, and emotional \
 payoff.
-- Some tracks include supplementary metadata when the DJ has set it: `energy:N/8` (Mixed in Key automated \
-score, 0=lowest, 8=highest), `unplayed` \
-(never played live — available for debut), a record label, and comma-separated tags that mix Genre, Mood, \
-and Subgenre descriptors (e.g. `Breakbeat, Acid, Dark, Driving`). Use these when present to inform the \
-energy arc, track character, and narrative — but many tracks will be missing some or all of this data. \
-Absence of metadata is not a verdict on quality; reason from BPM, key, genre, and artist knowledge when \
-supplementary data is unavailable.
+- Some tracks carry enrichment metadata. These are context clues — use them to deepen the narrative, not \
+to sort or constrain selection. Unenriched tracks are first-class; absence of any field says nothing about \
+quality. When fields are missing, reason from BPM, key, genre, and artist knowledge as normal.
+  - `energy:N/8` — Mixed in Key score (0=lowest, 8=highest). Use to build the energy arc.
+  - `unplayed` — never played live. Available for debut.
+  - Year — production era. Useful when articulating era dialogue or coherence. Either is a valid concept \
+shape; neither is required.
+  - Label — scene DNA. Tells you why something sounds the way it does. Not a selection criterion — great \
+concepts span many labels.
+  - `remix by [Remixer]` — remixer's style may define the track more than the original artist's. Name them \
+when it changes how the track functions.
+  - `mix:[styles]` — BPM-filtered cross-genre tags. Use when a pivot moment calls for it; ignore when it \
+adds nothing to the concept.
+  - Tags — comma-separated genre/mood descriptors (e.g. `Breakbeat, Acid, Dark, Driving`).
+  - `[unverified]` — low-confidence match. Treat label, year, and album as indicative. Flag in Assumptions \
+only if those fields are directly driving a curatorial decision.
 - Before finalising, verify that each concept is genuinely distinct. The test is not mechanical — it is \
 this: could a knowledgeable listener hear thirty seconds of any track from one concept and know it does \
 not belong in another? If two concepts share more than two tracks, or if they would feel like the same \
@@ -287,11 +296,7 @@ Track order (Camelot / BPM):
 
 Arc: [One sentence describing the overall energy shape and structural logic of the set.]
 
-[Then one paragraph per track in play order. Each paragraph: Artist — Title (role, Key, BPM) — what it does at this point in the set, why it is placed here, and how it connects to the next track. Separate each paragraph with a blank line.]
-
-Opener: [why this track works first — tone, identity, ambient architecture, room to build]
-
-Closer: [why this track works last — resolution, finality, emotional weight, outro usability]
+[One paragraph per track in play order. Each paragraph: Artist — Title (role, Key, BPM) — what it does at this point in the set, why it is placed here, and how it connects to the next track. The first paragraph must address why the opener works as ambient architecture. The last paragraph must address why the closer signals finality. Separate paragraphs with a blank line.]
 
 Standout transitions or calculated risks: [One item per transition worth naming, each on its own paragraph separated by a blank line. For any Camelot jump of 3+ positions, name the mechanism that makes it survivable in a live context. If there is a clearly weak or high-risk transition, name it and explain why it remains acceptable. If there are no notable transitions, do not invent one.]
 
@@ -400,14 +405,22 @@ async def stage2_curate_and_report(
             if t is None:
                 continue
             extras: list[str] = []
+            if t.year is not None:
+                extras.append(str(t.year))
+            if t.label:
+                extras.append(t.label)
+            if t.remixer:
+                extras.append(f"remix by {t.remixer}")
+            if t.mix:
+                extras.append(f"mix:{', '.join(t.mix)}")
             if t.energy is not None:
                 extras.append(f"energy:{t.energy}/8")
             if t.play_count == 0:
                 extras.append("unplayed")
-            if t.label:
-                extras.append(t.label)
             if t.tags:
                 extras.append(", ".join(t.tags))
+            if t.enrichment_confidence == "low":
+                extras.append("[unverified]")
             extra_str = " | " + " | ".join(extras) if extras else ""
             track_lines.append(
                 f"  ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {t.genre}{extra_str}"

@@ -121,6 +121,11 @@ def _make_track(
     label: str = "",
     play_count: int = 0,
     tags: list[str] | None = None,
+    year: int | None = None,
+    album: str = "",
+    remixer: str = "",
+    mix: list[str] | None = None,
+    enrichment_confidence: str = "",
 ) -> Track:
     return Track(
         track_id=track_id,
@@ -133,6 +138,11 @@ def _make_track(
         label=label,
         play_count=play_count,
         tags=tags or [],
+        year=year,
+        album=album,
+        remixer=remixer,
+        mix=mix or [],
+        enrichment_confidence=enrichment_confidence,
     )
 
 
@@ -215,7 +225,6 @@ def test_parse_collection_energy_is_none_when_comments_empty(tmp_path: Path) -> 
     assert by_id["12"].energy is None
 
 
-
 def test_parse_collection_extracts_label_and_playcount(tmp_path: Path) -> None:
     xml_path = _write_xml(tmp_path, _ENRICHED_XML)
     tracks = parse_collection(xml_path)
@@ -279,3 +288,109 @@ def test_parse_mik_energy_returns_none_when_absent() -> None:
     assert _parse_mik_energy("") is None
     assert _parse_mik_energy("For Promotional Use Only!") is None
     assert _parse_mik_energy("/* Breakbeat / Dark */") is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — enricher metadata (Year, Album, Remixer, Mix, Colour)
+# ---------------------------------------------------------------------------
+
+_DISCOGS_XML = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <DJ_PLAYLISTS Version="1.0.0">
+      <COLLECTION Entries="4">
+        <TRACK TrackID="20" Name="Full Enrichment" Artist="Photek" AverageBpm="174.00" Tonality="10A"
+               Genre="Drum &amp; Bass" Year="1997" Label="Science" Album="Modus Operandi"
+               Remixer="Mafia Kiss" Mix="Drum n Bass, Jungle" Colour="#00FF00" PlayCount="0"
+               Comments="10A - Energy 7 /* Drum &amp; Bass / Dark / Stepper */"/>
+        <TRACK TrackID="21" Name="Partial Enrichment" Artist="DJ Zinc" AverageBpm="132.00" Tonality="8B"
+               Genre="UK Garage" Year="2001" Label="Bingo" Album="" Remixer="" Mix="Speed Garage, House"
+               Colour="#FFA500" PlayCount="2"
+               Comments="8B - Energy 6 /* UK Garage / Rollers */"/>
+        <TRACK TrackID="22" Name="Low Confidence" Artist="Unknown" AverageBpm="130.00" Tonality="5A"
+               Genre="Techno" Year="" Label="Bootleg" Album="" Remixer="" Mix=""
+               Colour="#FF0000" PlayCount="0"
+               Comments=""/>
+        <TRACK TrackID="23" Name="No Enrichment" Artist="Artist X" AverageBpm="128.00" Tonality="4A"
+               Genre="House" PlayCount="0"
+               Comments="4A - Energy 5 /* House / Deep */"/>
+      </COLLECTION>
+    </DJ_PLAYLISTS>
+""")
+
+
+@pytest.mark.parametrize(
+    ("track_id", "expected_year"),
+    [
+        ("20", 1997),
+        ("21", 2001),
+        ("22", None),
+        ("23", None),
+    ],
+)
+def test_parse_collection_extracts_year(tmp_path: Path, track_id: str, expected_year: int | None) -> None:
+    xml_path = _write_xml(tmp_path, _DISCOGS_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    assert by_id[track_id].year == expected_year
+
+
+@pytest.mark.parametrize(
+    ("track_id", "expected_album"),
+    [
+        ("20", "Modus Operandi"),
+        ("21", ""),
+        ("23", ""),
+    ],
+)
+def test_parse_collection_extracts_album(tmp_path: Path, track_id: str, expected_album: str) -> None:
+    xml_path = _write_xml(tmp_path, _DISCOGS_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    assert by_id[track_id].album == expected_album
+
+
+def test_parse_collection_extracts_remixer(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _DISCOGS_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    assert by_id["20"].remixer == "Mafia Kiss"
+    assert by_id["21"].remixer == ""
+
+
+@pytest.mark.parametrize(
+    ("track_id", "expected_mix"),
+    [
+        ("20", ["Drum n Bass", "Jungle"]),
+        ("21", ["Speed Garage", "House"]),
+        ("22", []),
+        ("23", []),
+    ],
+)
+def test_parse_collection_extracts_mix_styles(tmp_path: Path, track_id: str, expected_mix: list[str]) -> None:
+    xml_path = _write_xml(tmp_path, _DISCOGS_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    assert by_id[track_id].mix == expected_mix
+
+
+@pytest.mark.parametrize(
+    ("track_id", "expected_confidence"),
+    [
+        ("20", "high"),
+        ("21", "medium"),
+        ("22", "low"),
+        ("23", ""),
+    ],
+)
+def test_parse_collection_maps_colour_to_confidence(tmp_path: Path, track_id: str, expected_confidence: str) -> None:
+    xml_path = _write_xml(tmp_path, _DISCOGS_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    assert by_id[track_id].enrichment_confidence == expected_confidence
+
+
+def test_parse_collection_unenriched_track_is_not_penalised(tmp_path: Path) -> None:
+    """Track 23 has no enrichment data — all new fields should be at their defaults."""
+    xml_path = _write_xml(tmp_path, _DISCOGS_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    t = by_id["23"]
+    assert t.year is None
+    assert t.album == ""
+    assert t.remixer == ""
+    assert t.mix == []
+    assert t.enrichment_confidence == ""

@@ -413,3 +413,185 @@ async def test_stage1_raises_if_all_providers_missing(monkeypatch: pytest.Monkey
 
     with pytest.raises(RuntimeError, match="All LLM providers failed"):
         await stage1_concepts(_make_tracks(3), "Drum & Bass")
+
+
+# ---------------------------------------------------------------------------
+# _tracks_to_text — Stage 1 track line formatting
+# ---------------------------------------------------------------------------
+
+
+def test_tracks_to_text_basic_line() -> None:
+    from mixlab.llm import _tracks_to_text
+
+    tracks = [
+        Track(track_id="1", artist="Photek", title="Ni Ten Ichi Ryu", bpm=174.0, camelot_key="10A", genre="Drum & Bass")
+    ]
+    result = _tracks_to_text(tracks)
+    assert result == "ID:1 | Photek — Ni Ten Ichi Ryu | 174.0 BPM | 10A"
+
+
+def test_tracks_to_text_includes_year_when_present() -> None:
+    from mixlab.llm import _tracks_to_text
+
+    tracks = [
+        Track(
+            track_id="1",
+            artist="Photek",
+            title="Ni Ten Ichi Ryu",
+            bpm=174.0,
+            camelot_key="10A",
+            genre="Drum & Bass",
+            year=1997,
+        )
+    ]
+    result = _tracks_to_text(tracks)
+    assert "| 1997" in result
+
+
+def test_tracks_to_text_energy_scale_is_8() -> None:
+    from mixlab.llm import _tracks_to_text
+
+    tracks = [Track(track_id="1", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="Drum & Bass", energy=7)]
+    result = _tracks_to_text(tracks)
+    assert "energy:7/8" in result
+    assert "energy:7/5" not in result
+
+
+def test_tracks_to_text_omits_year_when_absent() -> None:
+    from mixlab.llm import _tracks_to_text
+
+    tracks = [Track(track_id="1", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="Drum & Bass")]
+    result = _tracks_to_text(tracks)
+    # Should not contain a bare 4-digit year segment
+    parts = result.split(" | ")
+    assert len(parts) == 4  # ID, artist—title, BPM, key — nothing extra
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — enriched track line in sent prompt
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_stage2_prompt_includes_enriched_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify enrichment fields appear in the prompt body sent to the API."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        "1": Track(
+            track_id="1",
+            artist="Photek",
+            title="Ni Ten Ichi Ryu",
+            bpm=174.0,
+            camelot_key="10A",
+            genre="Drum & Bass",
+            year=1997,
+            label="Science",
+            album="Modus Operandi",
+            remixer="Mafia Kiss",
+            mix=["Drum n Bass", "Jungle"],
+            energy=7,
+            play_count=0,
+            enrichment_confidence="high",
+        ),
+        "2": Track(track_id="2", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="Drum & Bass"),
+        "3": Track(track_id="3", artist="B", title="U", bpm=174.0, camelot_key="9A", genre="Drum & Bass"),
+        "4": Track(track_id="4", artist="C", title="V", bpm=174.0, camelot_key="11A", genre="Drum & Bass"),
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    sent_body = route.calls[0].request.content.decode()
+    assert "1997" in sent_body
+    assert "Science" in sent_body
+    assert "remix by Mafia Kiss" in sent_body
+    assert "mix:Drum n Bass, Jungle" in sent_body
+    assert "energy:7/8" in sent_body
+    assert "unplayed" in sent_body
+
+
+@respx.mock
+async def test_stage2_prompt_includes_unverified_flag_for_low_confidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(
+            track_id=str(i),
+            artist=f"A{i}",
+            title=f"T{i}",
+            bpm=174.0,
+            camelot_key="8A",
+            genre="Drum & Bass",
+            label="Bootleg",
+            enrichment_confidence="low",
+        )
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    sent_body = route.calls[0].request.content.decode()
+    assert "[unverified]" in sent_body
+
+
+@respx.mock
+async def test_stage2_prompt_omits_unverified_flag_for_high_confidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(
+            track_id=str(i),
+            artist=f"A{i}",
+            title=f"T{i}",
+            bpm=174.0,
+            camelot_key="8A",
+            genre="Drum & Bass",
+            enrichment_confidence="high",
+        )
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    import json as _json
+
+    body = _json.loads(route.calls[0].request.content.decode())
+    user_prompt: str = body["messages"][0]["content"]
+    assert "[unverified]" not in user_prompt
+
+
+@respx.mock
+async def test_stage2_unenriched_track_produces_clean_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Track with no enrichment data must not produce extra separators or empty fields."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    import json as _json
+
+    body = _json.loads(route.calls[0].request.content.decode())
+    user_prompt: str = body["messages"][0]["content"]
+    # No empty fields or junk separators
+    assert "| |" not in user_prompt
+    assert "[unverified]" not in user_prompt

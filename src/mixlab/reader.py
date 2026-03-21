@@ -10,13 +10,21 @@ from mixlab.models import Track
 
 _MIK_ENERGY_RE: re.Pattern[str] = re.compile(r"\bEnergy\s+(\d+)", re.IGNORECASE)
 
+_COLOUR_TO_CONFIDENCE: dict[str, str] = {
+    "#00ff00": "high",
+    "0x00ff00": "high",
+    "#ffa500": "medium",
+    "0xffa500": "medium",
+    "#ff0000": "low",
+    "0xff0000": "low",
+}
+
 
 def _parse_mik_energy(comments: str) -> int | None:
     m = _MIK_ENERGY_RE.search(comments)
     if not m:
         return None
     return int(m.group(1))
-
 
 
 _TAGS_RE: re.Pattern[str] = re.compile(r"/\*\s*(.+?)\s*\*/")
@@ -72,6 +80,9 @@ def parse_collection(xml_path: Path) -> list[Track]:
 
         comments = element.get("Comments", "")
         play_count_raw = element.get("PlayCount", "0")
+        year_raw = element.get("Year", "")
+        mix_raw = element.get("Mix", "")
+        colour_raw = element.get("Colour", "").lower()
         tracks.append(
             Track(
                 track_id=track_id,
@@ -84,6 +95,11 @@ def parse_collection(xml_path: Path) -> list[Track]:
                 label=element.get("Label", ""),
                 play_count=int(play_count_raw) if play_count_raw.isdigit() else 0,
                 tags=_parse_tags(comments),
+                year=int(year_raw) if year_raw.isdigit() else None,
+                album=element.get("Album", ""),
+                remixer=element.get("Remixer", ""),
+                mix=[s.strip() for s in mix_raw.split(",") if s.strip()],
+                enrichment_confidence=_COLOUR_TO_CONFIDENCE.get(colour_raw, ""),
             )
         )
 

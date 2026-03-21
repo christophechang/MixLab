@@ -14,6 +14,11 @@ class Track(BaseModel):
     label: str = ""
     play_count: int = 0
     tags: list[str] = Field(default_factory=list)
+    year: int | None = None
+    album: str = ""
+    remixer: str = ""
+    mix: list[str] = Field(default_factory=list)
+    enrichment_confidence: str = ""  # "high" | "medium" | "low" | ""
 
 
 class PlayedTrack(BaseModel):
