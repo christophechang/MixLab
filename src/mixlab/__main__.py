@@ -22,7 +22,7 @@ from mixlab.clustering import (
 )
 from mixlab.config import GENRE_MAP, IGNORED_GENRES
 from mixlab.discord_client import send_report
-from mixlab.llm import stage1_concepts, stage2_curate_and_report
+from mixlab.llm import make_cascade_state, stage1_concepts, stage2_curate_and_report
 from mixlab.matcher import filter_unplayed
 from mixlab.models import MixConcept, Track
 from mixlab.playlist_exporter import export_merged_xml, generate_merged_xml_bytes, parse_raw_tracks
@@ -36,20 +36,31 @@ def _build_tracks_by_id(tracks: list[Track]) -> dict[str, Track]:
 
 
 def _print_availability(
-    all_tracks: list[Track], unplayed: list[Track]
+    all_tracks: list[Track], unplayed: list[Track], show_unplayed: bool = True
 ) -> tuple[dict[str, tuple[int, int]], int, dict[str, tuple[int, int]]]:
     counts = count_available_by_genre(all_tracks, unplayed, GENRE_MAP)
     outlier_genres = count_outlier_genres(all_tracks, unplayed, GENRE_MAP, ignored=IGNORED_GENRES)
     outlier_count = sum(u for _, u in outlier_genres.values())
 
-    print("\nAvailable tracks (unplayed / in collection):")
-    for label, (total, available) in counts.items():
-        bar = "█" * min(available // 10, 30)
-        print(f"  {label:<20} {available:>4} / {total:<4}  {bar}")
-    if outlier_genres:
-        print("\n  Unmapped Rekordbox genre tags (not in GENRE_MAP):")
-        for tag, (total, available) in outlier_genres.items():
-            print(f"    {tag:<26} {available:>4} / {total:<4}")
+    if show_unplayed:
+        print("\nAvailable tracks (unplayed / in collection):")
+        for label, (total, available) in counts.items():
+            bar = "█" * min(available // 10, 30)
+            print(f"  {label:<20} {available:>4} / {total:<4}  {bar}")
+        if outlier_genres:
+            print("\n  Unmapped Rekordbox genre tags (not in GENRE_MAP):")
+            for tag, (total, available) in outlier_genres.items():
+                print(f"    {tag:<26} {available:>4} / {total:<4}")
+    else:
+        print("\nTracks in collection:")
+        max_total = max((t for t, _ in counts.values()), default=1)
+        for label, (total, _) in counts.items():
+            bar = "█" * round((total / max_total) * 30)
+            print(f"  {label:<20} {total:<4}  {bar}")
+        if outlier_genres:
+            print("\n  Unmapped Rekordbox genre tags (not in GENRE_MAP):")
+            for tag, (total, _) in outlier_genres.items():
+                print(f"    {tag:<26} {total:<4}")
     print()
     return counts, outlier_count, outlier_genres
 
@@ -76,16 +87,23 @@ def _show_cached_genres() -> None:
 
 
 async def run(
-    genre: str | None, duration: int | None, export_dir: Path | None, stage2_provider: str | None = None
+    genre: str | None,
+    duration: int | None,
+    export_dir: Path | None,
+    stage2_provider: str | None = None,
+    all_tracks: bool = False,
 ) -> None:  # noqa: ARG001 — duration reserved
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
     tracks = apply_bpm_corrections(tracks)
 
-    # 2. Fetch played tracks and filter.
+    # 2. Fetch played tracks and filter (skipped when --all-tracks is set).
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
     catalog_url = os.environ.get("CATALOG_API_URL", "")
-    if catalog_url:
+    if all_tracks:
+        print("--all-tracks set — skipping played-track filter, using full collection.")
+        unplayed = list(tracks)
+    elif catalog_url:
         try:
             played = await fetch_played_tracks(api_key, catalog_url)
         except Exception as exc:
@@ -97,7 +115,7 @@ async def run(
         unplayed = list(tracks)
 
     # 3. Always print the availability table (deterministic, no LLM cost).
-    counts, outlier_count, outlier_genres = _print_availability(tracks, unplayed)
+    counts, outlier_count, outlier_genres = _print_availability(tracks, unplayed, show_unplayed=not all_tracks)
     save_genre_cache(counts, outlier_count, outlier_genres)
 
     # 4. If no genre specified, stop here — table is the output.
@@ -114,17 +132,18 @@ async def run(
         print(f"No unplayed tracks found for genre '{genre}'.", file=sys.stderr)
         sys.exit(1)
 
-    # 6. LLM Stage 1 — build candidate shortlists via cascade (MiniMax / Groq / etc.).
+    # 6. LLM Stage 1 — build candidate shortlists via sticky cascade (MiniMax → Groq → Gemini).
     t_start = time.monotonic()
+    cascade_state = make_cascade_state()
     all_shortlists: list[MixConcept] = []
     for genre_label, cluster_tracks in clusters.items():
         sorted_tracks = sort_by_camelot(filter_by_bpm(cluster_tracks))
-        all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label))
+        all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label, cascade_state))
 
     # Outliers ≥ 4 within this genre scope — shortlist as Misc.
     genre_outliers = [t for t in outliers if t.genre.lower() == genre.lower()]
     if len(genre_outliers) >= 4:
-        all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc"))
+        all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc", cascade_state))
 
     if not all_shortlists:
         print("No shortlists generated — all tracks may have been excluded.", file=sys.stderr)
@@ -177,7 +196,15 @@ async def run(
 
     # 9. Discord delivery.
     filtered_outliers = [t for t in outliers if t.genre not in IGNORED_GENRES]
-    await send_report(report, all_concepts, filtered_outliers, tracks_by_id, counts=counts, attachments=xml_attachments)
+    await send_report(
+        report,
+        all_concepts,
+        filtered_outliers,
+        tracks_by_id,
+        counts=counts,
+        attachments=xml_attachments,
+        show_unplayed=not all_tracks,
+    )
 
 
 def main() -> None:
@@ -204,6 +231,11 @@ def main() -> None:
         default=None,
         help="Stage 2 LLM provider: anthropic (default) or minimax",
     )
+    parser.add_argument(
+        "--all-tracks",
+        action="store_true",
+        help="Recommend from the full catalogue, ignoring played-track history (overrides CATALOG_API_URL)",
+    )
     args = parser.parse_args()
     if args.genres:
         _show_cached_genres()
@@ -215,7 +247,7 @@ def main() -> None:
     elif args.export_playlists:
         export_dir = Path("output/playlists")
 
-    asyncio.run(run(args.genre, args.duration, export_dir, args.stage2_provider))
+    asyncio.run(run(args.genre, args.duration, export_dir, args.stage2_provider, args.all_tracks))
 
 
 if __name__ == "__main__":

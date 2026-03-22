@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -68,7 +69,12 @@ def _parse_concepts(raw: str) -> list[MixConcept]:
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
         raw = re.sub(r"\n?```\s*$", "", raw)
-    data = json.loads(raw.strip())
+    raw = raw.strip()
+    # Trim trailing prose after the closing bracket (some models append explanatory text).
+    last_bracket = raw.rfind("]")
+    if last_bracket != -1:
+        raw = raw[: last_bracket + 1]
+    data = json.loads(raw)
     return [MixConcept(**item) for item in data]
 
 
@@ -148,13 +154,6 @@ async def _try_gemini(prompt: str) -> str | None:
     )
 
 
-async def _try_openrouter(prompt: str) -> str | None:
-    key = os.environ.get("OPENROUTER_API_KEY")
-    if not key:
-        return None
-    return await _call_openai_compat("https://openrouter.ai/api", key, "deepseek/deepseek-chat", prompt)
-
-
 async def _try_anthropic(prompt: str) -> str | None:
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
@@ -162,36 +161,61 @@ async def _try_anthropic(prompt: str) -> str | None:
     return await _call_anthropic_http(key, "claude-sonnet-4-6", _STAGE1_SYSTEM, prompt)
 
 
-_CASCADE = [_try_minimax, _try_groq, _try_gemini, _try_openrouter, _try_anthropic]
+# Stage 1 free providers only — OpenRouter and Anthropic are Stage 2 / paid.
+# MiniMax is last: throttled to 50 TPS on entry plan, making it too slow to lead.
+_CASCADE = [_try_groq, _try_gemini, _try_minimax]
 
 
-async def _call_stage1_once(tracks: list[Track], genre: str) -> list[MixConcept]:
+@dataclass
+class CascadeState:
+    """Shared mutable state threaded through all Stage 1 calls in a single run."""
+
+    index: int = 0
+    consecutive_failures: int = field(default=0)
+
+
+def make_cascade_state() -> CascadeState:
+    return CascadeState()
+
+
+async def _call_stage1_once(tracks: list[Track], genre: str, state: CascadeState) -> list[MixConcept]:
     valid_ids = {t.track_id for t in tracks}
     prompt = f"Genre: {genre}\n\nTracks:\n{_tracks_to_text(tracks)}"
-    for provider in _CASCADE:
+
+    for _ in range(len(_CASCADE)):
+        provider = _CASCADE[state.index]
         try:
             result = await provider(prompt)
-            if result is not None:
-                concepts = _parse_concepts(result)
-                cleaned = [
-                    MixConcept(title=c.title, mood=c.mood, track_ids=[tid for tid in c.track_ids if tid in valid_ids])
-                    for c in concepts
-                ]
-                return [c for c in cleaned if len(c.track_ids) >= _MIN_SHORTLIST_TRACKS]
-        except Exception as exc:  # noqa: BLE001 — cascade, swallow and try next
+            if result is None:  # provider not configured — skip silently, no failure counted
+                state.index = (state.index + 1) % len(_CASCADE)
+                continue
+            concepts = _parse_concepts(result)
+            cleaned = [
+                MixConcept(title=c.title, mood=c.mood, track_ids=[tid for tid in c.track_ids if tid in valid_ids])
+                for c in concepts
+            ]
+            state.consecutive_failures = 0
+            return [c for c in cleaned if len(c.track_ids) >= _MIN_SHORTLIST_TRACKS]
+        except Exception as exc:  # noqa: BLE001 — cascade
             print(f"Provider {provider.__name__} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-            continue
-    raise RuntimeError(f"All LLM providers failed for genre '{genre}'.")
+            state.consecutive_failures += 1
+            if state.consecutive_failures >= len(_CASCADE):
+                raise RuntimeError(
+                    f"All Stage 1 providers failed — {state.consecutive_failures} consecutive failures "
+                    f"with no successful call."
+                ) from exc
+            state.index = (state.index + 1) % len(_CASCADE)
+
+    raise RuntimeError(f"All Stage 1 providers exhausted for genre '{genre}'.")
 
 
-async def stage1_concepts(cluster: list[Track], genre: str) -> list[MixConcept]:
+async def stage1_concepts(cluster: list[Track], genre: str, state: CascadeState) -> list[MixConcept]:
     if len(cluster) <= _MAX_TRACKS_PER_CALL:
-        return await _call_stage1_once(cluster, genre)
+        return await _call_stage1_once(cluster, genre, state)
 
     concepts: list[MixConcept] = []
     for i in range(0, len(cluster), _MAX_TRACKS_PER_CALL):
-        chunk = cluster[i : i + _MAX_TRACKS_PER_CALL]
-        concepts.extend(await _call_stage1_once(chunk, genre))
+        concepts.extend(await _call_stage1_once(cluster[i : i + _MAX_TRACKS_PER_CALL], genre, state))
     return concepts
 
 

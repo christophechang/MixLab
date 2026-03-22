@@ -11,7 +11,6 @@ from mixlab.models import MixConcept, Track
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _MINIMAX_URL = "https://api.minimax.io/v1/text/chatcompletion_v2"
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 
@@ -69,47 +68,41 @@ def _make_tracks(n: int, genre: str = "Drum & Bass") -> list[Track]:
 
 @respx.mock
 async def test_stage1_skips_provider_if_key_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mixlab.llm import stage1_concepts
+    from mixlab.llm import make_cascade_state, stage1_concepts
 
     monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     respx.post(_GROQ_URL).mock(return_value=Response(200, json=_chat_response()))
 
-    shortlists = await stage1_concepts(_make_tracks(20), "Drum & Bass")
+    shortlists = await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())
     assert len(shortlists) == 2
     assert shortlists[0].title == "Deep 122 BPM / 4A–7A Pool"
 
 
 @respx.mock
 async def test_stage1_falls_through_cascade_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mixlab.llm import stage1_concepts
+    from mixlab.llm import make_cascade_state, stage1_concepts
 
     monkeypatch.setenv("MINIMAX_API_KEY", "bad-key")
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     respx.post(_MINIMAX_URL).mock(return_value=Response(500, text="error"))
     respx.post(_GROQ_URL).mock(return_value=Response(200, json=_chat_response()))
 
-    shortlists = await stage1_concepts(_make_tracks(20), "Drum & Bass")
+    shortlists = await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())
     assert shortlists[0].title == "Deep 122 BPM / 4A–7A Pool"
 
 
 @respx.mock
 async def test_stage1_chunks_large_clusters(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mixlab.llm import stage1_concepts
+    from mixlab.llm import make_cascade_state, stage1_concepts
 
     monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     # 50 tracks → two chunks (40 + 10); each call returns IDs valid for its chunk.
     respx.post(_GROQ_URL).mock(
@@ -119,7 +112,7 @@ async def test_stage1_chunks_large_clusters(monkeypatch: pytest.MonkeyPatch) -> 
         ]
     )
 
-    shortlists = await stage1_concepts(_make_tracks(50), "Drum & Bass")
+    shortlists = await stage1_concepts(_make_tracks(50), "Drum & Bass", make_cascade_state())
     # Chunk 1 (tracks 0–39): both pools have valid IDs → 2 shortlists.
     # Chunk 2 (tracks 40–49): only the first pool (IDs 40–48) fits within the chunk;
     # the second pool starts at ID 49 and only "49" is valid → filtered below _MIN_SHORTLIST_TRACKS → 1 shortlist.
@@ -128,20 +121,36 @@ async def test_stage1_chunks_large_clusters(monkeypatch: pytest.MonkeyPatch) -> 
 
 @respx.mock
 async def test_stage1_filters_pools_below_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mixlab.llm import stage1_concepts
+    from mixlab.llm import make_cascade_state, stage1_concepts
 
     monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     # Pool with only 3 valid IDs (below _MIN_SHORTLIST_TRACKS=8) should be dropped.
     tiny_pool = json.dumps([{"title": "Tiny", "mood": "x", "track_ids": ["0", "1", "2"]}])
     respx.post(_GROQ_URL).mock(return_value=Response(200, json={"choices": [{"message": {"content": tiny_pool}}]}))
 
-    shortlists = await stage1_concepts(_make_tracks(10), "Drum & Bass")
+    shortlists = await stage1_concepts(_make_tracks(10), "Drum & Bass", make_cascade_state())
     assert shortlists == []
+
+
+@respx.mock
+async def test_stage1_parses_response_with_trailing_prose(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Models that append explanatory text after the JSON array should still parse correctly."""
+    from mixlab.llm import make_cascade_state, stage1_concepts
+
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    payload_with_prose = _shortlist_payload() + "\n\nNote: grouped by BPM proximity and harmonic compatibility."
+    respx.post(_GROQ_URL).mock(
+        return_value=Response(200, json={"choices": [{"message": {"content": payload_with_prose}}]})
+    )
+
+    shortlists = await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())
+    assert len(shortlists) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -406,13 +415,123 @@ def test_shortfall_warning_not_triggered_at_minimum() -> None:
 
 
 async def test_stage1_raises_if_all_providers_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mixlab.llm import stage1_concepts
+    from mixlab.llm import make_cascade_state, stage1_concepts
 
-    for key in ("MINIMAX_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+    for key in ("MINIMAX_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"):
         monkeypatch.delenv(key, raising=False)
 
-    with pytest.raises(RuntimeError, match="All LLM providers failed"):
-        await stage1_concepts(_make_tracks(3), "Drum & Bass")
+    with pytest.raises(RuntimeError, match="All Stage 1 providers exhausted"):
+        await stage1_concepts(_make_tracks(3), "Drum & Bass", make_cascade_state())
+
+
+# ---------------------------------------------------------------------------
+# Sticky cascade behaviour
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_stage1_sticky_stays_on_successful_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Index stays at 0 when Groq (now first) succeeds on both chunks of a large cluster."""
+    from mixlab.llm import make_cascade_state, stage1_concepts
+
+    monkeypatch.setenv("GROQ_API_KEY", "key")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    respx.post(_GROQ_URL).mock(
+        side_effect=[
+            Response(200, json=_chat_response(id_offset=0)),
+            Response(200, json=_chat_response(id_offset=40)),
+        ]
+    )
+
+    state = make_cascade_state()
+    await stage1_concepts(_make_tracks(50), "Drum & Bass", state)
+
+    assert state.index == 0  # sticky on Groq (index 0)
+    assert state.consecutive_failures == 0
+
+
+@respx.mock
+async def test_stage1_advances_on_failure_and_stays_on_next(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Groq fails on chunk 1 → Gemini takes over → index stays on Gemini for chunk 2."""
+    from mixlab.llm import make_cascade_state, stage1_concepts
+
+    monkeypatch.setenv("GROQ_API_KEY", "key")
+    monkeypatch.setenv("GEMINI_API_KEY", "key")
+
+    respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
+    respx.post(_GEMINI_URL).mock(
+        side_effect=[
+            Response(200, json=_chat_response(id_offset=0)),
+            Response(200, json=_chat_response(id_offset=40)),
+        ]
+    )
+
+    state = make_cascade_state()
+    await stage1_concepts(_make_tracks(50), "Drum & Bass", state)
+
+    assert state.index == 1  # sticky on Gemini after Groq failed
+    assert state.consecutive_failures == 0
+
+
+@respx.mock
+async def test_stage1_skips_unconfigured_without_counting_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """None return (unconfigured provider) advances index but does not count as a failure."""
+    from mixlab.llm import make_cascade_state, stage1_concepts
+
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "key")
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+
+    respx.post(_GEMINI_URL).mock(return_value=Response(200, json=_chat_response()))
+
+    state = make_cascade_state()
+    await stage1_concepts(_make_tracks(20), "Drum & Bass", state)
+
+    assert state.consecutive_failures == 0
+    assert state.index == 1  # advanced past unconfigured Groq to Gemini (index 1)
+
+
+@respx.mock
+async def test_stage1_raises_after_n_consecutive_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All three providers fail → RuntimeError after len(_CASCADE) consecutive failures."""
+    from mixlab.llm import make_cascade_state, stage1_concepts
+
+    monkeypatch.setenv("GROQ_API_KEY", "key")
+    monkeypatch.setenv("GEMINI_API_KEY", "key")
+    monkeypatch.setenv("MINIMAX_API_KEY", "key")
+
+    respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
+    respx.post(_GEMINI_URL).mock(return_value=Response(500, text="error"))
+    respx.post(_MINIMAX_URL).mock(return_value=Response(500, text="error"))
+
+    with pytest.raises(RuntimeError, match="consecutive failures"):
+        await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())
+
+
+@respx.mock
+async def test_stage1_consecutive_failures_reset_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failures before the first success are cleared; state ends clean on Gemini."""
+    from mixlab.llm import make_cascade_state, stage1_concepts
+
+    monkeypatch.setenv("GROQ_API_KEY", "key")
+    monkeypatch.setenv("GEMINI_API_KEY", "key")
+
+    # Chunk 1: Groq fails → Gemini succeeds (consecutive_failures reset to 0).
+    # Chunk 2: Gemini is sticky and succeeds again.
+    respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
+    respx.post(_GEMINI_URL).mock(
+        side_effect=[
+            Response(200, json=_chat_response(id_offset=0)),
+            Response(200, json=_chat_response(id_offset=40)),
+        ]
+    )
+
+    state = make_cascade_state()
+    await stage1_concepts(_make_tracks(50), "Drum & Bass", state)
+
+    assert state.consecutive_failures == 0
+    assert state.index == 1  # sticky on Gemini
 
 
 # ---------------------------------------------------------------------------

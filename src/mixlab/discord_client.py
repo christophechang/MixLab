@@ -32,17 +32,28 @@ def format_report(
     outliers: list[Track],
     skipped: int = 0,
     counts: dict[str, tuple[int, int]] | None = None,
+    show_unplayed: bool = True,
 ) -> str:
     lines: list[str] = []
 
     if counts:
-        lines.append("**Crate Snapshot (unplayed / in collection)**")
-        lines.append("```")
-        for label, (total, available) in counts.items():
-            pct = available / total if total else 0
-            filled = round(pct * 20)
-            bar = "█" * filled + "░" * (20 - filled)
-            lines.append(f"  {label:<20} {available:>4} / {total:<4}  {bar}  {pct:.0%}")
+        if show_unplayed:
+            lines.append("**Crate Snapshot (unplayed / in collection)**")
+            lines.append("```")
+            for label, (total, available) in counts.items():
+                pct = available / total if total else 0
+                filled = round(pct * 20)
+                bar = "█" * filled + "░" * (20 - filled)
+                lines.append(f"  {label:<20} {available:>4} / {total:<4}  {bar}  {pct:.0%}")
+        else:
+            lines.append("**Full Catalogue Snapshot**")
+            lines.append("```")
+            max_total = max(t for t, _ in counts.values()) if counts else 1
+            bar_width = 20
+            for label, (total, _) in counts.items():
+                filled = round((total / max_total) * bar_width)
+                bar = "█" * filled + "░" * (bar_width - filled)
+                lines.append(f"  {label:<20} {total:<4}  {bar}")
         lines.append("```\n")
 
     if skipped:
@@ -198,6 +209,7 @@ async def send_report(
     skipped: int = 0,
     counts: dict[str, tuple[int, int]] | None = None,
     attachments: list[tuple[str, bytes]] | None = None,
+    show_unplayed: bool = True,
 ) -> bool:
     client = make_discord_client()
     if client is None:
@@ -206,5 +218,5 @@ async def send_report(
     if tracks_by_id is None:
         tracks_by_id = {}
 
-    full_text = format_report(report, concepts, tracks_by_id, outliers, skipped, counts)
+    full_text = format_report(report, concepts, tracks_by_id, outliers, skipped, counts, show_unplayed)
     return await client.post(full_text, attachments)

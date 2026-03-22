@@ -108,6 +108,19 @@ pytest                           # run all tests
 pytest --tb=short -q             # terse output
 ```
 
+### Running the app
+The project uses a `.venv` with Python 3.13. The system Python (`/usr/local/bin/python`) is 3.9 and does NOT have mixlab installed. Always use:
+```bash
+PYTHONPATH=/Users/christophechang/Documents/Development/MixLab/src .venv/bin/python3.13 -m mixlab [args]
+```
+For tooling (ruff, mypy, pytest) also use the venv:
+```bash
+.venv/bin/python3.13 -m ruff format .
+.venv/bin/python3.13 -m ruff check .
+.venv/bin/python3.13 -m mypy .
+.venv/bin/python3.13 -m pytest
+```
+
 ### Rules
 1. **Run tests after every change.** Tests must pass before any task is considered complete.
 2. **New features require new unit tests.** Any added functionality must have corresponding test coverage.
