@@ -1,76 +1,31 @@
 {
   "permissions": {
     "allow": [
-      "Bash(.venv/bin/ruff format:*)",
-      "Bash(.venv/bin/ruff check:*)",
-      "Bash(set -a)",
-      "Bash(source .env)",
-      "Bash(set +a)",
-      "Bash(PYTHONPATH=src .venv/bin/python -m mixlab --genre \"Drum & Bass\")",
-      "Bash(curl -s \"https://api.changsta.com/api/catalog/tracks?page=1&pageSize=500\")",
-      "Bash(curl -s \"https://api.changsta.com/api/catalog/tracks?page=1&pageSize=200\")",
-      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(''''totalPages:'''', d.get\\(''''totalPages''''\\), ''''| items:'''', len\\(d.get\\(''''items'''',[]\\)\\)\\)\")",
-      "Bash(curl -s \"https://api.changsta.com/api/catalog/tracks?page=1&pageSize=100\")",
-      "Bash(ruff format:*)",
-      "Bash(ruff check:*)",
-      "Bash(mypy .)",
-      "Bash(python -m ruff format .)",
-      "Bash(python -m ruff check .)",
-      "Bash(python -m mypy .)",
-      "Bash(python -m pytest tests/test_cache.py -v)",
-      "Bash(ls /Users/christophechang/Documents/Development/MixLab/.venv/bin/python*)",
-      "Bash(.venv/bin/python -m ruff format .)",
-      "Bash(.venv/bin/python -m ruff check .)",
-      "Bash(.venv/bin/python -m mypy .)",
-      "Bash(.venv/bin/python -m pytest tests/test_cache.py -v)",
-      "Bash(.venv/bin/python -m pytest tests/test_cache.py tests/test_clustering.py -v)",
-      "Bash(.venv/bin/python -m mixlab --genre house)",
-      "Bash(pip show:*)",
-      "Bash(.venv/bin/pip show:*)",
-      "Bash(.venv/bin/pip install:*)",
-      "Bash(.venv/bin/python -c \"import mixlab; print\\(mixlab.__file__\\)\")",
-      "Bash(python3 -c \":*)",
-      "Bash(.venv/bin/python -c \"import dotenv; print\\(''''dotenv ok''''\\)\")",
-      "Bash(.venv/bin/python -m pytest tests/test_reporter.py tests/test_cache.py tests/test_clustering.py -v)",
-      "Bash(.venv/bin/python -m pytest tests/test_clustering.py tests/test_cache.py tests/test_reporter.py -v)",
-      "Bash(pytest --tb=short -q)",
-      "Bash(python -m pytest --tb=short -q)",
-      "Bash(python -m mixlab --genre house)",
-      "Read(//Users/christophechang/.local/bin/**)",
-      "Read(//usr/local/bin/**)",
-      "Read(//usr/local/**)",
       "WebSearch",
-      "WebFetch(domain:api.minimaxi.chat)",
-      "WebFetch(domain:platform.minimax.io)",
-      "WebFetch(domain:www.minimax.io)",
-      "Bash(PYTHONPATH=src .venv/bin/python -m mixlab --genre house)",
-      "Bash(.venv/bin/mixlab --genre house)",
-      "Bash(.venv/bin/python -c \"import sys; print\\(sys.path\\)\")",
-      "Bash(.venv/bin/python -c \"import site; site.main\\(\\); import sys; print\\([p for p in sys.path if ''MixLab'' in p]\\)\")",
-      "Bash(PYTHONPATH=/Users/christophechang/Documents/Development/MixLab/src .venv/bin/python -m mixlab --genre house)",
-      "Bash(PYTHONPATH=src .venv/bin/python -m pytest tests/test_reader.py --tb=short -q)",
-      "Bash(PYTHONPATH=src .venv/bin/python -m pytest --tb=short -q)",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git push:*)",
-      "Bash(find /Users/christophechang/Documents/Development/MixLab -type f -name *.xml)",
-      "Bash(git stash:*)",
-      "Bash(python -m pytest tests/test_playlist_exporter.py -v)",
-      "Bash(python -m pytest --tb=short -q --ignore=tests/test_cache.py)",
-      "Bash(python -m pytest tests/test_playlist_exporter.py -v --tb=short)",
-      "Bash(python -m pytest --ignore=tests/test_cache.py --tb=short -q)",
-      "Bash(python3 -c \"import mixlab\")",
-      "Bash(ls /usr/local/bin/python*)",
-      "Read(//opt/homebrew/bin/**)",
-      "Bash(ls ~/.pyenv/versions/*/bin/python3.12)",
-      "Bash(ls /opt/homebrew/bin/python*)",
-      "Bash(pip3 show:*)",
-      "Bash(/opt/homebrew/bin/python3.13 -c \"import mixlab\")",
-      "Bash(/opt/homebrew/bin/python3.13 -m mixlab --genre house)",
-      "Bash(source .venv/bin/activate)",
-      "Bash(python -m ruff --version)",
-      "Bash(uv run:*)"
+      "WebFetch",
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "Task",
+      "TodoWrite"
     ],
-    "allowDangerouslySkipPermissions": true
+    "deny": [],
+    "defaultMode": "bypassPermissions"
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "afplay /System/Library/Sounds/Blow.aiff"
+          }
+        ]
+      }
+    ]
   }
 }
