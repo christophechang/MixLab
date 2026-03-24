@@ -100,6 +100,7 @@ async def run(
     # 2. Fetch played tracks and filter (skipped when --all-tracks is set).
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
     catalog_url = os.environ.get("CATALOG_API_URL", "")
+    used_catalog_api = False
     if all_tracks:
         print("--all-tracks set — skipping played-track filter, using full collection.")
         unplayed = list(tracks)
@@ -110,12 +111,13 @@ async def run(
             print(f"ERROR: Could not fetch played tracks — aborting: {exc}", file=sys.stderr)
             sys.exit(1)
         unplayed = filter_unplayed(tracks, played)
+        used_catalog_api = True
     else:
         print("No CATALOG_API_URL set — skipping played-track filter, using full collection.")
         unplayed = list(tracks)
 
     # 3. Always print the availability table (deterministic, no LLM cost).
-    counts, outlier_count, outlier_genres = _print_availability(tracks, unplayed, show_unplayed=not all_tracks)
+    counts, outlier_count, outlier_genres = _print_availability(tracks, unplayed, show_unplayed=used_catalog_api)
     save_genre_cache(counts, outlier_count, outlier_genres)
 
     # 4. If no genre specified, stop here — table is the output.
@@ -132,7 +134,7 @@ async def run(
         print(f"No unplayed tracks found for genre '{genre}'.", file=sys.stderr)
         sys.exit(1)
 
-    # 6. LLM Stage 1 — build candidate shortlists via sticky cascade (MiniMax → Groq → Gemini).
+    # 6. LLM Stage 1 — build candidate shortlists via sticky cascade (Groq → Gemini → Mistral → MiniMax).
     t_start = time.monotonic()
     cascade_state = make_cascade_state()
     all_shortlists: list[MixConcept] = []
@@ -180,8 +182,11 @@ async def run(
     today = datetime.date.today().isoformat()
     folder_name = f"Mix Lab - {genre} - {today}"
     # All unplayed tracks scoped to this genre: cluster tracks + same-genre outliers.
-    genre_unplayed_track_ids = [t.track_id for cluster_tracks in clusters.values() for t in cluster_tracks]
-    genre_unplayed_track_ids += [t.track_id for t in genre_outliers]
+    # Only meaningful when we fetched played tracks from the catalogue API.
+    genre_unplayed_track_ids: list[str] | None = None
+    if used_catalog_api:
+        genre_unplayed_track_ids = [t.track_id for cluster_tracks in clusters.values() for t in cluster_tracks]
+        genre_unplayed_track_ids += [t.track_id for t in genre_outliers]
     merged_bytes = generate_merged_xml_bytes(all_concepts, raw_tracks_xml, folder_name, genre_unplayed_track_ids)
     xml_attachments: list[tuple[str, bytes]] = (
         [("rekordbox_export.xml", merged_bytes)] if merged_bytes is not None else []
@@ -203,7 +208,7 @@ async def run(
         tracks_by_id,
         counts=counts,
         attachments=xml_attachments,
-        show_unplayed=not all_tracks,
+        show_unplayed=used_catalog_api,
     )
 
 

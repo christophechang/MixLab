@@ -22,7 +22,7 @@ For background on why this was built and how it works in practice, read the [Mix
 - Python 3.12+
 - A Rekordbox XML export (see [Setup](#4-export-your-rekordbox-collection))
 - `ANTHROPIC_API_KEY` — required for Stage 2 report generation
-- At least one Stage 1 LLM key (Groq, Gemini, OpenRouter, MiniMax, or Anthropic)
+- At least one Stage 1 LLM key (Groq, Gemini, Mistral, or MiniMax)
 - A catalog API URL + key (optional — for filtering already-played tracks)
 - A Discord bot token (optional — report prints to stdout without it)
 
@@ -54,9 +54,10 @@ cp .env.example .env
 | `CATALOG_API_URL` | No | Base URL of your catalog/play-history API |
 | `CHANGSTA_API_KEY` | No | Bearer token for `CATALOG_API_URL` (if your API requires auth) |
 | `GROQ_API_KEY` | No | Stage 1 provider (tried first) |
-| `GEMINI_API_KEY` | No | Stage 1 provider (fallback) |
-| `OPENROUTER_API_KEY` | No | Stage 1 provider (fallback) |
+| `GEMINI_API_KEY` | No | Stage 1 provider (fallback 1) |
+| `MISTRAL_API_KEY` | No | Stage 1 provider (fallback 2) |
 | `MINIMAX_API_KEY` | No | Stage 1 provider (last fallback) + Stage 2 alternative (`--stage2-provider minimax`) |
+| `OPENROUTER_API_KEY` | No | Reserved for future use |
 | `DISCORD_BOT_TOKEN` | No | Discord delivery |
 | `DISCORD_GUILD_ID` | No | Discord server ID |
 | `MIXLAB_DISCORD_CHANNEL_ID` | No | Target channel ID (preferred over name) |
@@ -250,14 +251,14 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 ### LLM Stage 1 — concept generation
 
 - Provider cascade tried in order, falling through on error or missing key:
-  **Groq → Gemini → OpenRouter → MiniMax → Anthropic**
+  **Groq → Gemini → Mistral → MiniMax**
 - Clusters larger than 40 tracks are chunked; each chunk is called independently and concepts merged
 - Concepts with fewer than 4 valid track IDs (after stripping hallucinated IDs) are discarded
 - Up to 6 concepts, ranked by track count, are forwarded to Stage 2
 
 ### LLM Stage 2 — report generation
 
-- Always uses Anthropic (Claude Sonnet) — no fallback
+- Always uses Anthropic (Claude Sonnet); falls back to MiniMax M2.7 if Anthropic fails mid-run
 - Writes a peer-to-peer mix planning narrative with track listings in Camelot order and notes on transitions
 - Appends shortfall warnings for concepts significantly below the recommended track count for their genre
 - Elapsed generation time is appended to the report and included in the Discord message

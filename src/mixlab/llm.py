@@ -154,6 +154,13 @@ async def _try_gemini(prompt: str) -> str | None:
     )
 
 
+async def _try_mistral(prompt: str) -> str | None:
+    key = os.environ.get("MISTRAL_API_KEY")
+    if not key:
+        return None
+    return await _call_openai_compat("https://api.mistral.ai", key, "mistral-small-latest", prompt)
+
+
 async def _try_anthropic(prompt: str) -> str | None:
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
@@ -163,7 +170,7 @@ async def _try_anthropic(prompt: str) -> str | None:
 
 # Stage 1 free providers only — OpenRouter and Anthropic are Stage 2 / paid.
 # MiniMax is last: throttled to 50 TPS on entry plan, making it too slow to lead.
-_CASCADE = [_try_groq, _try_gemini, _try_minimax]
+_CASCADE = [_try_groq, _try_gemini, _try_mistral, _try_minimax]
 
 
 @dataclass
@@ -313,18 +320,24 @@ The "report" value must be a single string (with \\n for line breaks) in this ex
 
 CONCEPT: [title]
 
-[2–3 sentence creative brief that states the set's thesis — not just mood, but intention and what it asks of the room]
+[1–2 sentences: the set's thesis — what it asks of the room. Not mood alone; intention.]
 
 Track order (Camelot / BPM):
 [Artist — Title [Key · BPM] for each track in play order, one track per line]
 
-Arc: [One sentence describing the overall energy shape and structural logic of the set.]
+Arc: [One sentence describing the overall energy shape.]
 
-[One paragraph per track in play order. Each paragraph: Artist — Title (role, Key, BPM) — what it does at this point in the set, why it is placed here, and how it connects to the next track. The first paragraph must address why the opener works as ambient architecture. The last paragraph must address why the closer signals finality. Separate paragraphs with a blank line.]
+[One line per track in play order. No blank lines between them. \
+Format: Artist — Title (role) — one sentence on why this track at this moment. \
+If the move to the next track is non-obvious (Camelot jump 3+ positions or BPM shift >5 BPM), \
+append the mechanism in the same line after a semicolon. Nothing else.]
 
-Standout transitions or calculated risks: [One item per transition worth naming, each on its own paragraph separated by a blank line. For any Camelot jump of 3+ positions, name the mechanism that makes it survivable in a live context. If there is a clearly weak or high-risk transition, name it and explain why it remains acceptable. If there are no notable transitions, do not invent one.]
+Standout transitions or calculated risks: [Only for risks not already covered in the track lines \
+above. One sentence per item. If nothing qualifies, omit this section entirely — do not write it.]
 
-Assumptions: [One assumption per paragraph, separated by blank lines. Flag vocal overlap risks, transition-window concerns, arrangement compatibility issues, sequencing choices you are not fully confident in, and pool quality issues. Honesty here is more useful than confidence.]
+Assumptions:
+- [One bullet per flag. Lead with the risk. Cover only genuine uncertainty: [unverified] tracks, \
+vocal clash risks, transition-window concerns. Omit section if nothing material.]
 
 First decide whether the set would still make sense without any written justification. Only then write \
 the report.

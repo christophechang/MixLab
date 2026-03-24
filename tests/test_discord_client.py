@@ -31,7 +31,7 @@ def test_format_report_snapshot_full_catalogue_mode() -> None:
     assert "/ 200" not in result
     assert "unplayed / in collection" not in result
     # Largest genre (200) gets a full bar; smaller (150) gets a proportionally shorter one
-    lines = [l for l in result.splitlines() if "drum_and_bass" in l or "house" in l]
+    lines = [line for line in result.splitlines() if "drum_and_bass" in line or "house" in line]
     dnb_bar = lines[0].split("200")[1]
     house_bar = lines[1].split("150")[1]
     assert dnb_bar.count("█") > house_bar.count("█")
