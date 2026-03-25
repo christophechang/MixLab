@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import statistics
 
+from mixlab.config import CustomGenre
 from mixlab.models import Track
 
 _BPM_SPREAD = 6.0
@@ -126,3 +127,32 @@ def filter_by_bpm(tracks: list[Track]) -> list[Track]:
         return tracks
     median = statistics.median(t.bpm for t in tracks)
     return [t for t in tracks if abs(t.bpm - median) <= _BPM_SPREAD]
+
+
+def filter_by_bpm_range(tracks: list[Track], bpm_min: float, bpm_max: float) -> list[Track]:
+    """Keep only tracks whose BPM falls within [bpm_min, bpm_max] inclusive."""
+    return [t for t in tracks if bpm_min <= t.bpm <= bpm_max]
+
+
+def build_custom_genre_pool(
+    custom_genre_key: str,
+    tracks: list[Track],
+    custom_genres: dict[str, CustomGenre],
+    genre_map: dict[str, list[str]],
+) -> list[Track]:
+    """Return all tracks belonging to a custom genre's sub-genres, with BPM range filter applied if defined."""
+    cfg = custom_genres[custom_genre_key]
+
+    # Collect all Rekordbox genre tags that belong to this custom genre.
+    rb_tags: set[str] = set()
+    for key in cfg["genres"]:
+        for tag in genre_map.get(key, []):
+            rb_tags.add(tag)
+
+    pool = [t for t in tracks if t.genre in rb_tags]
+
+    bpm_range = cfg["bpm_range"]
+    if bpm_range is not None:
+        pool = filter_by_bpm_range(pool, bpm_range[0], bpm_range[1])
+
+    return pool

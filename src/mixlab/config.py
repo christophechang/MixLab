@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+from typing import TypedDict
+
+
+class CustomGenre(TypedDict):
+    genres: list[str]  # api labels from GENRE_MAP
+    bpm_range: tuple[float, float] | None  # inclusive hard filter, or None to skip
+
+
+CUSTOM_GENRES: dict[str, CustomGenre] = {
+    "170": CustomGenre(genres=["drum_and_bass", "jungle"], bpm_range=(165.0, 175.0)),
+    "140": CustomGenre(genres=["breakbeat", "uk_bass", "uk_garage"], bpm_range=(130.0, 140.0)),
+    "4x4": CustomGenre(genres=["house", "electronica", "disco", "progressive", "techno"], bpm_range=None),
+}
+
 GENRE_MAP: dict[str, list[str]] = {
     "drum_and_bass": ["Drum & Bass", "DnB", "Liquid DnB", "Jungle/Drum'n'bass"],
     "techno": ["Techno", "Dark Techno", "Industrial Techno", "Dub Techno", "Melodic House & Techno"],

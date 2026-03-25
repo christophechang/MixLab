@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import sys
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
+from typing import Any, Callable
 
 import httpx
 
@@ -12,15 +15,24 @@ from mixlab.config import TRACK_COUNT_TARGETS
 from mixlab.models import MixConcept, Track
 
 _MAX_TRACKS_PER_CALL = 40
+_MAX_TRACKS_PER_CALL_CUSTOM = 60  # larger chunks for custom multi-genre pools
+_MAX_STAGE1_POOL_CUSTOM = 120  # random window size for custom pools (2 chunks × 60 = 2 API calls)
 _MIN_SHORTLIST_TRACKS = 8  # Stage 1: minimum candidates per pool
 _MIN_CONCEPT_TRACKS = 4  # Stage 2: minimum tracks in a final curated set
+_STAGE2_CAP = 6  # max shortlists sent to Stage 2
+_STAGE2_CANDIDATE_POOL = 12  # top N by size to sample from (ensures variety across runs)
+_STAGE1_TIMEOUT = 120  # seconds — default for openai-compat providers
+_MINIMAX_STAGE1_TIMEOUT = 360  # MiniMax is a thinking model; needs extra time
 
 # Strip inline thinking blocks emitted by reasoning models (e.g. MiniMax M2.7).
 _THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
 
 
 def _strip_thinking(text: str) -> str:
-    return _THINK_RE.sub("", text).strip()
+    stripped = _THINK_RE.sub("", text).strip()
+    # If stripping removed everything, the model wrapped its entire output in thinking tags.
+    # Fall back to the original so _parse_concepts can attempt to extract JSON from it.
+    return stripped or text
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +63,33 @@ Respond ONLY with a JSON array matching this schema:
 [{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]\
 """
 
+# Custom genre variant: larger shortlists (20-25) to give Stage 2 more material to discard.
+_STAGE1_SYSTEM_CUSTOM = """\
+You are a music data analyst pre-screening a DJ's track collection to build candidate shortlists for mix concepts.
+
+Your task is purely technical pre-screening — not creative curation.
+
+This pool spans multiple related sub-genres. Tracks from different sub-genres may appear together.
+
+For each shortlist you create:
+- Group tracks that are plausibly technically compatible: similar BPM (±6 BPM within the pool) and harmonically \
+related keys (adjacent or nearby Camelot positions).
+- Each shortlist should contain 20–25 candidate tracks that a DJ could plausibly draw from for one mix concept.
+- Generate 3–5 distinct shortlists with different BPM centres or key characters so they serve different mood directions. \
+If the material only supports 1 or 2 distinct shortlists, produce what the material supports — do not pad. \
+If no coherent shortlist of 8+ tracks can be formed, return an empty array [].
+- Do NOT make final ordering decisions. Do NOT decide openers or closers. Simply group technically compatible tracks.
+- Exclude obvious outliers: tracks more than 8 BPM from the group median, or in keys with no harmonic relationship \
+to the rest of the pool.
+
+Give each shortlist a rough descriptive title (e.g. "Deep 122 BPM / 4A–7A Pool") and a one-line sonic mood.
+
+Some tracks include supplementary metadata: `energy:N/8` is a Mixed in Key automated score (0=lowest, 8=highest) and can help signal intensity. Treat it as a useful hint when present — not all tracks will have it, and its absence says nothing about the track's quality or suitability. When Year is present, you may form era-coherent groupings as an alternative dimension to BPM-centre variation — but only when the material clearly separates into eras.
+
+Respond ONLY with a JSON array matching this schema:
+[{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]\
+"""
+
 
 def _tracks_to_text(tracks: list[Track]) -> str:
     lines = []
@@ -70,11 +109,18 @@ def _parse_concepts(raw: str) -> list[MixConcept]:
         raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
         raw = re.sub(r"\n?```\s*$", "", raw)
     raw = raw.strip()
-    # Trim trailing prose after the closing bracket (some models append explanatory text).
+    # Extract the JSON array by finding the outermost [...] bounds.
+    # This handles both leading prose and trailing prose from any model.
+    first_bracket = raw.find("[")
     last_bracket = raw.rfind("]")
-    if last_bracket != -1:
-        raw = raw[: last_bracket + 1]
-    data = json.loads(raw)
+    if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+        raw = raw[first_bracket : last_bracket + 1]
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        # Fallback: escape literal newlines/carriage returns inside JSON strings
+        # (some models emit unescaped control characters in string values).
+        data = json.loads(_fix_json_strings(raw))
     return [MixConcept(**item) for item in data]
 
 
@@ -84,14 +130,16 @@ async def _call_openai_compat(
     model: str,
     prompt: str,
     path: str = "/v1/chat/completions",
-    timeout: int = 60,
+    timeout: int = _STAGE1_TIMEOUT,
     system: str = _STAGE1_SYSTEM,
+    max_tokens: int = 4096,
 ) -> str:
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": model,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
         "temperature": 0.7,
+        "max_tokens": max_tokens,
     }
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(f"{base_url.rstrip('/')}{path}", headers=headers, json=payload)
@@ -125,23 +173,31 @@ async def _call_anthropic_http(
         return str(resp.json()["content"][0]["text"])
 
 
-async def _try_minimax(prompt: str) -> str | None:
+async def _try_minimax(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
     key = os.environ.get("MINIMAX_API_KEY")
     if not key:
         return None
     return await _call_openai_compat(
-        "https://api.minimax.io/v1", key, "MiniMax-M2.7", prompt, path="/text/chatcompletion_v2", timeout=240
+        "https://api.minimax.io/v1",
+        key,
+        "MiniMax-M2.7",
+        prompt,
+        path="/text/chatcompletion_v2",
+        timeout=_MINIMAX_STAGE1_TIMEOUT,
+        system=system,
     )
 
 
-async def _try_groq(prompt: str) -> str | None:
+async def _try_groq(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
     key = os.environ.get("GROQ_API_KEY")
     if not key:
         return None
-    return await _call_openai_compat("https://api.groq.com/openai", key, "llama-3.3-70b-versatile", prompt)
+    return await _call_openai_compat(
+        "https://api.groq.com/openai", key, "llama-3.3-70b-versatile", prompt, system=system
+    )
 
 
-async def _try_gemini(prompt: str) -> str | None:
+async def _try_gemini(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         return None
@@ -151,26 +207,28 @@ async def _try_gemini(prompt: str) -> str | None:
         "gemini-2.5-flash",
         prompt,
         path="/chat/completions",
+        system=system,
     )
 
 
-async def _try_mistral(prompt: str) -> str | None:
+async def _try_mistral(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
     key = os.environ.get("MISTRAL_API_KEY")
     if not key:
         return None
-    return await _call_openai_compat("https://api.mistral.ai", key, "mistral-small-latest", prompt)
+    return await _call_openai_compat("https://api.mistral.ai", key, "mistral-small-latest", prompt, system=system)
 
 
-async def _try_anthropic(prompt: str) -> str | None:
+async def _try_anthropic(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         return None
-    return await _call_anthropic_http(key, "claude-sonnet-4-6", _STAGE1_SYSTEM, prompt)
+    return await _call_anthropic_http(key, "claude-sonnet-4-6", system, prompt)
 
 
 # Stage 1 free providers only — OpenRouter and Anthropic are Stage 2 / paid.
 # MiniMax is last: throttled to 50 TPS on entry plan, making it too slow to lead.
-_CASCADE = [_try_groq, _try_gemini, _try_mistral, _try_minimax]
+_Stage1Provider = Callable[..., Coroutine[Any, Any, str | None]]
+_CASCADE: list[_Stage1Provider] = [_try_groq, _try_gemini, _try_mistral, _try_minimax]
 
 
 @dataclass
@@ -185,17 +243,22 @@ def make_cascade_state() -> CascadeState:
     return CascadeState()
 
 
-async def _call_stage1_once(tracks: list[Track], genre: str, state: CascadeState) -> list[MixConcept]:
+async def _call_stage1_once(
+    tracks: list[Track], genre: str, state: CascadeState, custom: bool = False
+) -> list[MixConcept]:
     valid_ids = {t.track_id for t in tracks}
     prompt = f"Genre: {genre}\n\nTracks:\n{_tracks_to_text(tracks)}"
+    system = _STAGE1_SYSTEM_CUSTOM if custom else _STAGE1_SYSTEM
 
     for _ in range(len(_CASCADE)):
         provider = _CASCADE[state.index]
         try:
-            result = await provider(prompt)
+            result = await provider(prompt, system=system)
             if result is None:  # provider not configured — skip silently, no failure counted
                 state.index = (state.index + 1) % len(_CASCADE)
                 continue
+            if not result.strip():  # provider returned empty content — treat as a failure
+                raise ValueError(f"Provider {provider.__name__} returned empty content.")
             concepts = _parse_concepts(result)
             cleaned = [
                 MixConcept(title=c.title, mood=c.mood, track_ids=[tid for tid in c.track_ids if tid in valid_ids])
@@ -216,14 +279,42 @@ async def _call_stage1_once(tracks: list[Track], genre: str, state: CascadeState
     raise RuntimeError(f"All Stage 1 providers exhausted for genre '{genre}'.")
 
 
-async def stage1_concepts(cluster: list[Track], genre: str, state: CascadeState) -> list[MixConcept]:
-    if len(cluster) <= _MAX_TRACKS_PER_CALL:
-        return await _call_stage1_once(cluster, genre, state)
+async def stage1_concepts(
+    cluster: list[Track], genre: str, state: CascadeState, custom: bool = False
+) -> list[MixConcept]:
+    chunk_size = _MAX_TRACKS_PER_CALL_CUSTOM if custom else _MAX_TRACKS_PER_CALL
+    if len(cluster) <= chunk_size:
+        return await _call_stage1_once(cluster, genre, state, custom=custom)
 
     concepts: list[MixConcept] = []
-    for i in range(0, len(cluster), _MAX_TRACKS_PER_CALL):
-        concepts.extend(await _call_stage1_once(cluster[i : i + _MAX_TRACKS_PER_CALL], genre, state))
+    for i in range(0, len(cluster), chunk_size):
+        concepts.extend(await _call_stage1_once(cluster[i : i + chunk_size], genre, state, custom=custom))
     return concepts
+
+
+def select_stage1_window(tracks: list[Track], max_count: int) -> list[Track]:
+    """Pick a random contiguous window of up to max_count tracks from a Camelot-sorted pool.
+
+    Each run starts at a different position in the sorted list, giving variety across runs
+    while keeping Stage 1 input small enough to avoid LLM rate limits.
+    The window is a coherent BPM/key slice because the input is Camelot-sorted.
+    """
+    if len(tracks) <= max_count:
+        return tracks
+    start = random.randint(0, len(tracks) - max_count)
+    return tracks[start : start + max_count]
+
+
+def select_shortlists_for_stage2(shortlists: list[MixConcept]) -> list[MixConcept]:
+    """Select up to _STAGE2_CAP shortlists for Stage 2, sampling randomly from the top candidates by pool size.
+
+    Always picks from the _STAGE2_CANDIDATE_POOL largest shortlists so every run has a chance of variety
+    while still favouring well-stocked pools.
+    """
+    if len(shortlists) <= _STAGE2_CAP:
+        return shortlists
+    candidates = sorted(shortlists, key=lambda s: len(s.track_ids), reverse=True)[:_STAGE2_CANDIDATE_POOL]
+    return random.sample(candidates, min(_STAGE2_CAP, len(candidates)))
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +510,8 @@ async def stage2_curate_and_report(
     shortlists: list[MixConcept],
     tracks_by_id: dict[str, Track],
     stage2_provider: str | None = None,
+    custom_genre_label: str | None = None,
+    custom_genre_sub_genres: list[str] | None = None,
 ) -> tuple[list[MixConcept], str]:
     provider = (stage2_provider or os.environ.get("STAGE2_PROVIDER", "anthropic")).lower()
     use_minimax = provider == "minimax"
@@ -477,6 +570,16 @@ async def stage2_curate_and_report(
         f"a thin shortlist may yield none — but each concept must draw only from tracks within a single shortlist.\n\n"
         + "\n\n".join(sections)
     )
+
+    if custom_genre_label and custom_genre_sub_genres:
+        sub_genre_str = ", ".join(custom_genre_sub_genres)
+        prompt += (
+            f"\n\nThis is a multi-genre custom pool: '{custom_genre_label}' ({sub_genre_str}). "
+            f"When sequencing across sub-genre boundaries, you must justify the move — "
+            f"name the specific mechanism that makes the transition work: BPM alignment, rhythmic character, "
+            f"harmonic relationship, or the energy state of the room that earns the shift. "
+            f"Do not avoid cross-genre moves — they are the point of this pool. But every such move must be defensible."
+        )
 
     raw: str
     if use_minimax:

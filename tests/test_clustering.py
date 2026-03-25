@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from mixlab.clustering import count_outlier_genres, group_by_genre, partition_outliers, sort_by_camelot
+from mixlab.clustering import (
+    build_custom_genre_pool,
+    count_outlier_genres,
+    filter_by_bpm_range,
+    group_by_genre,
+    partition_outliers,
+    sort_by_camelot,
+)
+from mixlab.config import CustomGenre
 from mixlab.models import Track
 
 _GENRE_MAP = {
@@ -147,3 +155,89 @@ def test_outliers_below_threshold_skips_llm() -> None:
     _, outliers = partition_outliers(tracks, _GENRE_MAP)
     assert len(outliers) == 3
     assert len(outliers) < 4
+
+
+# ---------------------------------------------------------------------------
+# filter_by_bpm_range
+# ---------------------------------------------------------------------------
+
+
+def test_filter_by_bpm_range_keeps_tracks_within_bounds() -> None:
+    tracks = [
+        _track(track_id="1", bpm=165.0),
+        _track(track_id="2", bpm=170.0),
+        _track(track_id="3", bpm=175.0),
+        _track(track_id="4", bpm=164.9),
+        _track(track_id="5", bpm=175.1),
+    ]
+    result = filter_by_bpm_range(tracks, 165.0, 175.0)
+    ids = {t.track_id for t in result}
+    assert ids == {"1", "2", "3"}
+
+
+def test_filter_by_bpm_range_inclusive_boundaries() -> None:
+    tracks = [
+        _track(track_id="1", bpm=130.0),
+        _track(track_id="2", bpm=140.0),
+    ]
+    result = filter_by_bpm_range(tracks, 130.0, 140.0)
+    assert len(result) == 2
+
+
+def test_filter_by_bpm_range_empty_input() -> None:
+    assert filter_by_bpm_range([], 130.0, 140.0) == []
+
+
+# ---------------------------------------------------------------------------
+# build_custom_genre_pool
+# ---------------------------------------------------------------------------
+
+_CUSTOM_GENRE_MAP: dict[str, list[str]] = {
+    "drum_and_bass": ["Drum & Bass", "DnB"],
+    "jungle": ["Jungle", "Ragga Jungle"],
+    "house": ["House", "Deep House"],
+    "techno": ["Techno"],
+}
+
+_CUSTOM_GENRES: dict[str, CustomGenre] = {
+    "170": CustomGenre(genres=["drum_and_bass", "jungle"], bpm_range=(165.0, 175.0)),
+    "4x4": CustomGenre(genres=["house", "techno"], bpm_range=None),
+}
+
+
+def test_build_custom_genre_pool_merges_sub_genres() -> None:
+    tracks = [
+        _track(track_id="1", genre="Drum & Bass", bpm=170.0),
+        _track(track_id="2", genre="Jungle", bpm=168.0),
+        _track(track_id="3", genre="House", bpm=125.0),
+        _track(track_id="4", genre="Techno", bpm=132.0),
+    ]
+    pool = build_custom_genre_pool("170", tracks, _CUSTOM_GENRES, _CUSTOM_GENRE_MAP)
+    ids = {t.track_id for t in pool}
+    assert ids == {"1", "2"}
+
+
+def test_build_custom_genre_pool_applies_bpm_range_filter() -> None:
+    tracks = [
+        _track(track_id="1", genre="Drum & Bass", bpm=170.0),
+        _track(track_id="2", genre="Drum & Bass", bpm=160.0),  # outside 165–175
+        _track(track_id="3", genre="Jungle", bpm=176.0),  # outside 165–175
+    ]
+    pool = build_custom_genre_pool("170", tracks, _CUSTOM_GENRES, _CUSTOM_GENRE_MAP)
+    ids = {t.track_id for t in pool}
+    assert ids == {"1"}
+
+
+def test_build_custom_genre_pool_no_bpm_filter_when_none() -> None:
+    tracks = [
+        _track(track_id="1", genre="House", bpm=120.0),
+        _track(track_id="2", genre="Techno", bpm=138.0),
+    ]
+    pool = build_custom_genre_pool("4x4", tracks, _CUSTOM_GENRES, _CUSTOM_GENRE_MAP)
+    assert len(pool) == 2
+
+
+def test_build_custom_genre_pool_returns_empty_for_no_matches() -> None:
+    tracks = [_track(track_id="1", genre="Ambient", bpm=90.0)]
+    pool = build_custom_genre_pool("170", tracks, _CUSTOM_GENRES, _CUSTOM_GENRE_MAP)
+    assert pool == []

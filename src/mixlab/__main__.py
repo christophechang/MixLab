@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from mixlab.cache import load_genre_cache, save_genre_cache
 from mixlab.client import fetch_played_tracks
 from mixlab.clustering import (
+    build_custom_genre_pool,
     count_available_by_genre,
     count_outlier_genres,
     filter_by_bpm,
@@ -20,9 +21,15 @@ from mixlab.clustering import (
     resolve_genre_clusters,
     sort_by_camelot,
 )
-from mixlab.config import GENRE_MAP, IGNORED_GENRES
+from mixlab.config import CUSTOM_GENRES, GENRE_MAP, IGNORED_GENRES
 from mixlab.discord_client import send_report
-from mixlab.llm import make_cascade_state, stage1_concepts, stage2_curate_and_report
+from mixlab.llm import (
+    make_cascade_state,
+    select_shortlists_for_stage2,
+    select_stage1_window,
+    stage1_concepts,
+    stage2_curate_and_report,
+)
 from mixlab.matcher import filter_unplayed
 from mixlab.models import MixConcept, Track
 from mixlab.playlist_exporter import export_merged_xml, generate_merged_xml_bytes, parse_raw_tracks
@@ -123,29 +130,58 @@ async def run(
     # 4. If no genre specified, stop here — table is the output.
     if not genre:
         print("Specify --genre <label> to generate mix concepts.")
-        print("Labels: " + ", ".join(sorted(GENRE_MAP.keys())))
+        all_labels = sorted(GENRE_MAP.keys()) + sorted(CUSTOM_GENRES.keys())
+        print("Labels: " + ", ".join(all_labels))
         return
 
     # 5. Cluster and scope to the requested genre.
-    clusters, outliers = partition_outliers(unplayed, GENRE_MAP)
-    clusters = resolve_genre_clusters(genre, clusters, GENRE_MAP)
-
-    if not clusters:
-        print(f"No unplayed tracks found for genre '{genre}'.", file=sys.stderr)
-        sys.exit(1)
-
-    # 6. LLM Stage 1 — build candidate shortlists via sticky cascade (Groq → Gemini → Mistral → MiniMax).
+    is_custom = genre in CUSTOM_GENRES
     t_start = time.monotonic()
     cascade_state = make_cascade_state()
     all_shortlists: list[MixConcept] = []
-    for genre_label, cluster_tracks in clusters.items():
-        sorted_tracks = sort_by_camelot(filter_by_bpm(cluster_tracks))
-        all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label, cascade_state))
+    custom_genre_sub_genres: list[str] | None = None
+    genre_unplayed_track_ids_source: list[Track] = []
 
-    # Outliers ≥ 4 within this genre scope — shortlist as Misc.
-    genre_outliers = [t for t in outliers if t.genre.lower() == genre.lower()]
-    if len(genre_outliers) >= 4:
-        all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc", cascade_state))
+    if is_custom:
+        from mixlab.llm import _MAX_STAGE1_POOL_CUSTOM
+
+        pool = build_custom_genre_pool(genre, unplayed, CUSTOM_GENRES, GENRE_MAP)
+        if not pool:
+            print(f"No unplayed tracks found for custom genre '{genre}'.", file=sys.stderr)
+            sys.exit(1)
+        print(f"Custom genre '{genre}': {len(pool)} tracks in pool.")
+        # Sort by BPM for Stage 1 window selection — ensures each window is BPM-coherent.
+        # (Camelot walk not used here: it can span large BPM gaps across sub-genres.)
+        bpm_sorted_pool = sorted(pool, key=lambda t: t.bpm)
+        stage1_pool = select_stage1_window(bpm_sorted_pool, _MAX_STAGE1_POOL_CUSTOM)
+        if len(stage1_pool) < len(pool):
+            print(f"  Selected {len(stage1_pool)}-track window from pool for Stage 1 (randomised per run).")
+        cfg = CUSTOM_GENRES[genre]
+        custom_genre_sub_genres = cfg["genres"]
+        all_shortlists.extend(await stage1_concepts(stage1_pool, genre, cascade_state, custom=True))
+        genre_unplayed_track_ids_source = pool
+        # No outlier handling for custom genres — pool is already the full scope.
+        genre_outliers: list[Track] = []
+        outliers: list[Track] = []
+    else:
+        clusters, outliers = partition_outliers(unplayed, GENRE_MAP)
+        clusters = resolve_genre_clusters(genre, clusters, GENRE_MAP)
+
+        if not clusters:
+            print(f"No unplayed tracks found for genre '{genre}'.", file=sys.stderr)
+            sys.exit(1)
+
+        # 6a. LLM Stage 1 — standard path.
+        for genre_label, cluster_tracks in clusters.items():
+            sorted_tracks = sort_by_camelot(filter_by_bpm(cluster_tracks))
+            all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label, cascade_state))
+
+        # Outliers ≥ 4 within this genre scope — shortlist as Misc.
+        genre_outliers = [t for t in outliers if t.genre.lower() == genre.lower()]
+        if len(genre_outliers) >= 4:
+            all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc", cascade_state))
+
+        genre_unplayed_track_ids_source = [t for cluster_tracks in clusters.values() for t in cluster_tracks]
 
     if not all_shortlists:
         print("No shortlists generated — all tracks may have been excluded.", file=sys.stderr)
@@ -156,17 +192,22 @@ async def run(
             file=sys.stderr,
         )
 
-    # Cap shortlists sent to Stage 2 — keep the richest pools.
+    # Select shortlists for Stage 2 — random sample from top candidates (ensures variety across runs).
     tracks_by_id = _build_tracks_by_id(tracks)
-    max_shortlists = 6
     all_shortlists = [s for s in all_shortlists if any(tid in tracks_by_id for tid in s.track_ids)]
-    all_shortlists = sorted(all_shortlists, key=lambda s: len(s.track_ids), reverse=True)[:max_shortlists]
+    all_shortlists = select_shortlists_for_stage2(all_shortlists)
     if not all_shortlists:
         print("No shortlists survived track resolution — collection may be out of sync.", file=sys.stderr)
         sys.exit(1)
 
     # 7. LLM Stage 2 — creative curation + full report (single Anthropic call).
-    all_concepts, report = await stage2_curate_and_report(all_shortlists, tracks_by_id, stage2_provider)
+    all_concepts, report = await stage2_curate_and_report(
+        all_shortlists,
+        tracks_by_id,
+        stage2_provider,
+        custom_genre_label=genre if is_custom else None,
+        custom_genre_sub_genres=custom_genre_sub_genres,
+    )
     if not all_concepts:
         print(report, file=sys.stderr)
         sys.exit(1)
@@ -185,7 +226,7 @@ async def run(
     # Only meaningful when we fetched played tracks from the catalogue API.
     genre_unplayed_track_ids: list[str] | None = None
     if used_catalog_api:
-        genre_unplayed_track_ids = [t.track_id for cluster_tracks in clusters.values() for t in cluster_tracks]
+        genre_unplayed_track_ids = [t.track_id for t in genre_unplayed_track_ids_source]
         genre_unplayed_track_ids += [t.track_id for t in genre_outliers]
     merged_bytes = generate_merged_xml_bytes(all_concepts, raw_tracks_xml, folder_name, genre_unplayed_track_ids)
     xml_attachments: list[tuple[str, bytes]] = (
@@ -214,10 +255,41 @@ async def run(
 
 def main() -> None:
     load_dotenv()
-    parser = argparse.ArgumentParser(description="MixLab — AI-powered DJ crate assistant")
-    parser.add_argument("--genre", type=str, default=None, help="Genre to target (e.g. drum_and_bass, house)")
-    parser.add_argument("--duration", type=int, default=None, help="Target set duration in minutes")
-    parser.add_argument("--genres", action="store_true", help="Show available genres from last run (no API calls)")
+    parser = argparse.ArgumentParser(
+        description="MixLab — AI-powered DJ crate assistant",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+standard genres:
+  house, drum_and_bass, breakbeat, electronica, hip_hop,
+  jungle, uk_bass, progressive, disco, techno, uk_garage
+
+custom genres (merge multiple genres into one cross-genre pool):
+  170   drum_and_bass + jungle            165–175 BPM hard filter
+  140   breakbeat + uk_bass + uk_garage   130–140 BPM hard filter
+  4x4   house + electronica + disco +     no BPM filter (Stage 1 groups by BPM)
+        progressive + techno
+
+  Custom genres pick a random 120-track window from the full pool each run,
+  so repeated runs explore different corners of the collection.
+
+examples:
+  mixlab                              show crate availability table (no LLM)
+  mixlab --genre house                generate mix concepts for house
+  mixlab --genre 4x4 --all-tracks     cross-genre 4x4 set from full collection
+  mixlab --genres                     show cached counts from last run (no API)
+""",
+    )
+    parser.add_argument(
+        "--genre",
+        type=str,
+        default=None,
+        metavar="LABEL",
+        help="Genre to target. Standard labels: house, drum_and_bass, techno, etc. "
+        "Custom labels: 170, 140, 4x4 (cross-genre pools). "
+        "Also accepts a Rekordbox genre tag directly, e.g. 'Deep House'.",
+    )
+    parser.add_argument("--duration", type=int, default=None, help="Target set duration in minutes (reserved)")
+    parser.add_argument("--genres", action="store_true", help="Show genre availability from last run (no API calls)")
     parser.add_argument(
         "--export",
         type=str,
@@ -234,12 +306,13 @@ def main() -> None:
         "--stage2-provider",
         type=str,
         default=None,
+        metavar="PROVIDER",
         help="Stage 2 LLM provider: anthropic (default) or minimax",
     )
     parser.add_argument(
         "--all-tracks",
         action="store_true",
-        help="Recommend from the full catalogue, ignoring played-track history (overrides CATALOG_API_URL)",
+        help="Use the full collection, ignoring played-track history (overrides CATALOG_API_URL)",
     )
     args = parser.parse_args()
     if args.genres:

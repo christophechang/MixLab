@@ -718,3 +718,147 @@ async def test_stage2_unenriched_track_produces_clean_line(monkeypatch: pytest.M
     # No empty fields or junk separators
     assert "| |" not in user_prompt
     assert "[unverified]" not in user_prompt
+
+
+# ---------------------------------------------------------------------------
+# select_stage1_window — random contiguous window for custom genre pools
+# ---------------------------------------------------------------------------
+
+
+def test_select_stage1_window_returns_all_when_at_or_below_max() -> None:
+    from mixlab.llm import select_stage1_window
+
+    tracks = _make_tracks(10)
+    result = select_stage1_window(tracks, 120)
+    assert result == tracks
+
+
+def test_select_stage1_window_limits_to_max_count() -> None:
+    from mixlab.llm import select_stage1_window
+
+    tracks = _make_tracks(200)
+    result = select_stage1_window(tracks, 120)
+    assert len(result) == 120
+
+
+def test_select_stage1_window_returns_contiguous_slice() -> None:
+    from mixlab.llm import select_stage1_window
+
+    tracks = _make_tracks(200)
+    result = select_stage1_window(tracks, 120)
+    # The returned slice must be a contiguous subsequence of the input.
+    result_ids = [t.track_id for t in result]
+    all_ids = [t.track_id for t in tracks]
+    start = all_ids.index(result_ids[0])
+    assert all_ids[start : start + 120] == result_ids
+
+
+def test_select_stage1_window_varies_across_runs() -> None:
+    from mixlab.llm import select_stage1_window
+
+    tracks = _make_tracks(500)
+    starts = {select_stage1_window(tracks, 60)[0].track_id for _ in range(30)}
+    assert len(starts) > 1  # different starting positions across runs
+
+
+# ---------------------------------------------------------------------------
+# select_shortlists_for_stage2 — randomised selection
+# ---------------------------------------------------------------------------
+
+
+def test_select_shortlists_returns_all_when_at_or_below_cap() -> None:
+    from mixlab.llm import select_shortlists_for_stage2
+
+    shortlists = [MixConcept(title=str(i), mood="m", track_ids=[str(i)] * (5 + i)) for i in range(6)]
+    result = select_shortlists_for_stage2(shortlists)
+    assert len(result) == 6
+
+
+def test_select_shortlists_caps_at_stage2_cap() -> None:
+    from mixlab.llm import select_shortlists_for_stage2
+
+    shortlists = [MixConcept(title=str(i), mood="m", track_ids=[str(i)] * (5 + i)) for i in range(15)]
+    result = select_shortlists_for_stage2(shortlists)
+    assert len(result) == 6
+
+
+def test_select_shortlists_samples_from_top_candidates() -> None:
+    """Every returned shortlist must be one of the _STAGE2_CANDIDATE_POOL (12) largest."""
+    from mixlab.llm import _STAGE2_CANDIDATE_POOL, select_shortlists_for_stage2
+
+    # 20 shortlists with sizes 1..20
+    shortlists = [MixConcept(title=str(i), mood="m", track_ids=[str(i)] * (i + 1)) for i in range(20)]
+    # Top 12 by size are the last 12 (indices 8–19, sizes 9–20)
+    top_titles = {str(i) for i in range(20 - _STAGE2_CANDIDATE_POOL, 20)}
+    result = select_shortlists_for_stage2(shortlists)
+    for s in result:
+        assert s.title in top_titles
+
+
+def test_select_shortlists_varies_across_runs() -> None:
+    """Multiple calls with the same large input should produce different orderings/selections."""
+    from mixlab.llm import select_shortlists_for_stage2
+
+    shortlists = [MixConcept(title=str(i), mood="m", track_ids=[str(i)] * (10 + i)) for i in range(20)]
+    results = [frozenset(s.title for s in select_shortlists_for_stage2(shortlists)) for _ in range(20)]
+    # With 20 samples from top-12 choose-6 there should be more than one unique selection.
+    assert len(set(results)) > 1
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 custom genre cross-genre prompt injection
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_stage2_prompt_includes_custom_genre_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When custom_genre_label is set, the user prompt must contain the cross-genre justification instruction."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        custom_genre_label="170",
+        custom_genre_sub_genres=["drum_and_bass", "jungle"],
+    )
+
+    import json as _json
+
+    body = _json.loads(route.calls[0].request.content.decode())
+    user_prompt: str = body["messages"][0]["content"]
+    assert "170" in user_prompt
+    assert "drum_and_bass" in user_prompt
+    assert "jungle" in user_prompt
+    assert "cross-genre" in user_prompt.lower() or "sub-genre" in user_prompt.lower()
+
+
+@respx.mock
+async def test_stage2_prompt_has_no_custom_genre_section_for_standard_genre(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Standard genre runs must not have the custom genre paragraph appended."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    import json as _json
+
+    body = _json.loads(route.calls[0].request.content.decode())
+    user_prompt: str = body["messages"][0]["content"]
+    assert "multi-genre custom pool" not in user_prompt

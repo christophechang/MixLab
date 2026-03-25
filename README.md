@@ -199,6 +199,8 @@ To also write the XML to disk:
 
 ## Available genres
 
+### Standard genres
+
 Pass the label (left column) to `--genre`. The right column shows the Rekordbox genre tags that map to it.
 
 | Label | Rekordbox genre tags |
@@ -217,7 +219,39 @@ Pass the label (left column) to `--genre`. The right column shows the Rekordbox 
 
 You can also pass a Rekordbox genre tag directly (case-insensitive), e.g. `--genre "Deep House"`.
 
-Run `./mixlab` first to see your availability counts — genres with the most unplayed tracks produce the richest concepts.
+### Custom genres
+
+Custom genres merge multiple standard genres into a single pool. They are designed for cross-genre sets where the interesting DJ work happens at the boundaries — moving from one sound to another and making it feel intentional.
+
+```bash
+./mixlab --genre 4x4
+./mixlab --genre 170
+./mixlab --genre 140
+```
+
+| Label | Sub-genres | BPM range | Rationale |
+|---|---|---|---|
+| `170` | drum_and_bass + jungle | 165–175 BPM | Hardcore continuum genres that live at the same tempo and share rhythmic DNA — the richest cross-genre territory in the collection |
+| `140` | breakbeat + uk_bass + uk_garage | 130–140 BPM | UK underground genres that occupy the same tempo bracket; blends can range from technical to percussive to bass-heavy |
+| `4x4` | house + electronica + disco + progressive + techno | none | The full 4/4 spectrum from deep house to techno, with a wide BPM range (~90–140); the creative challenge is the journey across that arc |
+
+Custom genres behave differently from standard genres in two key ways:
+
+**1. BPM filtering.** `170` and `140` apply a hard BPM range filter — tracks outside those bounds are excluded before Stage 1. The range is part of what defines the genre. `4x4` has no hard BPM filter: the sub-genres span a wide range (~90–140 BPM) and Stage 1 is responsible for finding BPM-coherent groupings within the pool.
+
+**2. Stage 2 cross-genre guidance.** The Stage 2 prompt is given the list of sub-genres and instructed to justify any move across genre boundaries — naming the specific mechanism that makes the transition work (BPM alignment, rhythmic character, harmonic relationship, or the energy state of the room). Cross-genre moves are not avoided; they are the point of using a custom genre. But every such move must be defensible.
+
+#### Why random selection?
+
+Custom genre pools are large — `4x4` alone is ~800 tracks. Sending the whole pool to Stage 1 would mean 10–15 sequential API calls to a free-tier LLM provider, which hits rate limits on every run and produces the same output every time.
+
+Instead, MixLab picks a **random 120-track window** from the BPM-sorted pool on each run:
+
+- The pool is sorted by BPM, so adjacent tracks in the sorted list are in the same tempo zone. The window always lands on a BPM-coherent slice — house tracks at 120–125 one run, progressive/techno at 128–133 the next.
+- Only 2 Stage 1 API calls are made per run (120 tracks / 60 per call), keeping the LLM load light and the rate limits safe.
+- Each run explores a different section of the collection, so you get different concepts each time without manually curating which tracks to send.
+
+Run the same custom genre multiple times. Each run will focus on a different corner of the pool and produce different concepts.
 
 ---
 
@@ -239,10 +273,13 @@ Drum & Bass tracks (genre tag `Drum & Bass` or `DnB`) with a recorded BPM below 
 - Tracks are grouped by Rekordbox genre tag, then aggregated under a canonical label via `GENRE_MAP` in `config.py`
 - Tracks whose genre tag is not in `GENRE_MAP` and not in `IGNORED_GENRES` appear as **Outliers** in the Discord report
 - Outlier tracks matching the requested genre name (case-insensitive) are passed to Stage 1 as a `Misc` cluster if there are 4 or more of them
+- Custom genres (`170`, `140`, `4x4`) merge multiple standard genres into a single pool before Stage 1; see [Custom genres](#custom-genres)
 
 ### BPM filtering (per cluster)
 
-Before sending tracks to the LLM, any track more than ±6 BPM from the cluster median is removed. This keeps generated concepts mixable without extreme pitch shifting.
+- **Standard genres:** any track more than ±6 BPM from the cluster median is removed before Stage 1
+- **Custom genres with a defined BPM range** (`170`, `140`): a hard range filter is applied instead — tracks outside the defined range are excluded
+- **Custom genres without a BPM range** (`4x4`): no BPM filter is applied; Stage 1 finds BPM-coherent groupings within the pool itself
 
 ### Camelot key ordering
 
@@ -252,9 +289,10 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 
 - Provider cascade tried in order, falling through on error or missing key:
   **Groq → Gemini → Mistral → MiniMax**
-- Clusters larger than 40 tracks are chunked; each chunk is called independently and concepts merged
+- **Standard genres:** clusters larger than 40 tracks are chunked; each chunk is called independently and concepts merged
+- **Custom genres:** a random 120-track window is selected from the BPM-sorted pool each run (see [Why random selection?](#why-random-selection)); 60 tracks per call, 2 calls maximum; shortlist target is 20–25 tracks per concept (vs 15–25 for standard)
 - Concepts with fewer than 4 valid track IDs (after stripping hallucinated IDs) are discarded
-- Up to 6 concepts, ranked by track count, are forwarded to Stage 2
+- Up to 6 concepts are forwarded to Stage 2, randomly sampled from the top 12 by pool size to ensure variety across runs
 
 ### LLM Stage 2 — report generation
 
