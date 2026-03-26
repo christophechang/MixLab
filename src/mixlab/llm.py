@@ -23,6 +23,7 @@ _STAGE2_CAP = 6  # max shortlists sent to Stage 2
 _STAGE2_CANDIDATE_POOL = 12  # top N by size to sample from (ensures variety across runs)
 _STAGE1_TIMEOUT = 120  # seconds — default for openai-compat providers
 _MINIMAX_STAGE1_TIMEOUT = 360  # MiniMax is a thinking model; needs extra time
+_THINKING_MODEL_MAX_TOKENS = 16000  # thinking models spend tokens on reasoning before output
 
 # Strip inline thinking blocks emitted by reasoning models (e.g. MiniMax M2.7).
 _THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
@@ -109,6 +110,7 @@ def _parse_concepts(raw: str) -> list[MixConcept]:
         raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
         raw = re.sub(r"\n?```\s*$", "", raw)
     raw = raw.strip()
+    raw_for_recovery = raw  # preserve before bracket extraction for truncation fallback
     # Extract the JSON array by finding the outermost [...] bounds.
     # This handles both leading prose and trailing prose from any model.
     first_bracket = raw.find("[")
@@ -118,9 +120,16 @@ def _parse_concepts(raw: str) -> list[MixConcept]:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        # Fallback: escape literal newlines/carriage returns inside JSON strings
-        # (some models emit unescaped control characters in string values).
-        data = json.loads(_fix_json_strings(raw))
+        try:
+            # Fallback: escape literal newlines/carriage returns inside JSON strings
+            # (some models emit unescaped control characters in string values).
+            data = json.loads(_fix_json_strings(raw))
+        except json.JSONDecodeError:
+            # Last resort: thinking model exhausted token budget mid-response, leaving
+            # the outer array unclosed. rfind("]") above finds a stray inner "]" and
+            # clips the string before any complete object's "}", so we must use the
+            # pre-extraction string here to recover whatever complete objects exist.
+            data = _extract_complete_objects(raw_for_recovery)
     return [MixConcept(**item) for item in data]
 
 
@@ -185,6 +194,7 @@ async def _try_minimax(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
         path="/text/chatcompletion_v2",
         timeout=_MINIMAX_STAGE1_TIMEOUT,
         system=system,
+        max_tokens=_THINKING_MODEL_MAX_TOKENS,
     )
 
 
@@ -208,6 +218,7 @@ async def _try_gemini(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
         prompt,
         path="/chat/completions",
         system=system,
+        max_tokens=_THINKING_MODEL_MAX_TOKENS,
     )
 
 
@@ -473,6 +484,57 @@ def _fix_json_strings(raw: str) -> str:
         else:
             result.append(ch)
     return "".join(result)
+
+
+def _extract_complete_objects(raw: str) -> list[dict[str, object]]:
+    """Extract complete JSON objects from a truncated JSON array.
+
+    Used when a thinking model exhausts its token budget mid-output, leaving the outer
+    array unclosed. Returns however many well-formed objects were found before the
+    truncation point; raises ValueError if none, so the cascade can fall through.
+    """
+    start = raw.find("[")
+    if start == -1:
+        raise ValueError("No JSON array start found in truncated response")
+    objects: list[dict[str, object]] = []
+    depth = 0
+    obj_start: int | None = None
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(raw[start + 1 :], start + 1):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_string:
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and obj_start is not None:
+                obj_str = raw[obj_start : i + 1]
+                try:
+                    obj = json.loads(obj_str)
+                except json.JSONDecodeError:
+                    try:
+                        obj = json.loads(_fix_json_strings(obj_str))
+                    except json.JSONDecodeError:
+                        obj_start = None
+                        continue
+                if isinstance(obj, dict):
+                    objects.append(obj)
+                obj_start = None
+    if not objects:
+        raise ValueError("No complete JSON objects could be extracted from truncated response")
+    return objects
 
 
 def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConcept], str]:

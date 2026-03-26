@@ -380,6 +380,58 @@ def test_parse_curated_concepts_repairs_literal_newlines_in_strings() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _extract_complete_objects — truncation recovery
+# ---------------------------------------------------------------------------
+
+
+def test_extract_complete_objects_returns_complete_objects_from_truncated_array() -> None:
+    from mixlab.llm import _extract_complete_objects
+
+    # Two complete objects followed by a truncated third — simulates a thinking model
+    # that exhausted its token budget mid-output.
+    truncated = (
+        '[{"title": "Pool 1", "mood": "deep", "track_ids": ["1", "2", "3"]},'
+        '{"title": "Pool 2", "mood": "airy", "track_ids": ["4", "5", "6"]},'
+        '{"title": "Pool 3", "mood": "dark", "track_ids": ["7'  # truncated here
+    )
+    objects = _extract_complete_objects(truncated)
+    assert len(objects) == 2
+    assert objects[0]["title"] == "Pool 1"
+    assert objects[1]["title"] == "Pool 2"
+
+
+def test_extract_complete_objects_raises_when_no_complete_objects() -> None:
+    from mixlab.llm import _extract_complete_objects
+
+    # Truncated before even completing the first object.
+    truncated = '[{"title": "Pool 1", "mood": "deep", "track_ids": ["1", "2'
+    with pytest.raises(ValueError, match="No complete JSON objects"):
+        _extract_complete_objects(truncated)
+
+
+def test_extract_complete_objects_raises_when_no_array_start() -> None:
+    from mixlab.llm import _extract_complete_objects
+
+    with pytest.raises(ValueError, match="No JSON array start"):
+        _extract_complete_objects("not json at all")
+
+
+def test_parse_concepts_recovers_from_truncated_json() -> None:
+    """_parse_concepts must salvage complete shortlists when the outer array is unclosed."""
+    from mixlab.llm import _parse_concepts
+
+    # One complete object + one truncated — outer "]" is missing.
+    truncated = (
+        '[{"title": "Pool 1", "mood": "deep", "track_ids": ["1", "2", "3", "4", "5", "6", "7", "8", "9"]},'
+        '{"title": "Pool 2", "mood": "airy", "track_ids": ["10'  # truncated
+    )
+    concepts = _parse_concepts(truncated)
+    assert len(concepts) == 1
+    assert concepts[0].title == "Pool 1"
+    assert len(concepts[0].track_ids) == 9
+
+
+# ---------------------------------------------------------------------------
 # Shortfall warning
 # ---------------------------------------------------------------------------
 
