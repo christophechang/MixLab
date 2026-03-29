@@ -1,14 +1,21 @@
-# Claude.md — Coding Rules & Workflow
+# Claude.md — Claude-Specific Coding Rules & Workflow
 
 ## Commits
 - Do NOT add `Co-Authored-By` trailers to commit messages.
 
 ---
 
+## Relationship To Repo Rules
+
+- `AGENTS.md` contains repo-level guidance for coding agents working in MixLab.
+- This file is Claude-specific and may intentionally overlap where repetition improves compliance.
+- `pyproject.toml` is the source of truth for formatter, lint, mypy, and pytest configuration.
+
+---
+
 ## Code Conventions
 
-**`pyproject.toml` is the source of truth for all code style and quality rules.**
-Do not deviate from rules defined there. Ruff enforces formatting and linting at check time; mypy enforces type correctness.
+Do not deviate from rules defined in `pyproject.toml`. Ruff enforces formatting and linting at check time; mypy enforces type correctness.
 
 ### Formatter — Ruff Format
 
@@ -57,11 +64,11 @@ The following rule sets are enabled in `pyproject.toml`:
 - SIM105: Use `contextlib.suppress(...)` instead of `try/except/pass`
 - SIM108: Use ternary operator where it improves readability
 
-### Disabled rules (explicitly off)
+### Disabled rules (explicitly off in this repo)
 - E501 is handled by Ruff format, not flagged as a lint error
 - D (pydocstring) rules — not enforced; doc comments are optional
 
-### Naming conventions (not enforced by tooling — apply manually)
+### Naming conventions (apply manually)
 
 | Element | Convention | Example |
 |---|---|---|
@@ -85,8 +92,8 @@ The following rule sets are enabled in `pyproject.toml`:
 - Use built-in generics (`list[str]`, `dict[str, int]`) not `List`, `Dict` from `typing` (Python 3.10+)
 - Use `X | None` instead of `Optional[X]`
 - Use `X | Y` instead of `Union[X, Y]`
-- Never use `Any` without a `# type: ignore` comment explaining why
-- Use `TypedDict` for structured dicts; prefer dataclasses or Pydantic models over raw dicts
+- Avoid `Any` unless there is a clear reason
+- Use `TypedDict`, dataclasses, or Pydantic models where structured data would otherwise become ambiguous raw dicts
 
 ### mypy config (in `pyproject.toml`)
 ```toml
@@ -101,24 +108,28 @@ python_version = "3.12"
 
 ### Commands
 ```bash
-ruff format .                    # format all files
-ruff check .                     # lint all files
-mypy .                           # type-check all files
-pytest                           # run all tests
-pytest --tb=short -q             # terse output
+.venv/bin/python -m ruff format .      # format all files
+.venv/bin/python -m ruff check .       # lint all files
+.venv/bin/python -m mypy .             # type-check all files
+.venv/bin/python -m pytest             # run all tests
+.venv/bin/python -m pytest -q          # terse output
 ```
 
 ### Running the app
-The project uses a `.venv` with Python 3.13. The system Python (`/usr/local/bin/python`) is 3.9 and does NOT have mixlab installed. Always use:
+Prefer the repo wrapper:
 ```bash
-PYTHONPATH=/Users/christophechang/Documents/Development/MixLab/src .venv/bin/python3.13 -m mixlab [args]
+./mixlab [args]
 ```
-For tooling (ruff, mypy, pytest) also use the venv:
+Equivalent direct invocation:
 ```bash
-.venv/bin/python3.13 -m ruff format .
-.venv/bin/python3.13 -m ruff check .
-.venv/bin/python3.13 -m mypy .
-.venv/bin/python3.13 -m pytest
+PYTHONPATH=/Users/christophechang/Documents/Development/MixLab/src .venv/bin/python -m mixlab [args]
+```
+For tooling, use the project virtualenv:
+```bash
+.venv/bin/python -m ruff format .
+.venv/bin/python -m ruff check .
+.venv/bin/python -m mypy .
+.venv/bin/python -m pytest
 ```
 
 ### Rules
@@ -144,17 +155,27 @@ mixlab/
 ├── src/
 │   └── mixlab/
 │       ├── __init__.py
-│       ├── reader.py        # XML ingestion
-│       ├── client.py        # REST API calls via httpx
-│       ├── reporter.py      # LLM report generation
-│       └── models.py        # Pydantic models / TypedDicts
+│       ├── __main__.py           # CLI entrypoint
+│       ├── reader.py             # Rekordbox XML ingestion
+│       ├── client.py             # Catalog/play-history API calls
+│       ├── clustering.py         # Genre grouping and pool selection
+│       ├── llm.py                # Stage 1 and Stage 2 LLM orchestration
+│       ├── playlist_exporter.py  # Rekordbox playlist XML export
+│       ├── discord_client.py     # Discord delivery
+│       ├── matcher.py            # Played/unplayed matching
+│       ├── cache.py              # Cached genre availability
+│       ├── config.py             # Genre maps and config constants
+│       └── models.py             # Pydantic models and typed payloads
 ├── tests/
 │   ├── conftest.py
 │   ├── test_reader.py
 │   ├── test_client.py
-│   └── test_reporter.py
+│   ├── test_llm.py
+│   ├── test_playlist_exporter.py
+│   └── ...
 ├── pyproject.toml
-├── .env.example             # document all required env vars here
+├── .env.example
+├── AGENTS.md
 └── CLAUDE.md
 ```
 
@@ -167,52 +188,10 @@ mixlab/
 | HTTP client | `httpx` (async) |
 | XML parsing | `lxml` |
 | Data models | `pydantic` |
-| LLM calls | `anthropic` (or via OpenClaw integration) |
+| LLM calls | `anthropic` |
+| Env loading | `python-dotenv` |
 | HTTP mocking in tests | `respx` |
 | Test framework | `pytest`, `pytest-asyncio`, `pytest-mock` |
-
----
-
-## pyproject.toml Baseline
-
-```toml
-[project]
-name = "mixlab"
-version = "0.1.0"
-requires-python = ">=3.12"
-dependencies = [
-    "httpx",
-    "lxml",
-    "pydantic",
-    "anthropic",
-]
-
-[project.optional-dependencies]
-dev = [
-    "ruff",
-    "mypy",
-    "pytest",
-    "pytest-asyncio",
-    "pytest-mock",
-    "respx",
-    "lxml-stubs",
-]
-
-[tool.ruff]
-line-length = 120
-
-[tool.ruff.lint]
-select = ["E", "W", "F", "I", "N", "B", "SIM"]
-ignore = ["E501"]
-
-[tool.mypy]
-strict = true
-python_version = "3.12"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
-```
 
 ---
 
@@ -220,7 +199,7 @@ asyncio_mode = "auto"
 - Ruff errors block completion of any task — fix them, never suppress without explicit justification
 - `# noqa` comments are allowed only with a rule code and a reason (e.g. `# noqa: F401 — re-exported for public API`)
 - `# type: ignore` follows the same rule — always explain why
-- Do not add docstrings to methods you did not author unless specifically requested
-- One class per file is strongly preferred; split if a file grows beyond ~300 lines
+- Prefer small, local changes over broad refactors
+- Respect existing module boundaries (`client.py`, `llm.py`, `discord_client.py`, `playlist_exporter.py`, etc.)
 - All secrets (API keys, endpoints) must be loaded from environment variables — never hardcoded; document them in `.env.example`
 - `httpx.AsyncClient` must be used as an async context manager (`async with httpx.AsyncClient() as client:`) — never instantiate and leave open
