@@ -357,6 +357,7 @@ def test_run_playlist_mode_happy_path(
         seed_ids: frozenset[str] | None = None,
         seed_track_ids: list[str] | None = None,
         unplayed_ids: set[str] | None = None,
+        intent_brief: IntentBrief | None = None,
     ) -> tuple[list[MixConcept], str]:
         assert playlist_name == "Monday Night"
         assert seed_ids == frozenset({"1", "2", "3", "4"})
@@ -420,8 +421,9 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
         library_tracks: list[Track],
         unplayed_ids: set[str] | None,
         all_tracks_flag: bool = False,
+        intent_brief: IntentBrief | None = None,
     ) -> list[MixConcept]:
-        del seed_tracks, unplayed_ids, all_tracks_flag
+        del seed_tracks, unplayed_ids, all_tracks_flag, intent_brief
         seen_library_genres.extend(sorted({t.genre for t in library_tracks}))
         return [
             MixConcept(
@@ -441,9 +443,10 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
         seed_ids: frozenset[str] | None = None,
         seed_track_ids: list[str] | None = None,
         unplayed_ids: set[str] | None = None,
+        intent_brief: IntentBrief | None = None,
     ) -> tuple[list[MixConcept], str]:
         del shortlists, tracks_by_id, stage2_provider, custom_genre_label, custom_genre_sub_genres
-        del playlist_name, seed_ids, seed_track_ids, unplayed_ids
+        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief
         return ([MixConcept(title="Completed Set", mood="warm", track_ids=["1", "2", "3", "4"])], "Playlist report")
 
     async def fake_send_report(*args: object, **kwargs: object) -> bool:

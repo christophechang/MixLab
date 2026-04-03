@@ -27,6 +27,7 @@ from mixlab.llm import (
     make_cascade_state,
     select_shortlists_for_stage2,
     select_stage1_window,
+    stage0_intent_brief,
     stage1_concepts,
     stage2_curate_and_report,
 )
@@ -67,7 +68,7 @@ def _format_report_context(
     details: list[str] = []
 
     if playlist_name is not None:
-        base_label = f'{playlist_name} playlist'
+        base_label = f"{playlist_name} playlist"
         if genre is not None:
             genre_detail = _title_case_label(genre)
             if genre in CUSTOM_GENRES:
@@ -174,6 +175,25 @@ async def run_playlist_mode(
     seed_ids = frozenset(track_id for track_id in raw_seed_ids if track_id in tracks_by_id)
     seed_tracks = [tracks_by_id[track_id] for track_id in raw_seed_ids if track_id in tracks_by_id]
 
+    cascade_state = make_cascade_state()
+    seed_bpm_range: tuple[float, float] = (
+        (min(t.bpm for t in seed_tracks), max(t.bpm for t in seed_tracks)) if seed_tracks else (0.0, 0.0)
+    )
+    valid_seed_ids = [track_id for track_id in raw_seed_ids if track_id in tracks_by_id]
+    intent_brief = await stage0_intent_brief(
+        seed_tracks,
+        valid_seed_ids,
+        cascade_state,
+        seed_bpm_range,
+    )
+    print(
+        f"Intent brief: {intent_brief.overall_vibe} | "
+        f"energy: {intent_brief.energy_shape} | "
+        f"risk: {intent_brief.risk_tolerance} | "
+        f"anchors: {len(intent_brief.anchor_ids)} | "
+        f"missing roles: {', '.join(str(r) for r in intent_brief.missing_roles) or 'none'}"
+    )
+
     library_source = tracks
     if genre is not None:
         try:
@@ -186,7 +206,7 @@ async def run_playlist_mode(
     library_tracks = [t for t in library_source if t.track_id not in seed_ids]
 
     try:
-        shortlists = build_zone_shortlists(seed_tracks, library_tracks, unplayed_ids, all_tracks)
+        shortlists = build_zone_shortlists(seed_tracks, library_tracks, unplayed_ids, all_tracks, intent_brief)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
@@ -205,6 +225,7 @@ async def run_playlist_mode(
         seed_ids=seed_ids,
         seed_track_ids=[track_id for track_id in raw_seed_ids if track_id in tracks_by_id],
         unplayed_ids=unplayed_ids,
+        intent_brief=intent_brief,
     )
     if not all_concepts:
         print(report, file=sys.stderr)
