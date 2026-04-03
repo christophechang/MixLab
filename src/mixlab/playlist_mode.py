@@ -328,17 +328,58 @@ def cluster_seed_zones(
     return zones
 
 
+def _score_candidate(
+    track: Track,
+    zone_seeds: list[Track],
+    zone_mid_bpm: float,
+    missing_roles: list[str],
+    is_unplayed: bool,
+    bpm_expansion: float = _ZONE_LIB_EXPANSION,
+) -> float:
+    """Score a library track candidate for inclusion in a zone shortlist.
+
+    Higher is better. Weights:
+    - BPM proximity: 0.35 (linear decay from zone centre to bpm_expansion boundary)
+    - Camelot compatibility with any zone seed: 0.35 (binary)
+    - Role filling (energy-based): 0.15
+    - Unplayed bonus: 0.15
+
+    Camelot is a score factor, not a hard filter — incompatible tracks are still eligible.
+    """
+    bpm_dist = abs(track.bpm - zone_mid_bpm)
+    bpm_score = max(0.0, 1.0 - bpm_dist / max(bpm_expansion, 1.0))
+
+    camelot_score = 1.0 if any(_camelot_compatible(track.camelot_key, s.camelot_key) for s in zone_seeds) else 0.0
+
+    role_score = 0.0
+    if track.energy is not None and missing_roles:
+        if ("opener" in missing_roles and track.energy <= 3) or ("peak" in missing_roles and track.energy >= 7):
+            role_score = 0.8
+        elif "builder" in missing_roles and 4 <= track.energy <= 6:
+            role_score = 0.5
+        elif "cleanser" in missing_roles and track.energy <= 4:
+            role_score = 0.4
+
+    unplayed_bonus = 0.3 if is_unplayed else 0.0
+
+    return bpm_score * 0.35 + camelot_score * 0.35 + role_score * 0.15 + unplayed_bonus * 0.15
+
+
 def build_zone_shortlists(
     seed_tracks: list[Track],
     library_tracks: list[Track],
     unplayed_ids: set[str] | None,
     all_tracks_flag: bool = False,
+    intent_brief: IntentBrief | None = None,
 ) -> list[MixConcept]:
     """Build one MixConcept shortlist per BPM zone of the seed playlist.
 
     Each shortlist contains all seed tracks in that zone plus scored library
-    tracks within ± _ZONE_LIB_EXPANSION BPM. Raises ValueError if seed_tracks
-    is too small to form a valid playlist.
+    tracks within ± _ZONE_LIB_EXPANSION BPM. Library candidates are ranked by
+    a composite score: BPM proximity, Camelot compatibility, role filling, and
+    unplayed bias.
+
+    Raises ValueError if seed_tracks is too small to form a valid playlist.
     """
     if len(seed_tracks) < _MIN_PLAYLIST_TRACKS:
         raise ValueError(
@@ -348,14 +389,15 @@ def build_zone_shortlists(
 
     zones = cluster_seed_zones(seed_tracks)
     seed_ids = {t.track_id for t in seed_tracks}
+    missing_roles: list[str] = list(intent_brief.missing_roles) if intent_brief is not None else []
     shortlists: list[MixConcept] = []
 
-    def _unplayed_bonus(t: Track) -> float:
+    def _is_unplayed(t: Track) -> bool:
         if all_tracks_flag:
-            return 1.0
+            return False
         if unplayed_ids is not None:
-            return _UNPLAYED_WEIGHT if t.track_id in unplayed_ids else 1.0
-        return _UNPLAYED_WEIGHT if t.play_count == 0 else 1.0
+            return t.track_id in unplayed_ids
+        return t.play_count == 0
 
     for zone in zones:
         zone_min = min(t.bpm for t in zone)
@@ -367,7 +409,7 @@ def build_zone_shortlists(
         candidates = [t for t in library_tracks if t.track_id not in seed_ids and lib_min <= t.bpm <= lib_max]
         ranked = sorted(
             candidates,
-            key=lambda t: (-_unplayed_bonus(t), abs(t.bpm - zone_mid), t.artist, t.title),
+            key=lambda t: -_score_candidate(t, zone, zone_mid, missing_roles, _is_unplayed(t)),
         )[:_MAX_ZONE_LIBRARY_TRACKS]
 
         all_zone = sorted(zone + ranked, key=lambda t: t.bpm)

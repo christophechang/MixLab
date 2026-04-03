@@ -8,6 +8,7 @@ import pytest
 
 from mixlab.models import IntentBrief, MixConcept, Track
 from mixlab.playlist_mode import (
+    _score_candidate,  # noqa: PLC2701
     build_playlist_pool,
     build_zone_shortlists,
     cluster_seed_zones,
@@ -571,3 +572,57 @@ def test_compute_deterministic_intent_returns_intent_brief() -> None:
     assert brief.bpm_range == (120.0, 126.0)
     assert len(brief.seed_analyses) == 5
     assert all(s.tier == "supporting" for s in brief.seed_analyses)
+
+
+# ---------------------------------------------------------------------------
+# _score_candidate
+# ---------------------------------------------------------------------------
+
+
+def test_score_candidate_prefers_harmonically_compatible_track() -> None:
+    zone_seeds = [_make_track_full("s1", bpm=124.0, camelot_key="8A")]
+    compatible = _make_track_full("c1", bpm=125.0, camelot_key="9A")  # compatible key
+    incompatible = _make_track_full("c2", bpm=125.0, camelot_key="3B")  # incompatible key
+    score_compat = _score_candidate(compatible, zone_seeds, 124.0, missing_roles=[], is_unplayed=False)
+    score_incompat = _score_candidate(incompatible, zone_seeds, 124.0, missing_roles=[], is_unplayed=False)
+    assert score_compat > score_incompat
+
+
+def test_score_candidate_gives_role_bonus_for_peak_filler() -> None:
+    zone_seeds = [_make_track_full("s1", bpm=124.0, camelot_key="8A")]
+    peak_candidate = _make_track_full("c1", bpm=124.0, camelot_key="8A", energy=8)
+    non_peak = _make_track_full("c2", bpm=124.0, camelot_key="8A", energy=3)
+    score_peak = _score_candidate(peak_candidate, zone_seeds, 124.0, missing_roles=["peak"], is_unplayed=False)
+    score_non = _score_candidate(non_peak, zone_seeds, 124.0, missing_roles=["peak"], is_unplayed=False)
+    assert score_peak > score_non
+
+
+def test_score_candidate_gives_unplayed_bonus() -> None:
+    zone_seeds = [_make_track_full("s1", bpm=124.0, camelot_key="8A")]
+    track = _make_track_full("c1", bpm=124.0, camelot_key="8A")
+    score_unplayed = _score_candidate(track, zone_seeds, 124.0, missing_roles=[], is_unplayed=True)
+    score_played = _score_candidate(track, zone_seeds, 124.0, missing_roles=[], is_unplayed=False)
+    assert score_unplayed > score_played
+
+
+def test_build_zone_shortlists_ranks_harmonically_compatible_library_tracks_first() -> None:
+    """With IntentBrief, harmonically compatible library tracks rank above incompatible ones."""
+    seed_tracks = [
+        _make_track_full("s1", bpm=124.0, camelot_key="8A"),
+        _make_track_full("s2", bpm=125.0, camelot_key="9A"),
+        _make_track_full("s3", bpm=126.0, camelot_key="8A"),
+        _make_track_full("s4", bpm=123.0, camelot_key="7A"),
+    ]
+    compatible_lib = _make_track_full("lib1", bpm=124.5, camelot_key="8A")
+    incompatible_lib = _make_track_full("lib2", bpm=124.5, camelot_key="3B")
+
+    shortlists = build_zone_shortlists(
+        seed_tracks,
+        [compatible_lib, incompatible_lib],
+        unplayed_ids=None,
+        all_tracks_flag=False,
+    )
+    assert len(shortlists) >= 1
+    ids_in_order = shortlists[0].track_ids
+    assert "lib1" in ids_in_order and "lib2" in ids_in_order
+    assert ids_in_order.index("lib1") < ids_in_order.index("lib2")
