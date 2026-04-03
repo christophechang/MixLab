@@ -8,12 +8,12 @@ import re
 import sys
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import httpx
 
 from mixlab.config import TRACK_COUNT_TARGETS
-from mixlab.models import MixConcept, Track
+from mixlab.models import IntentBrief, MixConcept, RiskTolerance, SeedAnalysis, SeedTier, SetRole, Track
 
 _MAX_TRACKS_PER_CALL = 40
 _MAX_TRACKS_PER_CALL_CUSTOM = 60  # larger chunks for custom multi-genre pools
@@ -114,6 +114,49 @@ Respond ONLY with a JSON array:
 """
 
 
+# ---------------------------------------------------------------------------
+# Stage 0 — intent extraction (free provider cascade, playlist mode only)
+# ---------------------------------------------------------------------------
+
+_STAGE0_SYSTEM = """\
+You are a DJ set analyst. You will receive seed tracks from a DJ's draft playlist in original order.
+
+Classify each track and describe the set's intent.
+
+Tier definitions:
+- anchor: 2–4 tracks that define the set's identity. The DJ would never swap these out.
+- supporting: tracks that serve the arc; keep by default, replaceable with musical reason.
+- optional: filler or candidates — lowest priority to retain.
+
+Inferred role options: opener, builder, pivot, peak, cleanser, closer, utility, unknown
+
+Use energy:N/8 when present. When absent, reason from BPM, Camelot key, and list position:
+- Opener candidate: first 1–2 positions, energy 1–3/8 or lowest BPM relative to pool
+- Peak candidate: energy 7–8/8 or highest BPM
+- Closer candidate: last 1–2 positions
+
+missing_roles: list which of [opener, builder, peak, cleanser, closer] appear absent.
+
+Risk tolerance — BPM spread and Camelot key spread across all seeds:
+- low: BPM spread < 10, mostly adjacent keys
+- medium: BPM spread 10–20, 1–2 key jumps
+- high: BPM spread > 20 or large Camelot jumps throughout
+
+is_coherent_set: true if one set idea; false if distinct chapters.
+
+Return ONLY a JSON object (no prose, no markdown fence):
+{
+  "overall_vibe": "one sentence about what this set is trying to do",
+  "is_coherent_set": true,
+  "risk_tolerance": "medium",
+  "missing_roles": ["opener"],
+  "seed_analyses": [
+    {"track_id": "123", "tier": "anchor", "inferred_role": "peak"}
+  ]
+}\
+"""
+
+
 def _tracks_to_text(tracks: list[Track], seed_ids: frozenset[str] | None = None) -> str:
     lines = []
     for t in tracks:
@@ -155,6 +198,150 @@ def _parse_concepts(raw: str) -> list[MixConcept]:
             # pre-extraction string here to recover whatever complete objects exist.
             data = _extract_complete_objects(raw_for_recovery)
     return [MixConcept(**item) for item in data]
+
+
+def _parse_intent_brief(
+    raw: str,
+    seed_tracks: list[Track],
+    bpm_range: tuple[float, float],
+) -> IntentBrief:
+    """Parse Stage 0 LLM output into an IntentBrief.
+
+    Falls back gracefully: unknown tier → supporting, missing tracks → supporting.
+    """
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
+        raw = re.sub(r"\n?```\s*$", "", raw)
+    raw = raw.strip()
+
+    # Extract outermost {...}
+    first = raw.find("{")
+    last = raw.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        raw = raw[first : last + 1]
+
+    try:
+        data: dict[str, object] = json.loads(raw)
+    except json.JSONDecodeError:
+        data = {}
+
+    valid_tiers = {"anchor", "supporting", "optional"}
+    valid_roles = {"opener", "builder", "pivot", "peak", "cleanser", "closer", "utility", "unknown"}
+    valid_risk = {"low", "medium", "high"}
+
+    analyses_raw = data.get("seed_analyses", [])
+    analysed_ids: dict[str, SeedAnalysis] = {}
+    for item in analyses_raw if isinstance(analyses_raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        tid = str(item.get("track_id", ""))
+        tier_raw = str(item.get("tier", "supporting"))
+        role_raw = str(item.get("inferred_role", "unknown"))
+        # cast: mypy cannot narrow str → Literal after set membership test
+        tier = cast("SeedTier", tier_raw if tier_raw in valid_tiers else "supporting")
+        role = cast("SetRole", role_raw if role_raw in valid_roles else "unknown")
+        drop_cost = {"anchor": 0.1, "supporting": 0.5, "optional": 0.9}.get(tier, 0.5)
+        analysed_ids[tid] = SeedAnalysis(
+            track_id=tid,
+            tier=tier,
+            inferred_role=role,
+            drop_cost=drop_cost,
+        )
+
+    # Ensure every seed has an analysis (fill missing with 'supporting')
+    analyses: list[SeedAnalysis] = []
+    for t in seed_tracks:
+        if t.track_id in analysed_ids:
+            analyses.append(analysed_ids[t.track_id])
+        else:
+            analyses.append(
+                SeedAnalysis(
+                    track_id=t.track_id,
+                    tier="supporting",
+                    inferred_role="unknown",
+                    drop_cost=0.5,
+                )
+            )
+
+    missing_roles_raw = data.get("missing_roles", [])
+    missing_roles_strs = [
+        cast("SetRole", r)
+        for r in (missing_roles_raw if isinstance(missing_roles_raw, list) else [])
+        if isinstance(r, str) and r in valid_roles
+    ]
+
+    risk_raw = str(data.get("risk_tolerance", "medium"))
+    risk_tolerance = cast("RiskTolerance", risk_raw if risk_raw in valid_risk else "medium")
+
+    is_coherent = bool(data.get("is_coherent_set", True))
+    overall_vibe = str(data.get("overall_vibe", "Intent unclear."))
+
+    return IntentBrief(
+        overall_vibe=overall_vibe,
+        energy_shape="unclear",  # Stage 0 LLM doesn't compute this; deterministic step does
+        risk_tolerance=risk_tolerance,
+        is_coherent_set=is_coherent,
+        seed_analyses=analyses,
+        missing_roles=missing_roles_strs,
+        strong_adjacencies=[],  # populated later by deterministic step
+        bpm_range=bpm_range,
+    )
+
+
+async def stage0_intent_brief(
+    seed_tracks: list[Track],
+    seed_track_ids: list[str],
+    state: CascadeState,
+    bpm_range: tuple[float, float],
+) -> IntentBrief:
+    """Run Stage 0 intent extraction using the free provider cascade.
+
+    Falls back to a deterministic-only IntentBrief if the LLM call fails or
+    the seed set is too small (<= 5 tracks) for meaningful classification.
+
+    The returned brief always has energy_shape and strong_adjacencies populated
+    by the deterministic pass regardless of LLM success.
+    """
+    # Avoid circular import — playlist_mode imports from llm
+    from mixlab.playlist_mode import compute_deterministic_intent
+
+    tracks_by_id = {t.track_id: t for t in seed_tracks}
+    det_brief = compute_deterministic_intent(seed_track_ids, tracks_by_id)
+
+    if len(seed_tracks) <= 5:
+        # Too few tracks for LLM classification to be reliable
+        return det_brief
+
+    prompt = f"Seed playlist ({len(seed_tracks)} tracks in original order):\n" + _tracks_to_text(
+        seed_tracks, seed_ids=frozenset(seed_track_ids)
+    )
+
+    for _ in range(len(_CASCADE)):
+        provider = _CASCADE[state.index]
+        try:
+            result = await provider(prompt, system=_STAGE0_SYSTEM)
+            if result is None:
+                state.index = (state.index + 1) % len(_CASCADE)
+                continue
+            if not result.strip():
+                raise ValueError(f"Provider {provider.__name__} returned empty content for Stage 0.")
+            llm_brief = _parse_intent_brief(result, seed_tracks, bpm_range)
+            # Merge: use LLM tiers but deterministic shape + adjacencies
+            llm_brief.energy_shape = det_brief.energy_shape
+            llm_brief.strong_adjacencies = det_brief.strong_adjacencies
+            llm_brief.bpm_range = det_brief.bpm_range
+            state.consecutive_failures = 0
+            return llm_brief
+        except Exception as exc:  # noqa: BLE001 — cascade
+            print(f"Stage 0 provider {provider.__name__} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            state.consecutive_failures += 1
+            state.index = (state.index + 1) % len(_CASCADE)
+
+    # All providers failed — fall back to deterministic
+    print("Stage 0 LLM failed — using deterministic intent brief.", file=sys.stderr)
+    state.consecutive_failures = 0  # reset so later Stage 1 calls get a fresh start
+    return det_brief
 
 
 async def _call_openai_compat(
