@@ -698,7 +698,18 @@ strong concepts, produce 4. Do not pad with weak concepts to hit a number. If th
 produce even 3 distinct, coherent sets, return a single-element array with a diagnostic object instead \
 of concept objects: [{"diagnostic": "...explanation of why the pool is insufficient..."}] — this is \
 useful information, not a failure.""",
-    """Produce EXACTLY ONE concept. Do not return multiple alternatives. If the pool is too thin to produce one strong, seed-led set, return a single-element array with a diagnostic object instead of a concept object: [{"diagnostic": "...explanation of why the pool is insufficient..."}].""",
+    """Produce EXACTLY TWO concepts from the same pool using different strategies:
+
+1. "conservative" (mood field = "conservative"): maximise retention of anchor and supporting seeds. \
+Add library tracks only to strengthen transitions or fill a genuinely absent role. If the set is musically \
+coherent with nearly all seeds, this will be close to the original.
+
+2. "bold" (mood field = "bold"): prioritise musical arc and role completeness. Replace optional seeds \
+(and supporting seeds if doing so materially improves the set) with library tracks. Anchors still protected.
+
+Both concepts must meet the anchor protection rules. Label each concept's mood field with exactly \
+"conservative" or "bold". If the pool is too thin to produce one strong set, return a single-element \
+diagnostic: [{"diagnostic": "..."}].""",
 )
 
 _SHORTFALL_THRESHOLD = 4
@@ -946,6 +957,7 @@ async def stage2_curate_and_report(
     seed_ids: frozenset[str] | None = None,
     seed_track_ids: list[str] | None = None,
     unplayed_ids: set[str] | None = None,
+    intent_brief: IntentBrief | None = None,
 ) -> tuple[list[MixConcept], str]:
     provider = (stage2_provider or os.environ.get("STAGE2_PROVIDER", "anthropic")).lower()
     use_minimax = provider == "minimax"
@@ -1006,25 +1018,53 @@ async def stage2_curate_and_report(
     if playlist_name is not None:
         playlist_seed_track_ids = seed_track_ids or sorted(seed_ids or [])
         minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids))
+        # Build intent brief section for injection into prompt
+        intent_section = ""
+        if intent_brief is not None:
+            anchor_labels = (
+                ", ".join(
+                    f"{tracks_by_id[tid].artist} \u2014 {tracks_by_id[tid].title}"
+                    for tid in sorted(intent_brief.anchor_ids)
+                    if tid in tracks_by_id
+                )
+                or "none identified"
+            )
+            adjacency_hints = (
+                "; ".join(
+                    f"{tracks_by_id[f.track_ids[0]].artist} \u2014 {tracks_by_id[f.track_ids[0]].title}"
+                    f" \u2192 "
+                    f"{tracks_by_id[f.track_ids[1]].artist} \u2014 {tracks_by_id[f.track_ids[1]].title}"
+                    f" (confidence: {f.confidence:.1f})"
+                    for f in intent_brief.strong_adjacencies
+                    if len(f.track_ids) >= 2 and f.track_ids[0] in tracks_by_id and f.track_ids[1] in tracks_by_id
+                )
+                or "none detected"
+            )
+            missing_roles_str = ", ".join(str(r) for r in intent_brief.missing_roles) or "none identified"
+            intent_section = (
+                f"DJ INTENT BRIEF\n"
+                f"Vibe: {intent_brief.overall_vibe}\n"
+                f"Energy shape: {intent_brief.energy_shape}\n"
+                f"Risk tolerance: {intent_brief.risk_tolerance}\n"
+                f"Anchor tracks (protect these): {anchor_labels}\n"
+                f"Missing roles to fill: {missing_roles_str}\n"
+                f"Intentional adjacencies (preserve if possible): {adjacency_hints}\n"
+                f"Coherent set: {'yes' if intent_brief.is_coherent_set else 'no \u2014 treat as chapters'}\n\n"
+            )
         prompt = (
-            f"Curate and narrate a SINGLE mix concept from the following {n} BPM zone shortlists. "
+            f"{intent_section}"
+            f"Curate two completion variants from the following {n} BPM zone shortlists. "
             f'This is a playlist completion run seeded from the Rekordbox playlist "{playlist_name}".\n\n'
             "Each shortlist below represents one natural BPM zone from the source playlist. "
             "Tracks marked [seed] are from the original playlist; other tracks are library additions.\n\n"
             "Your task:\n"
-            "1. Identify the dominant zone(s) — where most seed tracks live. These form the backbone of the concept.\n"
-            "2. You may drop outlier zones entirely if they are too thin or their BPM range breaks set coherence. "
-            "Dropping a zone's seed tracks counts as intentional cuts — this is expected.\n"
-            "3. Within the zone(s) you keep, treat [seed] tracks as the default choice. Only drop a seed track if it "
-            "clearly breaks tempo flow, harmonic logic, or blendability — not because a library track is marginally better.\n"
-            "4. Add library tracks only to strengthen transitions or fill genuine gaps.\n\n"
-            f"Retain at least {minimum_seed_tracks} seed tracks total across all kept zones.\n\n"
-            "When two otherwise equally suitable tracks compete for a slot, prefer the one marked unplayed. "
-            "Played tracks are fully eligible when they are the stronger musical choice.\n\n"
-            "Produce EXACTLY ONE concept. Not 2, not 3 — one.\n\n"
-            f"In the report, after the concept thesis paragraph, include a short section:\nSource playlist: {playlist_name}\n"
-            "State how many seed tracks were retained, how many were dropped, and how many library tracks "
-            "were added. For any notable drop or addition, give one sentence of musical reasoning.\n\n"
+            "1. Identify the dominant zone(s) — where most seed tracks live.\n"
+            "2. You may drop outlier zones if they break set coherence.\n"
+            f"3. Retain at least {minimum_seed_tracks} seed tracks total (anchors protected as per brief).\n"
+            "4. When two otherwise equally suitable tracks compete, prefer the one marked unplayed.\n\n"
+            "Produce EXACTLY TWO concepts as described in your instructions (conservative + bold).\n\n"
+            f"In each concept's report, after the thesis paragraph, include:\nSource playlist: {playlist_name}\n"
+            "State: seeds retained / dropped / added. For any notable drop or addition, one sentence of reasoning.\n\n"
             + "\n\n".join(sections)
         )
     else:
