@@ -8,12 +8,21 @@ import re
 import sys
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal, cast
 
 import httpx
 
 from mixlab.config import TRACK_COUNT_TARGETS
-from mixlab.models import IntentBrief, MixConcept, RiskTolerance, SeedAnalysis, SeedTier, SetRole, Track
+from mixlab.models import (
+    CompletionVariant,
+    IntentBrief,
+    MixConcept,
+    RiskTolerance,
+    SeedAnalysis,
+    SeedTier,
+    SetRole,
+    Track,
+)
 
 _MAX_TRACKS_PER_CALL = 40
 _MAX_TRACKS_PER_CALL_CUSTOM = 60  # larger chunks for custom multi-genre pools
@@ -842,10 +851,69 @@ def _playlist_retention_stats(
     return retained_ids, dropped_ids, added_ids
 
 
-def _minimum_playlist_seed_retention(seed_count: int) -> int:
+def _minimum_playlist_seed_retention(seed_count: int, intent_brief: IntentBrief | None = None) -> int:
+    """Return the minimum number of seed tracks Stage 2 must retain.
+
+    With an IntentBrief: floor is per-tier (75% of anchors + 40% of supporting).
+    Without: falls back to the flat 60% floor.
+    """
     if seed_count <= 0:
         return 0
-    return math.ceil(seed_count * _PLAYLIST_MINIMUM_SEED_RATIO)
+    if intent_brief is None or not intent_brief.seed_analyses:
+        return math.ceil(seed_count * _PLAYLIST_MINIMUM_SEED_RATIO)
+    anchor_count = len(intent_brief.anchor_ids)
+    supporting_count = len(intent_brief.supporting_ids)
+    anchor_floor = math.ceil(anchor_count * 0.75)
+    supporting_floor = math.ceil(supporting_count * 0.40)
+    return anchor_floor + supporting_floor
+
+
+def _score_variant(
+    concept: MixConcept,
+    seed_track_ids: list[str],
+    intent_brief: IntentBrief | None,
+    tracks_by_id: dict[str, Track],
+) -> CompletionVariant:
+    """Compute a CompletionVariant with anchor_retention_rate and role_coverage scores."""
+    concept_id_set = set(concept.track_ids)
+    strategy_raw = concept.mood.lower()
+    strategy: Literal["conservative", "bold"] = "bold" if strategy_raw == "bold" else "conservative"
+
+    if intent_brief is not None and intent_brief.anchor_ids:
+        retained_anchors = sum(1 for aid in intent_brief.anchor_ids if aid in concept_id_set)
+        anchor_retention_rate = retained_anchors / len(intent_brief.anchor_ids)
+    else:
+        retained_seeds = sum(1 for sid in seed_track_ids if sid in concept_id_set)
+        anchor_retention_rate = retained_seeds / max(len(seed_track_ids), 1)
+
+    role_coverage = 0.0
+    if intent_brief is not None and intent_brief.missing_roles:
+        energies_in_concept: list[int] = [
+            t.energy
+            for tid in concept.track_ids
+            if (t := tracks_by_id.get(tid)) is not None and t.energy is not None
+        ]
+        filled = 0
+        for role in intent_brief.missing_roles:
+            if (
+                (role == "opener" and any(e <= 3 for e in energies_in_concept))
+                or (role == "peak" and any(e >= 7 for e in energies_in_concept))
+                or (role == "builder" and any(4 <= e <= 6 for e in energies_in_concept))
+            ):
+                filled += 1
+        role_coverage = filled / len(intent_brief.missing_roles)
+
+    return CompletionVariant(
+        strategy=strategy,
+        concept=concept,
+        anchor_retention_rate=anchor_retention_rate,
+        role_coverage=role_coverage,
+    )
+
+
+def _select_best_variant(variants: list[CompletionVariant]) -> CompletionVariant:
+    """Return the highest-scoring variant (anchor_retention * 0.65 + role_coverage * 0.35)."""
+    return max(variants, key=lambda v: v.score)
 
 
 def _format_playlist_track_labels(track_ids: list[str], tracks_by_id: dict[str, Track], limit: int = 8) -> str:
@@ -867,6 +935,7 @@ def _rewrite_playlist_report(
     concept: MixConcept,
     seed_track_ids: list[str],
     tracks_by_id: dict[str, Track],
+    rejected_summary: str = "",
 ) -> str:
     retained_ids, dropped_ids, added_ids = _playlist_retention_stats(concept, seed_track_ids)
     retained_suffix = ""
@@ -877,7 +946,7 @@ def _rewrite_playlist_report(
         f"Source playlist: {playlist_name}\n"
         f"Seed tracks retained: {len(retained_ids)}{retained_suffix}.\n"
         f"Seed tracks dropped: {len(dropped_ids)}.\n"
-        f"Library tracks added: {len(added_ids)}."
+        f"Library tracks added: {len(added_ids)}." + rejected_summary
     )
 
     marker = "Track order (Camelot / BPM):"
@@ -1017,7 +1086,7 @@ async def stage2_curate_and_report(
 
     if playlist_name is not None:
         playlist_seed_track_ids = seed_track_ids or sorted(seed_ids or [])
-        minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids))
+        minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids), intent_brief)
         # Build intent brief section for injection into prompt
         intent_section = ""
         if intent_brief is not None:
@@ -1095,16 +1164,22 @@ async def stage2_curate_and_report(
 
     if playlist_name is not None and seed_ids is not None and curated:
         playlist_seed_track_ids = seed_track_ids or sorted(seed_ids)
-        concept = curated[0]
+        minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids), intent_brief)
+
+        # Score and select best variant from up to 2 returned concepts
+        variants = [_score_variant(c, playlist_seed_track_ids, intent_brief, tracks_by_id) for c in curated]
+        best = _select_best_variant(variants)
+        concept = best.concept
+
+        # Check weighted retention floor
         retained_ids, dropped_ids, _ = _playlist_retention_stats(concept, playlist_seed_track_ids)
-        minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids))
         if len(retained_ids) < minimum_seed_tracks:
             dropped_labels = _format_playlist_track_labels(dropped_ids, tracks_by_id, limit=len(dropped_ids))
             retry_prompt = (
                 f"Your previous attempt retained only {len(retained_ids)} seed tracks "
                 f"(minimum required: {minimum_seed_tracks}).\n"
-                f"Seed tracks you dropped: {dropped_labels}.\n"
-                "Retry: include as many of these dropped seed tracks as possible. "
+                f"Dropped seeds: {dropped_labels}.\n"
+                "Retry with one concept only. Include as many dropped seeds as possible. "
                 "For each one still excluded, give one sentence of musical justification.\n\n"
             ) + prompt
             raw, stage2_model_display = await _call_stage2_raw(
@@ -1121,7 +1196,23 @@ async def stage2_curate_and_report(
                     "Stage 2 playlist curation retained too few seed tracks after retry: "
                     f"{len(retained_ids)} retained, minimum acceptable {minimum_seed_tracks}."
                 )
-        report = _rewrite_playlist_report(report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id)
+
+        # Summarise rejected variant in report (if there was one)
+        rejected_summary = ""
+        if len(variants) > 1:
+            rejected = [v for v in variants if v.concept is not concept]
+            if rejected:
+                other = rejected[0]
+                rejected_summary = (
+                    f"\nAlternative strategy considered: {other.strategy} "
+                    f"(anchor retention: {other.anchor_retention_rate:.0%}, "
+                    f"role coverage: {other.role_coverage:.0%}) \u2014 not selected."
+                )
+
+        report = _rewrite_playlist_report(
+            report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id, rejected_summary
+        )
+        curated = [concept]
 
     warnings: list[str] = []
     for concept in curated:
