@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from mixlab.models import Track
-from mixlab.reader import apply_bpm_corrections, parse_collection
+from mixlab.reader import apply_bpm_corrections, parse_collection, parse_playlists
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -394,3 +394,70 @@ def test_parse_collection_unenriched_track_is_not_penalised(tmp_path: Path) -> N
     assert t.remixer == ""
     assert t.mix == []
     assert t.enrichment_confidence == ""
+
+
+_PLAYLISTS_XML = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <DJ_PLAYLISTS Version="1.0.0">
+      <COLLECTION Entries="3">
+        <TRACK TrackID="1" Name="Alpha" Artist="Artist A" AverageBpm="174.00" Tonality="8A" Genre="Drum &amp; Bass"/>
+        <TRACK TrackID="2" Name="Beta" Artist="Artist B" AverageBpm="132.00" Tonality="9B" Genre="UK Garage"/>
+        <TRACK TrackID="3" Name="Gamma" Artist="Artist C" AverageBpm="140.00" Tonality="10A" Genre="Techno"/>
+      </COLLECTION>
+      <PLAYLISTS>
+        <NODE Type="0" Name="ROOT" Count="3">
+          <NODE Type="1" Name="Top Level" KeyType="0" Entries="1">
+            <TRACK Key="1"/>
+          </NODE>
+          <NODE Type="0" Name="Sets" Count="2">
+            <NODE Type="1" Name="Warm Up" KeyType="0" Entries="1">
+              <TRACK Key="2"/>
+            </NODE>
+            <NODE Type="0" Name="Archive" Count="1">
+              <NODE Type="1" Name="Deep Dive" KeyType="0" Entries="1">
+                <TRACK Key="3"/>
+              </NODE>
+            </NODE>
+          </NODE>
+          <NODE Type="0" Name="Backups" Count="1">
+            <NODE Type="1" Name="Warm Up" KeyType="0" Entries="1">
+              <TRACK Key="3"/>
+            </NODE>
+          </NODE>
+        </NODE>
+      </PLAYLISTS>
+    </DJ_PLAYLISTS>
+""")
+
+_NO_PLAYLISTS_XML = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <DJ_PLAYLISTS Version="1.0.0">
+      <COLLECTION Entries="1">
+        <TRACK TrackID="1" Name="Alpha" Artist="Artist A" AverageBpm="174.00" Tonality="8A" Genre="Drum &amp; Bass"/>
+      </COLLECTION>
+    </DJ_PLAYLISTS>
+""")
+
+
+def test_parse_playlists_returns_full_path_keys(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _PLAYLISTS_XML)
+    playlists = parse_playlists(xml_path)
+    assert playlists["Sets/Archive/Deep Dive"] == ["3"]
+
+
+def test_parse_playlists_top_level_playlist_keyed_by_name_only(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _PLAYLISTS_XML)
+    playlists = parse_playlists(xml_path)
+    assert playlists["Top Level"] == ["1"]
+
+
+def test_parse_playlists_returns_empty_when_no_playlists_node(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _NO_PLAYLISTS_XML)
+    assert parse_playlists(xml_path) == {}
+
+
+def test_parse_playlists_duplicate_names_in_different_folders_are_distinct_keys(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _PLAYLISTS_XML)
+    playlists = parse_playlists(xml_path)
+    assert playlists["Sets/Warm Up"] == ["2"]
+    assert playlists["Backups/Warm Up"] == ["3"]

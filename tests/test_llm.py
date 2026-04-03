@@ -857,6 +857,40 @@ def test_select_shortlists_varies_across_runs() -> None:
     assert len(set(results)) > 1
 
 
+def test_tracks_to_text_emits_seed_annotation() -> None:
+    from mixlab.llm import _tracks_to_text
+
+    text = _tracks_to_text(_make_tracks(1), seed_ids=frozenset({"0"}))
+    assert "[seed]" in text
+
+
+def test_tracks_to_text_no_seed_annotation_without_seed_ids() -> None:
+    from mixlab.llm import _tracks_to_text
+
+    text = _tracks_to_text(_make_tracks(1))
+    assert "[seed]" not in text
+
+
+def test_select_shortlists_for_playlist_stage2_ranks_by_seed_count() -> None:
+    from mixlab.llm import select_shortlists_for_playlist_stage2
+
+    shortlists = [
+        MixConcept(title="one", mood="m", track_ids=["1", "9"]),
+        MixConcept(title="two", mood="m", track_ids=["1", "2", "9"]),
+        MixConcept(title="zero", mood="m", track_ids=["9"]),
+    ]
+    result = select_shortlists_for_playlist_stage2(shortlists, frozenset({"1", "2"}))
+    assert [shortlist.title for shortlist in result] == ["two", "one", "zero"]
+
+
+def test_select_shortlists_for_playlist_stage2_caps_at_stage2_cap() -> None:
+    from mixlab.llm import _STAGE2_CAP, select_shortlists_for_playlist_stage2
+
+    shortlists = [MixConcept(title=str(i), mood="m", track_ids=["1", str(i)]) for i in range(_STAGE2_CAP + 3)]
+    result = select_shortlists_for_playlist_stage2(shortlists, frozenset({"1"}))
+    assert len(result) == _STAGE2_CAP
+
+
 # ---------------------------------------------------------------------------
 # Stage 2 custom genre cross-genre prompt injection
 # ---------------------------------------------------------------------------
@@ -914,3 +948,287 @@ async def test_stage2_prompt_has_no_custom_genre_section_for_standard_genre(monk
     body = _json.loads(route.calls[0].request.content.decode())
     user_prompt: str = body["messages"][0]["content"]
     assert "multi-genre custom pool" not in user_prompt
+
+
+@respx.mock
+async def test_stage2_rendering_includes_seed_annotation_for_seed_tracks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, playlist_name="Monday Night", seed_ids=frozenset({"1"}))
+
+    import json as _json
+
+    body = _json.loads(route.calls[0].request.content.decode())
+    user_prompt: str = body["messages"][0]["content"]
+    assert "[seed]" in user_prompt
+
+
+@respx.mock
+async def test_stage2_rendering_no_seed_annotation_without_seed_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    import json as _json
+
+    body = _json.loads(route.calls[0].request.content.decode())
+    user_prompt: str = body["messages"][0]["content"]
+    assert "[seed]" not in user_prompt
+
+
+@respx.mock
+async def test_stage2_rendering_unplayed_uses_unplayed_ids_when_provided(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        "1": Track(
+            track_id="1", artist="A1", title="T1", bpm=174.0, camelot_key="8A", genre="Drum & Bass", play_count=1
+        ),
+        "2": Track(
+            track_id="2", artist="A2", title="T2", bpm=174.0, camelot_key="8A", genre="Drum & Bass", play_count=0
+        ),
+        "3": Track(
+            track_id="3", artist="A3", title="T3", bpm=174.0, camelot_key="8A", genre="Drum & Bass", play_count=1
+        ),
+        "4": Track(
+            track_id="4", artist="A4", title="T4", bpm=174.0, camelot_key="8A", genre="Drum & Bass", play_count=1
+        ),
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, playlist_name="Monday Night", unplayed_ids={"1"})
+
+    import json as _json
+
+    body = _json.loads(route.calls[0].request.content.decode())
+    user_prompt: str = body["messages"][0]["content"]
+    assert "ID:1" in user_prompt and "unplayed" in user_prompt
+    line_for_two = next(line for line in user_prompt.splitlines() if "ID:2" in line)
+    assert "unplayed" not in line_for_two
+
+
+@respx.mock
+async def test_stage2_rendering_unplayed_falls_back_to_play_count_when_unplayed_ids_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        "1": Track(
+            track_id="1", artist="A1", title="T1", bpm=174.0, camelot_key="8A", genre="Drum & Bass", play_count=0
+        ),
+        "2": Track(
+            track_id="2", artist="A2", title="T2", bpm=174.0, camelot_key="8A", genre="Drum & Bass", play_count=1
+        ),
+        "3": Track(
+            track_id="3", artist="A3", title="T3", bpm=174.0, camelot_key="8A", genre="Drum & Bass", play_count=1
+        ),
+        "4": Track(
+            track_id="4", artist="A4", title="T4", bpm=174.0, camelot_key="8A", genre="Drum & Bass", play_count=1
+        ),
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, playlist_name="Monday Night")
+
+    import json as _json
+
+    body = _json.loads(route.calls[0].request.content.decode())
+    user_prompt: str = body["messages"][0]["content"]
+    line_for_one = next(line for line in user_prompt.splitlines() if "ID:1" in line)
+    assert "unplayed" in line_for_one
+
+
+@respx.mock
+async def test_stage2_playlist_mode_prompt_contains_single_concept_instruction(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, playlist_name="Monday Night")
+
+    import json as _json
+
+    body = _json.loads(route.calls[0].request.content.decode())
+    user_prompt: str = body["messages"][0]["content"]
+    assert "EXACTLY ONE" in user_prompt
+
+
+@respx.mock
+async def test_stage2_playlist_mode_prompt_contains_playlist_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, playlist_name="Monday Night")
+
+    import json as _json
+
+    body = _json.loads(route.calls[0].request.content.decode())
+    user_prompt: str = body["messages"][0]["content"]
+    assert "Monday Night" in user_prompt
+
+
+@respx.mock
+async def test_stage2_playlist_mode_prompt_contains_seed_instruction(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, playlist_name="Monday Night")
+
+    import json as _json
+
+    body = _json.loads(route.calls[0].request.content.decode())
+    user_prompt: str = body["messages"][0]["content"]
+    assert "Tracks marked [seed]" in user_prompt
+
+
+def test_rewrite_playlist_report_overwrites_incorrect_counts() -> None:
+    from mixlab.llm import _rewrite_playlist_report
+
+    concept = MixConcept(title="Set", mood="m", track_ids=["1", "2", "5", "6"])
+    tracks_by_id = {
+        str(i): Track(
+            track_id=str(i), artist=f"Artist {i}", title=f"Title {i}", bpm=120.0, camelot_key="8A", genre="House"
+        )
+        for i in range(1, 7)
+    }
+    report = (
+        "CONCEPT: Set\n\nThesis.\n\n"
+        "Source playlist: Monday Night\n"
+        "Seed tracks retained: 99.\n"
+        "Seed tracks dropped: 0.\n"
+        "Library tracks added: 0.\n\n"
+        "Track order (Camelot / BPM):\nArtist 1 — Title 1 [8A · 120.0]"
+    )
+
+    rewritten = _rewrite_playlist_report(report, "Monday Night", concept, ["1", "2", "3", "4"], tracks_by_id)
+
+    assert "Seed tracks retained: 2" in rewritten
+    assert "Seed tracks dropped: 2." in rewritten
+    assert "Library tracks added: 2." in rewritten
+    assert "Seed tracks retained: 99" not in rewritten
+
+
+@respx.mock
+async def test_stage2_playlist_mode_report_rewrites_seed_counts_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    payload = json.dumps(
+        [
+            {
+                "title": "Set",
+                "mood": "m",
+                "track_ids": ["1", "2", "3", "4", "5", "6", "7", "8"],
+                "report": (
+                    "CONCEPT: Set\n\nThesis.\n\n"
+                    "Source playlist: Monday Night\n"
+                    "Seed tracks retained: 1.\n"
+                    "Seed tracks dropped: 0.\n"
+                    "Library tracks added: 7.\n\n"
+                    "Track order (Camelot / BPM):\nArtist 1 — Title 1 [8A · 120.0]"
+                ),
+            }
+        ]
+    )
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(payload)))
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=[str(i) for i in range(1, 9)])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=120.0 + i, camelot_key="8A", genre="House")
+        for i in range(1, 9)
+    }
+
+    _concepts, report = await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset({"1", "2", "3", "4", "9", "10"}),
+        seed_track_ids=["1", "2", "3", "4", "9", "10"],
+    )
+
+    assert "Seed tracks retained: 4" in report
+    assert "Seed tracks dropped: 2." in report
+    assert "Library tracks added: 4." in report
+
+
+@respx.mock
+async def test_stage2_playlist_mode_raises_when_retention_below_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    payload = json.dumps(
+        [
+            {
+                "title": "Set",
+                "mood": "m",
+                "track_ids": ["1", "2", "3", "4", "11", "12", "13", "14", "15", "16", "17", "18"],
+                "report": "CONCEPT: Set\n\nThesis.\n\nTrack order (Camelot / BPM):\nArtist 1 — Title 1 [8A · 120.0]",
+            }
+        ]
+    )
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(payload)))
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=[str(i) for i in range(1, 19)])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=120.0 + i, camelot_key="8A", genre="House")
+        for i in range(1, 19)
+    }
+
+    with pytest.raises(RuntimeError, match="retained too few seed tracks"):
+        await stage2_curate_and_report(
+            shortlists,
+            tracks_by_id,
+            playlist_name="Monday Night",
+            seed_ids=frozenset({str(i) for i in range(1, 11)}),
+            seed_track_ids=[str(i) for i in range(1, 11)],
+        )

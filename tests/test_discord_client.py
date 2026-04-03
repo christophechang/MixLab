@@ -37,6 +37,21 @@ def test_format_report_snapshot_full_catalogue_mode() -> None:
     assert dnb_bar.count("█") > house_bar.count("█")
 
 
+def test_format_report_places_context_above_snapshot() -> None:
+    result = format_report(
+        "",
+        [],
+        {},
+        [],
+        counts=_COUNTS,
+        show_unplayed=True,
+        report_context="Report context: 140 (custom genre, unplayed tracks)",
+    )
+    lines = result.splitlines()
+    assert lines[0] == "Report context: 140 (custom genre, unplayed tracks)"
+    assert lines[2] == "**Crate Snapshot (unplayed / in collection)**"
+
+
 def test_format_report_no_counts_omits_snapshot() -> None:
     result = format_report("", [], {}, [])
     assert "Snapshot" not in result

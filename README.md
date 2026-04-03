@@ -11,9 +11,10 @@ For background on why this was built and how it works in practice, read the [Mix
 1. Parses your exported Rekordbox XML collection
 2. If `CATALOG_API_URL` is set, fetches your play history and filters out already-played tracks; otherwise uses the full collection
 3. Prints a crate availability table (no LLM cost)
-4. If a genre is specified, clusters the tracks, runs them through an LLM cascade to generate mix concepts, then writes a full mix planning report via a second LLM call
-5. Exports a Rekordbox-compatible XML file containing one playlist per concept plus an **All Unplayed Tunes** playlist with the full genre pool
-6. Sends the report and XML to a Discord channel
+4. If `--genre` is specified, scopes the collection to that genre (or custom cross-genre pool), runs Stage 1 shortlisting, then writes a full Stage 2 mix planning report
+5. If `--playlist` is specified, uses that Rekordbox playlist as the seed, builds natural BPM-zone shortlists around the seed tracks, then writes a single playlist-completion report
+6. Optionally exports a Rekordbox-compatible merged XML file
+7. Sends the report and any XML attachment to a Discord channel
 
 ---
 
@@ -21,7 +22,7 @@ For background on why this was built and how it works in practice, read the [Mix
 
 - Python 3.12+
 - A Rekordbox XML export (see [Setup](#4-export-your-rekordbox-collection))
-- `ANTHROPIC_API_KEY` — required for Stage 2 report generation
+- `ANTHROPIC_API_KEY` — required for default Stage 2 report generation
 - At least one Stage 1 LLM key (Groq, Gemini, Mistral, or MiniMax)
 - A catalog API URL + key (optional — for filtering already-played tracks)
 - A Discord bot token (optional — report prints to stdout without it)
@@ -50,20 +51,20 @@ cp .env.example .env
 
 | Variable | Required | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Yes | Stage 2 report generation (Claude Sonnet) |
+| `ANTHROPIC_API_KEY` | Yes | Default Stage 2 report generation (Claude Sonnet) |
 | `CATALOG_API_URL` | No | Base URL of your catalog/play-history API |
 | `CHANGSTA_API_KEY` | No | Bearer token for `CATALOG_API_URL` (if your API requires auth) |
 | `GROQ_API_KEY` | No | Stage 1 provider (tried first) |
 | `GEMINI_API_KEY` | No | Stage 1 provider (fallback 1) |
 | `MISTRAL_API_KEY` | No | Stage 1 provider (fallback 2) |
-| `MINIMAX_API_KEY` | No | Stage 1 provider (last fallback) + Stage 2 alternative (`--stage2-provider minimax`) |
+| `MINIMAX_API_KEY` | No | Stage 1 provider (last fallback) and optional Stage 2 provider via `--stage2-provider minimax` |
 | `OPENROUTER_API_KEY` | No | Reserved for future use |
 | `DISCORD_BOT_TOKEN` | No | Discord delivery |
 | `DISCORD_GUILD_ID` | No | Discord server ID |
 | `MIXLAB_DISCORD_CHANNEL_ID` | No | Target channel ID (preferred over name) |
 | `MIXLAB_DISCORD_CHANNEL` | No | Target channel name (default: `mix-lab`) |
 
-`ANTHROPIC_API_KEY` is the only required key. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only.
+`ANTHROPIC_API_KEY` is required for the default Stage 2 path. `MINIMAX_API_KEY` is additionally required if you want to run `--stage2-provider minimax`. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only.
 
 #### Catalog API (optional)
 
@@ -175,9 +176,54 @@ Prints unplayed vs total counts per genre, sorted by availability. Only the cata
 
 ```bash
 ./mixlab --genre house
+./mixlab --genre house --stage2-provider minimax
+./mixlab --genre 4x4 --all-tracks
 ```
 
-Runs the full pipeline: parse → filter played → cluster → Stage 1 concepts → Stage 2 report → Discord. A Rekordbox-compatible XML file is attached to the Discord message containing one playlist per concept plus an **All Unplayed Tunes** playlist with the full genre pool.
+Runs the full genre pipeline: parse → fetch played history (unless `--all-tracks`) → scope to the requested genre → Stage 1 shortlist generation → Stage 2 report → Discord/stdout.
+
+The report starts with a context header so you can see exactly what kind of run produced it, for example:
+
+```text
+Report context: House (unplayed tracks)
+Report context: House (unplayed tracks, stage 2: minimax)
+Report context: 140 (custom genre, All Tracks)
+```
+
+For standard and custom genre runs, a Rekordbox-compatible merged XML file can be attached to the Discord message or written to disk. It contains one playlist per concept plus an **All Unplayed Tunes** playlist with the full scoped unplayed pool when played-track history was used.
+
+### Complete a mix from an existing Rekordbox playlist
+
+```bash
+./mixlab --playlist "Monday Night"
+./mixlab --playlist "Monday Night" --genre electronica
+./mixlab --playlist "Sets/Monday Night"
+./mixlab --playlist "Monday Night" --all-tracks
+./mixlab --playlist "Monday Night" --stage2-provider minimax
+```
+
+Playlist mode is a different workflow from genre mode:
+
+- The source Rekordbox playlist is treated as the seed and MixLab aims to complete or extend it, not replace it
+- Seed tracks are clustered into natural BPM zones
+- Each zone becomes a shortlist containing the seed tracks for that zone plus nearby library tracks
+- Stage 2 produces exactly one final concept, with the report explaining which seed tracks were retained, which were dropped, and which library tracks were added
+
+Important playlist-mode rules:
+
+- `--genre` in playlist mode constrains added library tracks to that genre scope; it does not filter the seed playlist itself
+- `--all-tracks` disables played-track weighting in playlist mode and uses the full collection as the candidate pool
+- Playlist names are matched case-insensitively
+- If the same playlist name exists in multiple folders, pass the full path such as `Sets/Monday Night`
+- Playlist mode requires at least 4 valid seed tracks with BPM and Camelot key after parsing
+
+Playlist runs use the same report context header as genre runs, for example:
+
+```text
+Report context: Monday Night playlist (Electronica, All Tracks)
+```
+
+If you export playlist mode, the merged XML contains the single completed concept only; it does not add an **All Unplayed Tunes** playlist.
 
 To also write the XML to disk:
 
@@ -296,10 +342,13 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 
 ### LLM Stage 2 — report generation
 
-- Always uses Anthropic (Claude Sonnet); falls back to MiniMax M2.7 if Anthropic fails mid-run
+- Uses Claude Sonnet 4.6 by default
+- `--stage2-provider minimax` switches Stage 2 to MiniMax M2.7 explicitly
+- If the default Anthropic Stage 2 path fails mid-run, MixLab can fall back to MiniMax M2.7 when that key is available
 - Writes a peer-to-peer mix planning narrative with track listings in Camelot order and notes on transitions
+- Playlist mode writes a single playlist-completion report rather than multiple concepts
 - Appends shortfall warnings for concepts significantly below the recommended track count for their genre
-- Elapsed generation time is appended to the report and included in the Discord message
+- Appends the active report context and elapsed generation time to the final output
 
 ### Shortfall thresholds (tracks per set)
 

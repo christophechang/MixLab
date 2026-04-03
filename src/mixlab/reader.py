@@ -107,6 +107,40 @@ def parse_collection(xml_path: Path) -> list[Track]:
     return tracks
 
 
+def parse_playlists(xml_path: Path) -> dict[str, list[str]]:
+    if not xml_path.exists():
+        raise FileNotFoundError(f"Rekordbox XML not found: {xml_path}. Place it at import/rekordbox.xml.")
+
+    tree = etree.parse(str(xml_path))  # noqa: S320 — local file, not user-supplied input
+    root = tree.getroot()
+
+    playlists_root = root.find(".//PLAYLISTS")
+    if playlists_root is None:
+        return {}
+
+    playlists: dict[str, list[str]] = {}
+
+    def walk(node: etree._Element, prefix: str = "", include_name: bool = True) -> None:
+        node_type = node.get("Type", "")
+        node_name = node.get("Name", "")
+
+        if node_type == "0":
+            next_prefix = prefix
+            if include_name and node_name:
+                next_prefix = f"{prefix}{node_name}/"
+            for child in node.findall("NODE"):
+                walk(child, next_prefix)
+            return
+
+        if node_type == "1" and node_name:
+            playlists[f"{prefix}{node_name}"] = [track.get("Key", "") for track in node.findall("TRACK")]
+
+    for child in playlists_root.findall("NODE"):
+        walk(child, include_name=False)
+
+    return playlists
+
+
 def apply_bpm_corrections(tracks: list[Track]) -> list[Track]:
     dnb_genres = {"drum & bass", "dnb"}
     result: list[Track] = []

@@ -32,14 +32,61 @@ from mixlab.llm import (
 )
 from mixlab.matcher import filter_unplayed
 from mixlab.models import MixConcept, Track
-from mixlab.playlist_exporter import export_merged_xml, generate_merged_xml_bytes, parse_raw_tracks
-from mixlab.reader import apply_bpm_corrections, parse_collection
+from mixlab.playlist_exporter import (
+    export_merged_xml,
+    generate_merged_xml_bytes,
+    parse_raw_tracks,
+)
+from mixlab.playlist_mode import (
+    build_zone_shortlists,
+    filter_tracks_for_playlist_genre,
+    resolve_playlist,
+)
+from mixlab.reader import apply_bpm_corrections, parse_collection, parse_playlists
 
 _XML_PATH = Path("import/rekordbox.xml")
 
 
 def _build_tracks_by_id(tracks: list[Track]) -> dict[str, Track]:
     return {t.track_id: t for t in tracks}
+
+
+def _title_case_label(label: str) -> str:
+    return label.replace("_", " ").title()
+
+
+def _format_report_context(
+    *,
+    genre: str | None,
+    playlist_name: str | None,
+    all_tracks: bool,
+    stage2_provider: str | None,
+    export_dir: Path | None,
+) -> str:
+    base_label: str
+    details: list[str] = []
+
+    if playlist_name is not None:
+        base_label = f'{playlist_name} playlist'
+        if genre is not None:
+            genre_detail = _title_case_label(genre)
+            if genre in CUSTOM_GENRES:
+                genre_detail += " custom genre"
+            details.append(genre_detail)
+    elif genre is not None:
+        base_label = genre if genre in CUSTOM_GENRES else _title_case_label(genre)
+        if genre in CUSTOM_GENRES:
+            details.append("custom genre")
+    else:
+        base_label = "MixLab run"
+
+    details.append("All Tracks" if all_tracks else "unplayed tracks")
+    if stage2_provider is not None:
+        details.append(f"stage 2: {stage2_provider}")
+    if export_dir is not None:
+        details.append("export enabled")
+
+    return f"Report context: {base_label} ({', '.join(details)})"
 
 
 def _print_availability(
@@ -91,6 +138,114 @@ def _show_cached_genres() -> None:
         for tag, entry in outlier_genres.items():
             print(f"    {tag:<26} {entry['unplayed']:>4} / {entry['total']:<4}")
     print()
+
+
+async def run_playlist_mode(
+    playlist_name: str,
+    genre: str | None,
+    export_dir: Path | None,
+    stage2_provider: str | None,
+    all_tracks: bool,
+) -> None:
+    tracks = parse_collection(_XML_PATH)
+    tracks = apply_bpm_corrections(tracks)
+
+    api_key = os.environ.get("CHANGSTA_API_KEY", "")
+    catalog_url = os.environ.get("CATALOG_API_URL", "")
+    unplayed_ids: set[str] | None = None
+    if all_tracks:
+        print("--all-tracks set — skipping played-track weighting in playlist mode.")
+    elif catalog_url:
+        try:
+            played = await fetch_played_tracks(api_key, catalog_url)
+        except Exception as exc:
+            print(f"ERROR: Could not fetch played tracks — aborting: {exc}", file=sys.stderr)
+            sys.exit(1)
+        unplayed_ids = {track.track_id for track in filter_unplayed(tracks, played)}
+
+    playlists = parse_playlists(_XML_PATH)
+    try:
+        raw_seed_ids = resolve_playlist(playlist_name, playlists)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+    tracks_by_id = _build_tracks_by_id(tracks)
+    seed_ids = frozenset(track_id for track_id in raw_seed_ids if track_id in tracks_by_id)
+    seed_tracks = [tracks_by_id[track_id] for track_id in raw_seed_ids if track_id in tracks_by_id]
+
+    library_source = tracks
+    if genre is not None:
+        try:
+            library_source = filter_tracks_for_playlist_genre(tracks, genre, GENRE_MAP, CUSTOM_GENRES)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+        print(f"Playlist mode genre filter '{genre}': {len(library_source)} tracks in scope.")
+
+    library_tracks = [t for t in library_source if t.track_id not in seed_ids]
+
+    try:
+        shortlists = build_zone_shortlists(seed_tracks, library_tracks, unplayed_ids, all_tracks)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+    if not shortlists:
+        print("No zone shortlists could be built from the seed playlist.", file=sys.stderr)
+        sys.exit(1)
+
+    t_start = time.monotonic()
+
+    all_concepts, report = await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        stage2_provider,
+        playlist_name=playlist_name,
+        seed_ids=seed_ids,
+        seed_track_ids=[track_id for track_id in raw_seed_ids if track_id in tracks_by_id],
+        unplayed_ids=unplayed_ids,
+    )
+    if not all_concepts:
+        print(report, file=sys.stderr)
+        sys.exit(1)
+
+    concept = all_concepts[0]
+    elapsed = time.monotonic() - t_start
+    mins, secs = divmod(int(elapsed), 60)
+    elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+    report_context = _format_report_context(
+        genre=genre,
+        playlist_name=playlist_name,
+        all_tracks=all_tracks,
+        stage2_provider=stage2_provider,
+        export_dir=export_dir,
+    )
+    report += f'\n\n---\n\nPlaylist completion: "{playlist_name}"'
+    report += f"\n⏱ Generated in {elapsed_str}"
+    print(report_context + "\n\n" + report)
+
+    raw_tracks_xml = parse_raw_tracks(_XML_PATH)
+    today = datetime.date.today().isoformat()
+    folder_name = f"Mix Lab - {playlist_name} - {today}"
+    merged_bytes = generate_merged_xml_bytes([concept], raw_tracks_xml, folder_name, None)
+    xml_attachments: list[tuple[str, bytes]] = [("rekordbox_export.xml", merged_bytes)] if merged_bytes else []
+
+    if export_dir is not None:
+        out_path = export_merged_xml([concept], raw_tracks_xml, export_dir / "rekordbox_export.xml", folder_name)
+        if out_path is not None:
+            print(f"Exported: {out_path}")
+
+    await send_report(
+        report,
+        [concept],
+        [],
+        tracks_by_id,
+        counts={},
+        attachments=xml_attachments,
+        show_unplayed=False,
+        report_context=report_context,
+    )
 
 
 async def run(
@@ -214,9 +369,16 @@ async def run(
     elapsed = time.monotonic() - t_start
     mins, secs = divmod(int(elapsed), 60)
     elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
-    report += f"\n\n---\n\n⏱ Generated in {elapsed_str}"
+    report_context = _format_report_context(
+        genre=genre,
+        playlist_name=None,
+        all_tracks=all_tracks,
+        stage2_provider=stage2_provider,
+        export_dir=export_dir,
+    )
+    report += f"\n⏱ Generated in {elapsed_str}"
 
-    print(report)
+    print(report_context + "\n\n" + report)
 
     # 8. Generate merged Rekordbox XML (one file — for Discord attachment and optional disk export).
     raw_tracks_xml = parse_raw_tracks(_XML_PATH)
@@ -250,6 +412,7 @@ async def run(
         counts=counts,
         attachments=xml_attachments,
         show_unplayed=used_catalog_api,
+        report_context=report_context,
     )
 
 
@@ -275,6 +438,9 @@ custom genres (merge multiple genres into one cross-genre pool):
 examples:
   mixlab                              show crate availability table (no LLM)
   mixlab --genre house                generate mix concepts for house
+  mixlab --playlist "Monday Night"    complete a playlist concept from seed
+  mixlab --playlist "Monday Night" --genre electronica  keep added tracks within electronica
+  mixlab --playlist "Sets/Monday Night"  use full folder path if name is ambiguous
   mixlab --genre 4x4 --all-tracks     cross-genre 4x4 set from full collection
   mixlab --genres                     show cached counts from last run (no API)
 """,
@@ -286,7 +452,15 @@ examples:
         metavar="LABEL",
         help="Genre to target. Standard labels: house, drum_and_bass, techno, etc. "
         "Custom labels: 170, 140, 4x4 (cross-genre pools). "
-        "Also accepts a Rekordbox genre tag directly, e.g. 'Deep House'.",
+        "Also accepts a Rekordbox genre tag directly, e.g. 'Deep House'. "
+        "When combined with --playlist, constrains added library tracks to that genre scope.",
+    )
+    parser.add_argument(
+        "--playlist",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Rekordbox playlist name (or folder/name path) to use as seed for a single playlist-completion concept.",
     )
     parser.add_argument("--duration", type=int, default=None, help="Target set duration in minutes (reserved)")
     parser.add_argument("--genres", action="store_true", help="Show genre availability from last run (no API calls)")
@@ -324,6 +498,10 @@ examples:
         export_dir = Path(args.export)
     elif args.export_playlists:
         export_dir = Path("output/playlists")
+
+    if args.playlist:
+        asyncio.run(run_playlist_mode(args.playlist, args.genre, export_dir, args.stage2_provider, args.all_tracks))
+        return
 
     asyncio.run(run(args.genre, args.duration, export_dir, args.stage2_provider, args.all_tracks))
 

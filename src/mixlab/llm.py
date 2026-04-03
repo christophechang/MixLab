@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import re
@@ -24,6 +25,7 @@ _STAGE2_CANDIDATE_POOL = 12  # top N by size to sample from (ensures variety acr
 _STAGE1_TIMEOUT = 120  # seconds — default for openai-compat providers
 _MINIMAX_STAGE1_TIMEOUT = 360  # MiniMax is a thinking model; needs extra time
 _THINKING_MODEL_MAX_TOKENS = 16000  # thinking models spend tokens on reasoning before output
+_MINIMAX_STAGE2_MAX_TOKENS = 40000  # Stage 2 needs full output headroom; 40k is M2.7's practical ceiling
 
 # Strip inline thinking blocks emitted by reasoning models (e.g. MiniMax M2.7).
 _THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
@@ -92,7 +94,27 @@ Respond ONLY with a JSON array matching this schema:
 """
 
 
-def _tracks_to_text(tracks: list[Track]) -> str:
+_STAGE1_SYSTEM_PLAYLIST = """\
+You are a music data analyst pre-screening a DJ's track collection to build candidate shortlists for a playlist completion concept.
+
+Tracks marked [seed] come from an existing playlist and represent the intended musical direction. Treat them as strong candidates — but group by BPM and harmonic compatibility above all else. A seed track that is an outlier (more than 8 BPM from the group median, or in a harmonically unrelated key) should still be excluded from any group where it does not fit.
+
+For each shortlist:
+- Group tracks that are plausibly technically compatible: similar BPM (±6 BPM within the pool) and harmonically related keys (adjacent or nearby Camelot positions).
+- Each shortlist should contain 15–25 candidate tracks.
+- Generate 1–3 distinct shortlists. If the material only supports one coherent group, produce one.
+- Do NOT make final ordering decisions. Simply group technically compatible tracks.
+
+Give each shortlist a rough descriptive title and a one-line sonic mood.
+
+Some tracks include supplementary metadata: `energy:N/8` is a Mixed in Key score. [seed] marks tracks from the source playlist.
+
+Respond ONLY with a JSON array:
+[{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]\
+"""
+
+
+def _tracks_to_text(tracks: list[Track], seed_ids: frozenset[str] | None = None) -> str:
     lines = []
     for t in tracks:
         line = f"ID:{t.track_id} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key}"
@@ -100,6 +122,8 @@ def _tracks_to_text(tracks: list[Track]) -> str:
             line += f" | {t.year}"
         if t.energy is not None:
             line += f" | energy:{t.energy}/8"
+        if seed_ids is not None and t.track_id in seed_ids:
+            line += " | [seed]"
         lines.append(line)
     return "\n".join(lines)
 
@@ -255,11 +279,15 @@ def make_cascade_state() -> CascadeState:
 
 
 async def _call_stage1_once(
-    tracks: list[Track], genre: str, state: CascadeState, custom: bool = False
+    tracks: list[Track],
+    genre: str,
+    state: CascadeState,
+    custom: bool = False,
+    seed_ids: frozenset[str] | None = None,
 ) -> list[MixConcept]:
     valid_ids = {t.track_id for t in tracks}
-    prompt = f"Genre: {genre}\n\nTracks:\n{_tracks_to_text(tracks)}"
-    system = _STAGE1_SYSTEM_CUSTOM if custom else _STAGE1_SYSTEM
+    prompt = f"Genre: {genre}\n\nTracks:\n{_tracks_to_text(tracks, seed_ids=seed_ids)}"
+    system = _STAGE1_SYSTEM_PLAYLIST if seed_ids is not None else _STAGE1_SYSTEM_CUSTOM if custom else _STAGE1_SYSTEM
 
     for _ in range(len(_CASCADE)):
         provider = _CASCADE[state.index]
@@ -291,15 +319,21 @@ async def _call_stage1_once(
 
 
 async def stage1_concepts(
-    cluster: list[Track], genre: str, state: CascadeState, custom: bool = False
+    cluster: list[Track],
+    genre: str,
+    state: CascadeState,
+    custom: bool = False,
+    seed_ids: frozenset[str] | None = None,
 ) -> list[MixConcept]:
     chunk_size = _MAX_TRACKS_PER_CALL_CUSTOM if custom else _MAX_TRACKS_PER_CALL
     if len(cluster) <= chunk_size:
-        return await _call_stage1_once(cluster, genre, state, custom=custom)
+        return await _call_stage1_once(cluster, genre, state, custom=custom, seed_ids=seed_ids)
 
     concepts: list[MixConcept] = []
     for i in range(0, len(cluster), chunk_size):
-        concepts.extend(await _call_stage1_once(cluster[i : i + chunk_size], genre, state, custom=custom))
+        concepts.extend(
+            await _call_stage1_once(cluster[i : i + chunk_size], genre, state, custom=custom, seed_ids=seed_ids)
+        )
     return concepts
 
 
@@ -326,6 +360,18 @@ def select_shortlists_for_stage2(shortlists: list[MixConcept]) -> list[MixConcep
         return shortlists
     candidates = sorted(shortlists, key=lambda s: len(s.track_ids), reverse=True)[:_STAGE2_CANDIDATE_POOL]
     return random.sample(candidates, min(_STAGE2_CAP, len(candidates)))
+
+
+def select_shortlists_for_playlist_stage2(
+    shortlists: list[MixConcept],
+    seed_ids: frozenset[str],
+) -> list[MixConcept]:
+    ranked = sorted(
+        shortlists,
+        key=lambda shortlist: sum(1 for track_id in shortlist.track_ids if track_id in seed_ids),
+        reverse=True,
+    )
+    return ranked[:_STAGE2_CAP]
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +496,26 @@ between sounding clever and being right, be right.
 Respond ONLY with the JSON array.\
 """
 
+_STAGE2_SYSTEM_PLAYLIST = _STAGE2_SYSTEM.replace(
+    """For each shortlist or sub-pool you carve from it:
+- SELECT the best 8–12 tracks from the pool for a coherent DJ set. Exclude tracks that weaken the journey. \
+Weakness is practical: a track whose intro gives no workable mix point, a vocal that starts on bar one with \
+no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment \
+used so early it makes everything after feel like a comedown.""",
+    """For playlist-completion runs:
+- RETAIN as many [seed] tracks as possible. The default is to keep a seed track unless it clearly breaks tempo flow, harmonic logic, blendability, or the set's narrative.
+- SELECT a coherent final tracklist from the pool. Prefer roughly 12–18 tracks when the material supports it, and allow a longer list when needed to preserve a strong seed-led arc. Exclude only tracks that genuinely weaken the journey. Weakness is practical: a track whose intro gives no workable mix point, a vocal that starts on bar one with no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment used so early it makes everything after feel like a comedown.""",
+).replace(
+    """Produce as many concepts as the pool genuinely supports — between 3 and 6. If the pool only yields 4 \
+strong concepts, produce 4. Do not pad with weak concepts to hit a number. If the pool is too thin to \
+produce even 3 distinct, coherent sets, return a single-element array with a diagnostic object instead \
+of concept objects: [{"diagnostic": "...explanation of why the pool is insufficient..."}] — this is \
+useful information, not a failure.""",
+    """Produce EXACTLY ONE concept. Do not return multiple alternatives. If the pool is too thin to produce one strong, seed-led set, return a single-element array with a diagnostic object instead of a concept object: [{"diagnostic": "...explanation of why the pool is insufficient..."}].""",
+)
+
 _SHORTFALL_THRESHOLD = 4
+_PLAYLIST_MINIMUM_SEED_RATIO = 0.6
 
 
 def _shortfall_warning(concept: MixConcept, genre: str) -> str | None:
@@ -568,12 +633,132 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
     return curated, "\n\n---\n\n".join(report_parts)
 
 
+def _playlist_retention_stats(
+    concept: MixConcept,
+    seed_track_ids: list[str],
+) -> tuple[list[str], list[str], list[str]]:
+    seed_id_set = set(seed_track_ids)
+    retained_ids = [track_id for track_id in concept.track_ids if track_id in seed_id_set]
+    dropped_ids = [track_id for track_id in seed_track_ids if track_id not in retained_ids]
+    added_ids = [track_id for track_id in concept.track_ids if track_id not in seed_id_set]
+    return retained_ids, dropped_ids, added_ids
+
+
+def _minimum_playlist_seed_retention(seed_count: int) -> int:
+    if seed_count <= 0:
+        return 0
+    return math.ceil(seed_count * _PLAYLIST_MINIMUM_SEED_RATIO)
+
+
+def _format_playlist_track_labels(track_ids: list[str], tracks_by_id: dict[str, Track], limit: int = 8) -> str:
+    labels: list[str] = []
+    for track_id in track_ids[:limit]:
+        track = tracks_by_id.get(track_id)
+        if track is None:
+            labels.append(track_id)
+        else:
+            labels.append(f"{track.artist} — {track.title}")
+    if len(track_ids) > limit:
+        labels.append(f"+ {len(track_ids) - limit} more")
+    return ", ".join(labels)
+
+
+def _rewrite_playlist_report(
+    report: str,
+    playlist_name: str,
+    concept: MixConcept,
+    seed_track_ids: list[str],
+    tracks_by_id: dict[str, Track],
+) -> str:
+    retained_ids, dropped_ids, added_ids = _playlist_retention_stats(concept, seed_track_ids)
+    retained_suffix = ""
+    if retained_ids:
+        retained_suffix = f" ({_format_playlist_track_labels(retained_ids, tracks_by_id)})"
+
+    summary = (
+        f"Source playlist: {playlist_name}\n"
+        f"Seed tracks retained: {len(retained_ids)}{retained_suffix}.\n"
+        f"Seed tracks dropped: {len(dropped_ids)}.\n"
+        f"Library tracks added: {len(added_ids)}."
+    )
+
+    marker = "Track order (Camelot / BPM):"
+    if marker not in report:
+        return report.rstrip() + f"\n\n{summary}"
+
+    prefix, suffix = report.split(marker, 1)
+    source_index = prefix.find("\nSource playlist:")
+    if source_index != -1:
+        prefix = prefix[:source_index]
+
+    return prefix.rstrip() + f"\n\n{summary}\n\n{marker}{suffix}"
+
+
+async def _call_stage2_raw(
+    prompt: str,
+    stage2_system: str,
+    stage2_key: str,
+    use_minimax: bool,
+    model_display: str,
+) -> tuple[str, str]:
+    """Make the Stage 2 HTTP call. Returns (raw_text, model_display_name)."""
+    if use_minimax:
+        try:
+            raw = await _call_openai_compat(
+                "https://api.minimax.io/v1",
+                stage2_key,
+                "MiniMax-M2.7",
+                prompt,
+                path="/text/chatcompletion_v2",
+                timeout=300,
+                system=stage2_system,
+                max_tokens=_MINIMAX_STAGE2_MAX_TOKENS,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc
+        return raw, model_display
+
+    try:
+        raw = await _call_anthropic_http(
+            stage2_key, "claude-sonnet-4-6", stage2_system, prompt, max_tokens=32000, timeout=600
+        )
+        return raw, model_display
+    except Exception as anthropic_exc:
+        print(
+            f"Stage 2 Anthropic failed ({type(anthropic_exc).__name__}: {anthropic_exc}), trying MiniMax M2.7 fallback...",
+            file=sys.stderr,
+        )
+        minimax_key = os.environ.get("MINIMAX_API_KEY")
+        if not minimax_key:
+            raise RuntimeError(f"Stage 2 curation failed: {anthropic_exc}") from anthropic_exc
+        try:
+            raw = await _call_openai_compat(
+                "https://api.minimax.io/v1",
+                minimax_key,
+                "MiniMax-M2.7",
+                prompt,
+                path="/text/chatcompletion_v2",
+                timeout=300,
+                system=stage2_system,
+                max_tokens=_MINIMAX_STAGE2_MAX_TOKENS,
+            )
+        except Exception as minimax_exc:
+            raise RuntimeError(
+                f"Stage 2 curation failed (Anthropic and MiniMax both failed): {minimax_exc}"
+            ) from minimax_exc
+        return raw, "MiniMax M2.7 (Anthropic fallback)"
+
+
 async def stage2_curate_and_report(
     shortlists: list[MixConcept],
     tracks_by_id: dict[str, Track],
     stage2_provider: str | None = None,
     custom_genre_label: str | None = None,
     custom_genre_sub_genres: list[str] | None = None,
+    playlist_name: str | None = None,
+    seed_ids: frozenset[str] | None = None,
+    seed_track_ids: list[str] | None = None,
+    unplayed_ids: set[str] | None = None,
 ) -> tuple[list[MixConcept], str]:
     provider = (stage2_provider or os.environ.get("STAGE2_PROVIDER", "anthropic")).lower()
     use_minimax = provider == "minimax"
@@ -607,7 +792,12 @@ async def stage2_curate_and_report(
                 extras.append(f"mix:{', '.join(t.mix)}")
             if t.energy is not None:
                 extras.append(f"energy:{t.energy}/8")
-            if t.play_count == 0:
+            if seed_ids is not None and tid in seed_ids:
+                extras.append("[seed]")
+            if unplayed_ids is not None:
+                if tid in unplayed_ids:
+                    extras.append("unplayed")
+            elif t.play_count == 0:
                 extras.append("unplayed")
             if t.tags:
                 extras.append(", ".join(t.tags))
@@ -626,12 +816,37 @@ async def stage2_curate_and_report(
     if n == 0:
         raise RuntimeError("Stage 2 received no shortlists with resolvable tracks — nothing to curate.")
 
-    prompt = (
-        f"Curate and narrate a mix report from the following {n} candidate shortlists. "
-        f"Produce between 3 and 6 distinct concepts total. A rich shortlist may yield more than one concept; "
-        f"a thin shortlist may yield none — but each concept must draw only from tracks within a single shortlist.\n\n"
-        + "\n\n".join(sections)
-    )
+    if playlist_name is not None:
+        playlist_seed_track_ids = seed_track_ids or sorted(seed_ids or [])
+        minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids))
+        prompt = (
+            f"Curate and narrate a SINGLE mix concept from the following {n} BPM zone shortlists. "
+            f'This is a playlist completion run seeded from the Rekordbox playlist "{playlist_name}".\n\n'
+            "Each shortlist below represents one natural BPM zone from the source playlist. "
+            "Tracks marked [seed] are from the original playlist; other tracks are library additions.\n\n"
+            "Your task:\n"
+            "1. Identify the dominant zone(s) — where most seed tracks live. These form the backbone of the concept.\n"
+            "2. You may drop outlier zones entirely if they are too thin or their BPM range breaks set coherence. "
+            "Dropping a zone's seed tracks counts as intentional cuts — this is expected.\n"
+            "3. Within the zone(s) you keep, treat [seed] tracks as the default choice. Only drop a seed track if it "
+            "clearly breaks tempo flow, harmonic logic, or blendability — not because a library track is marginally better.\n"
+            "4. Add library tracks only to strengthen transitions or fill genuine gaps.\n\n"
+            f"Retain at least {minimum_seed_tracks} seed tracks total across all kept zones.\n\n"
+            "When two otherwise equally suitable tracks compete for a slot, prefer the one marked unplayed. "
+            "Played tracks are fully eligible when they are the stronger musical choice.\n\n"
+            "Produce EXACTLY ONE concept. Not 2, not 3 — one.\n\n"
+            f"In the report, after the concept thesis paragraph, include a short section:\nSource playlist: {playlist_name}\n"
+            "State how many seed tracks were retained, how many were dropped, and how many library tracks "
+            "were added. For any notable drop or addition, give one sentence of musical reasoning.\n\n"
+            + "\n\n".join(sections)
+        )
+    else:
+        prompt = (
+            f"Curate and narrate a mix report from the following {n} candidate shortlists. "
+            f"Produce between 3 and 6 distinct concepts total. A rich shortlist may yield more than one concept; "
+            f"a thin shortlist may yield none — but each concept must draw only from tracks within a single shortlist.\n\n"
+            + "\n\n".join(sections)
+        )
 
     if custom_genre_label and custom_genre_sub_genres:
         sub_genre_str = ", ".join(custom_genre_sub_genres)
@@ -643,51 +858,43 @@ async def stage2_curate_and_report(
             f"Do not avoid cross-genre moves — they are the point of this pool. But every such move must be defensible."
         )
 
-    raw: str
-    if use_minimax:
-        try:
-            raw = await _call_openai_compat(
-                "https://api.minimax.io/v1",
-                stage2_key,
-                "MiniMax-M2.7",
-                prompt,
-                path="/text/chatcompletion_v2",
-                timeout=300,
-                system=_STAGE2_SYSTEM,
-            )
-        except Exception as exc:
-            raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc
-    else:
-        try:
-            raw = await _call_anthropic_http(
-                stage2_key, "claude-sonnet-4-6", _STAGE2_SYSTEM, prompt, max_tokens=32000, timeout=600
-            )
-        except Exception as anthropic_exc:
-            print(
-                f"Stage 2 Anthropic failed ({type(anthropic_exc).__name__}: {anthropic_exc}), trying MiniMax M2.7 fallback...",
-                file=sys.stderr,
-            )
-            minimax_key = os.environ.get("MINIMAX_API_KEY")
-            if not minimax_key:
-                raise RuntimeError(f"Stage 2 curation failed: {anthropic_exc}") from anthropic_exc
-            try:
-                raw = await _call_openai_compat(
-                    "https://api.minimax.io/v1",
-                    minimax_key,
-                    "MiniMax-M2.7",
-                    prompt,
-                    path="/text/chatcompletion_v2",
-                    timeout=300,
-                    system=_STAGE2_SYSTEM,
-                )
-            except Exception as minimax_exc:
-                raise RuntimeError(
-                    f"Stage 2 curation failed (Anthropic and MiniMax both failed): {minimax_exc}"
-                ) from minimax_exc
-            stage2_model_display = "MiniMax M2.7 (Anthropic fallback)"
+    stage2_system = _STAGE2_SYSTEM_PLAYLIST if playlist_name is not None else _STAGE2_SYSTEM
+    raw, stage2_model_display = await _call_stage2_raw(
+        prompt, stage2_system, stage2_key, use_minimax, stage2_model_display
+    )
 
     valid_ids = set(tracks_by_id.keys())
     curated, report = _parse_curated_concepts(raw, valid_ids)
+
+    if playlist_name is not None and seed_ids is not None and curated:
+        playlist_seed_track_ids = seed_track_ids or sorted(seed_ids)
+        concept = curated[0]
+        retained_ids, dropped_ids, _ = _playlist_retention_stats(concept, playlist_seed_track_ids)
+        minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids))
+        if len(retained_ids) < minimum_seed_tracks:
+            dropped_labels = _format_playlist_track_labels(dropped_ids, tracks_by_id, limit=len(dropped_ids))
+            retry_prompt = (
+                f"Your previous attempt retained only {len(retained_ids)} seed tracks "
+                f"(minimum required: {minimum_seed_tracks}).\n"
+                f"Seed tracks you dropped: {dropped_labels}.\n"
+                "Retry: include as many of these dropped seed tracks as possible. "
+                "For each one still excluded, give one sentence of musical justification.\n\n"
+            ) + prompt
+            raw, stage2_model_display = await _call_stage2_raw(
+                retry_prompt, stage2_system, stage2_key, use_minimax, stage2_model_display
+            )
+            curated, report = _parse_curated_concepts(raw, valid_ids)
+            if curated:
+                concept = curated[0]
+                retained_ids, _, _ = _playlist_retention_stats(concept, playlist_seed_track_ids)
+            else:
+                retained_ids = []
+            if len(retained_ids) < minimum_seed_tracks:
+                raise RuntimeError(
+                    "Stage 2 playlist curation retained too few seed tracks after retry: "
+                    f"{len(retained_ids)} retained, minimum acceptable {minimum_seed_tracks}."
+                )
+        report = _rewrite_playlist_report(report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id)
 
     warnings: list[str] = []
     for concept in curated:
