@@ -6,12 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from mixlab.models import MixConcept, Track
+from mixlab.models import IntentBrief, MixConcept, Track
 from mixlab.playlist_mode import (
     build_playlist_pool,
     build_zone_shortlists,
     cluster_seed_zones,
+    compute_deterministic_intent,
+    detect_adjacency_fragments,
+    detect_energy_shape,
     filter_tracks_for_playlist_genre,
+    identify_missing_roles,
     resolve_playlist,
 )
 
@@ -461,3 +465,109 @@ def test_run_playlist_mode_playlist_not_found_exits(monkeypatch: pytest.MonkeyPa
 
     with pytest.raises(SystemExit, match="1"):
         asyncio.run(main_mod.run_playlist_mode("Missing", None, None, None, False))
+
+
+# ---------------------------------------------------------------------------
+# Intent analysis helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_track_full(
+    track_id: str,
+    *,
+    bpm: float = 124.0,
+    camelot_key: str = "8A",
+    energy: int | None = None,
+    play_count: int = 0,
+) -> Track:
+    return Track(
+        track_id=track_id,
+        artist=f"Artist {track_id}",
+        title=f"Title {track_id}",
+        bpm=bpm,
+        camelot_key=camelot_key,
+        genre="House",
+        energy=energy,
+        play_count=play_count,
+    )
+
+
+def test_detect_adjacency_fragments_compatible_pair_returns_high_confidence() -> None:
+    t1 = _make_track_full("1", bpm=124.0, camelot_key="8A")
+    t2 = _make_track_full("2", bpm=126.0, camelot_key="9A")  # adjacent Camelot, close BPM
+    tracks_by_id = {"1": t1, "2": t2}
+    frags = detect_adjacency_fragments(["1", "2"], tracks_by_id)
+    assert len(frags) == 1
+    assert frags[0].confidence >= 0.8
+    assert "camelot" in frags[0].reason
+
+
+def test_detect_adjacency_fragments_incompatible_pair_omitted() -> None:
+    t1 = _make_track_full("1", bpm=124.0, camelot_key="1A")
+    t2 = _make_track_full("2", bpm=145.0, camelot_key="7B")  # far BPM, incompatible key
+    tracks_by_id = {"1": t1, "2": t2}
+    frags = detect_adjacency_fragments(["1", "2"], tracks_by_id)
+    assert len(frags) == 0
+
+
+def test_detect_adjacency_fragments_only_camelot_compatible_returns_medium_confidence() -> None:
+    t1 = _make_track_full("1", bpm=124.0, camelot_key="8A")
+    t2 = _make_track_full("2", bpm=140.0, camelot_key="9A")  # compatible key, BPM too far
+    tracks_by_id = {"1": t1, "2": t2}
+    frags = detect_adjacency_fragments(["1", "2"], tracks_by_id)
+    assert len(frags) == 1
+    assert frags[0].confidence == 0.6
+    assert frags[0].reason == "camelot_compatible"
+
+
+def test_detect_energy_shape_rising_returns_single_arc() -> None:
+    ids = ["1", "2", "3", "4", "5", "6"]
+    tracks_by_id = {
+        "1": _make_track_full("1", energy=1),
+        "2": _make_track_full("2", energy=2),
+        "3": _make_track_full("3", energy=4),
+        "4": _make_track_full("4", energy=6),
+        "5": _make_track_full("5", energy=7),
+        "6": _make_track_full("6", energy=8),
+    }
+    shape = detect_energy_shape(ids, tracks_by_id)
+    assert shape == "single_arc"
+
+
+def test_detect_energy_shape_returns_unclear_when_sparse() -> None:
+    ids = ["1", "2", "3"]
+    tracks_by_id = {
+        "1": _make_track_full("1", energy=None),
+        "2": _make_track_full("2", energy=5),
+        "3": _make_track_full("3", energy=None),
+    }
+    assert detect_energy_shape(ids, tracks_by_id) == "unclear"
+
+
+def test_identify_missing_roles_detects_no_peak_when_all_low_energy() -> None:
+    ids = [str(i) for i in range(1, 7)]
+    tracks_by_id = {str(i): _make_track_full(str(i), energy=3) for i in range(1, 7)}
+    missing = identify_missing_roles(ids, tracks_by_id)
+    assert "peak" in missing
+
+
+def test_identify_missing_roles_returns_empty_when_too_few_seeds() -> None:
+    ids = ["1", "2", "3"]
+    tracks_by_id = {str(i): _make_track_full(str(i), energy=3) for i in range(1, 4)}
+    assert identify_missing_roles(ids, tracks_by_id) == []
+
+
+def test_compute_deterministic_intent_returns_intent_brief() -> None:
+    ids = ["1", "2", "3", "4", "5"]
+    tracks_by_id = {
+        "1": _make_track_full("1", bpm=120.0, camelot_key="8A", energy=2),
+        "2": _make_track_full("2", bpm=122.0, camelot_key="9A", energy=4),
+        "3": _make_track_full("3", bpm=124.0, camelot_key="8A", energy=6),
+        "4": _make_track_full("4", bpm=126.0, camelot_key="8A", energy=7),
+        "5": _make_track_full("5", bpm=124.0, camelot_key="9A", energy=5),
+    }
+    brief = compute_deterministic_intent(ids, tracks_by_id)
+    assert isinstance(brief, IntentBrief)
+    assert brief.bpm_range == (120.0, 126.0)
+    assert len(brief.seed_analyses) == 5
+    assert all(s.tier == "supporting" for s in brief.seed_analyses)

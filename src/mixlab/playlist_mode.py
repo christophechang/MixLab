@@ -3,9 +3,21 @@ from __future__ import annotations
 from difflib import get_close_matches
 from statistics import median
 
-from mixlab.clustering import build_custom_genre_pool
+from mixlab.clustering import (
+    _camelot_compatible,  # noqa: PLC2701
+    build_custom_genre_pool,
+)
 from mixlab.config import CustomGenre
-from mixlab.models import MixConcept, Track
+from mixlab.models import (
+    AdjacencyFragment,
+    EnergyShape,
+    IntentBrief,
+    MixConcept,
+    RiskTolerance,
+    SeedAnalysis,
+    SetRole,
+    Track,
+)
 
 _SEED_WEIGHT: float = 2.0
 _UNPLAYED_WEIGHT: float = 1.5
@@ -17,6 +29,181 @@ _ZONE_GAP_BPM: float = 12.0  # BPM gap that splits two distinct zones
 _ZONE_MIN_TRACKS: int = 3  # minimum seed tracks for a standalone zone
 _ZONE_LIB_EXPANSION: float = 8.0  # BPM expansion either side of zone for library lookup
 _MAX_ZONE_LIBRARY_TRACKS: int = 20  # max library tracks added per zone
+
+
+def detect_adjacency_fragments(
+    seed_track_ids: list[str],
+    tracks_by_id: dict[str, Track],
+    bpm_threshold: float = 8.0,
+) -> list[AdjacencyFragment]:
+    """Find consecutive pairs in original seed order that look intentionally placed.
+
+    A pair scores 0.9 if both harmonically compatible AND BPM-close,
+    0.6 if only harmonically compatible, 0.4 if only BPM-close.
+    Pairs that are neither are omitted.
+    """
+    fragments: list[AdjacencyFragment] = []
+    for i in range(len(seed_track_ids) - 1):
+        a = tracks_by_id.get(seed_track_ids[i])
+        b = tracks_by_id.get(seed_track_ids[i + 1])
+        if a is None or b is None:
+            continue
+        bpm_close = abs(a.bpm - b.bpm) <= bpm_threshold
+        harmonically_ok = _camelot_compatible(a.camelot_key, b.camelot_key)
+        if bpm_close and harmonically_ok:
+            fragments.append(
+                AdjacencyFragment(
+                    track_ids=[seed_track_ids[i], seed_track_ids[i + 1]],
+                    confidence=0.9,
+                    reason="camelot_compatible + bpm_close",
+                )
+            )
+        elif harmonically_ok:
+            fragments.append(
+                AdjacencyFragment(
+                    track_ids=[seed_track_ids[i], seed_track_ids[i + 1]],
+                    confidence=0.6,
+                    reason="camelot_compatible",
+                )
+            )
+        elif bpm_close:
+            fragments.append(
+                AdjacencyFragment(
+                    track_ids=[seed_track_ids[i], seed_track_ids[i + 1]],
+                    confidence=0.4,
+                    reason="bpm_close",
+                )
+            )
+    return fragments
+
+
+def detect_energy_shape(
+    seed_track_ids: list[str],
+    tracks_by_id: dict[str, Track],
+) -> EnergyShape:
+    """Infer energy arc shape from seed tracks' energy fields.
+
+    Returns 'unclear' if fewer than 4 tracks have energy data or coverage < 50%.
+    Splits the sequence into thirds and compares averages.
+    """
+    energies: list[int] = []
+    for tid in seed_track_ids:
+        t = tracks_by_id.get(tid)
+        if t is not None and t.energy is not None:
+            energies.append(t.energy)
+
+    coverage = len(energies) / max(len(seed_track_ids), 1)
+    if len(energies) < 4 or coverage < 0.5:
+        return "unclear"
+
+    n = len(energies)
+    third = max(n // 3, 1)
+    first_avg = sum(energies[:third]) / third
+    mid_avg = sum(energies[third : 2 * third]) / third
+    last_count = n - 2 * third
+    last_avg = sum(energies[2 * third :]) / last_count
+
+    if mid_avg > first_avg + 1.5 and mid_avg > last_avg + 1.5:
+        return "double_peak"
+    if last_avg > first_avg + 1.5:
+        return "single_arc"
+    if abs(first_avg - mid_avg) <= 1.0 and abs(first_avg - last_avg) <= 1.0:
+        return "flat"
+    return "plateau"
+
+
+def identify_missing_roles(
+    seed_track_ids: list[str],
+    tracks_by_id: dict[str, Track],
+) -> list[SetRole]:
+    """Identify missing set roles based on energy fields and track count.
+
+    Only meaningful if >= 50% of seeds have energy data and seed count >= 5.
+    Returns a subset of ["opener", "peak", "builder"].
+    """
+    tracks = [tracks_by_id[tid] for tid in seed_track_ids if tid in tracks_by_id]
+    if len(tracks) < 5:
+        return []
+
+    energies = [t.energy for t in tracks if t.energy is not None]
+    if not energies or len(energies) / len(tracks) < 0.5:
+        return []
+
+    missing: list[SetRole] = []
+
+    first_track = tracks[0]
+    if first_track.energy is not None and first_track.energy > 5:
+        missing.append("opener")
+
+    if not any(e >= 7 for e in energies):
+        missing.append("peak")
+
+    if not any(4 <= e <= 6 for e in energies):
+        missing.append("builder")
+
+    return missing
+
+
+def compute_deterministic_intent(
+    seed_track_ids: list[str],
+    tracks_by_id: dict[str, Track],
+) -> IntentBrief:
+    """Build a deterministic IntentBrief from seed tracks without an LLM call.
+
+    All seeds default to 'supporting' tier. The LLM Stage 0 call will override
+    tiers if successful. Energy shape, adjacencies, and BPM range are always
+    computed deterministically.
+    """
+    tracks = [tracks_by_id[tid] for tid in seed_track_ids if tid in tracks_by_id]
+    if not tracks:
+        return IntentBrief(
+            overall_vibe="Unknown — no valid seed tracks.",
+            energy_shape="unclear",
+            risk_tolerance="medium",
+            is_coherent_set=True,
+            seed_analyses=[],
+            missing_roles=[],
+            strong_adjacencies=[],
+            bpm_range=(0.0, 0.0),
+        )
+
+    bpms = [t.bpm for t in tracks]
+    bpm_range: tuple[float, float] = (min(bpms), max(bpms))
+    bpm_spread = bpm_range[1] - bpm_range[0]
+
+    risk_tolerance: RiskTolerance
+    if bpm_spread < 10:
+        risk_tolerance = "low"
+    elif bpm_spread < 20:
+        risk_tolerance = "medium"
+    else:
+        risk_tolerance = "high"
+
+    energy_shape = detect_energy_shape(seed_track_ids, tracks_by_id)
+    adjacencies = detect_adjacency_fragments(seed_track_ids, tracks_by_id)
+    missing_roles = identify_missing_roles(seed_track_ids, tracks_by_id)
+
+    analyses: list[SeedAnalysis] = [
+        SeedAnalysis(
+            track_id=tid,
+            tier="supporting",
+            inferred_role="unknown",
+            drop_cost=0.5,
+        )
+        for tid in seed_track_ids
+        if tid in tracks_by_id
+    ]
+
+    return IntentBrief(
+        overall_vibe="Analysing...",
+        energy_shape=energy_shape,
+        risk_tolerance=risk_tolerance,
+        is_coherent_set=True,
+        seed_analyses=analyses,
+        missing_roles=missing_roles,
+        strong_adjacencies=[f for f in adjacencies if f.confidence >= 0.6],
+        bpm_range=bpm_range,
+    )
 
 
 def resolve_playlist(name: str, playlists: dict[str, list[str]]) -> list[str]:
