@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from mixlab.llm import _minimum_playlist_seed_retention, _parse_intent_brief, _select_best_variant
-from mixlab.models import CompletionVariant, IntentBrief, MixConcept, SeedAnalysis, Track
+from mixlab.models import CompletionVariant, DJPracticalityScore, IntentBrief, MixConcept, SeedAnalysis, Track
 
 
 def _make_track(track_id: str, *, bpm: float = 124.0, camelot_key: str = "8A", energy: int | None = None) -> Track:
@@ -111,18 +111,36 @@ def test_minimum_retention_falls_back_to_sixty_percent_without_brief() -> None:
     assert floor == 6  # 60% of 10
 
 
-def test_select_best_variant_prefers_higher_anchor_retention() -> None:
-    concept_cons = MixConcept(title="C", mood="conservative", track_ids=["1", "2", "3"])
-    concept_bold = MixConcept(title="B", mood="bold", track_ids=["1", "4", "5"])
-    v_cons = CompletionVariant(
-        strategy="conservative", concept=concept_cons, anchor_retention_rate=1.0, role_coverage=0.5
+def _make_practicality(overall: float) -> DJPracticalityScore:
+    # Set all components equal so that DJPracticalityScore.overall == overall
+    # (weights sum to 1.0, so equal components → overall == each component)
+    return DJPracticalityScore(
+        bpm_smoothness=overall,
+        harmonic_ratio=overall,
+        risk_justified=overall,
+        fragment_preserved=overall,
     )
-    v_bold = CompletionVariant(strategy="bold", concept=concept_bold, anchor_retention_rate=0.5, role_coverage=0.8)
-    best = _select_best_variant([v_cons, v_bold])
-    assert best.strategy == "conservative"
+
+
+def test_select_best_variant_prefers_higher_practicality_score() -> None:
+    concept_a = MixConcept(title="A", mood="practical", track_ids=["1", "2", "3"])
+    concept_b = MixConcept(title="B", mood="balanced", track_ids=["1", "4", "5"])
+    v_a = CompletionVariant(
+        strategy="practical", concept=concept_a,
+        anchor_retention_rate=1.0, practicality_score=_make_practicality(0.9),
+    )
+    v_b = CompletionVariant(
+        strategy="balanced", concept=concept_b,
+        anchor_retention_rate=0.5, practicality_score=_make_practicality(0.6),
+    )
+    best = _select_best_variant([v_a, v_b])
+    assert best.strategy == "practical"
 
 
 def test_select_best_variant_single_variant_returned_as_is() -> None:
-    concept = MixConcept(title="T", mood="conservative", track_ids=["1"])
-    v = CompletionVariant(strategy="conservative", concept=concept, anchor_retention_rate=1.0, role_coverage=0.0)
+    concept = MixConcept(title="T", mood="practical", track_ids=["1"])
+    v = CompletionVariant(
+        strategy="practical", concept=concept,
+        anchor_retention_rate=1.0, practicality_score=_make_practicality(0.8),
+    )
     assert _select_best_variant([v]) is v
