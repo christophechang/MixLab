@@ -1043,7 +1043,7 @@ def _rewrite_playlist_report(
         f"Library tracks added: {len(added_ids)}." + rejected_summary
     )
 
-    marker = "Track order (Camelot / BPM):"
+    marker = "Track order:"
     if marker not in report:
         return report.rstrip() + f"\n\n{summary}"
 

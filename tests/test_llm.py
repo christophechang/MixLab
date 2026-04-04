@@ -1129,6 +1129,34 @@ async def test_stage2_playlist_mode_prompt_contains_seed_instruction(monkeypatch
     assert "Tracks marked [seed]" in user_prompt
 
 
+def test_rewrite_playlist_report_injects_summary_at_track_order_marker() -> None:
+    """With the new compact header 'Track order:', summary is injected before the track list."""
+    from mixlab.llm import _rewrite_playlist_report  # noqa: PLC2701
+
+    concept = MixConcept(title="Set", mood="practical", track_ids=["1", "2", "5", "6"])
+    tracks_by_id = {
+        str(i): Track(
+            track_id=str(i), artist=f"Artist {i}", title=f"Title {i}",
+            bpm=120.0, camelot_key="8A", genre="House",
+        )
+        for i in range(1, 7)
+    }
+    report = (
+        "CONCEPT: Set\n\nA driving set.\n\n"
+        "Track order:\n"
+        "1. Artist 1 — Title 1 [8A · 120.0] | Role: opener | Why: sets tone | Risk: none\n"
+        "2. Artist 2 — Title 2 [8A · 120.0] | Role: builder | Why: builds | Risk: none"
+    )
+    rewritten = _rewrite_playlist_report(report, "Monday", concept, ["1", "2", "3", "4"], tracks_by_id)
+
+    assert "Seed tracks retained: 2" in rewritten
+    assert "Seed tracks dropped: 2." in rewritten
+    # Summary must appear BEFORE the track list, not appended at end
+    summary_pos = rewritten.index("Seed tracks retained")
+    track_list_pos = rewritten.index("Track order:")
+    assert summary_pos < track_list_pos  # summary is injected before the "Track order:" marker line
+
+
 def test_rewrite_playlist_report_overwrites_incorrect_counts() -> None:
     from mixlab.llm import _rewrite_playlist_report
 
@@ -1145,7 +1173,7 @@ def test_rewrite_playlist_report_overwrites_incorrect_counts() -> None:
         "Seed tracks retained: 99.\n"
         "Seed tracks dropped: 0.\n"
         "Library tracks added: 0.\n\n"
-        "Track order (Camelot / BPM):\nArtist 1 — Title 1 [8A · 120.0]"
+        "Track order:\nArtist 1 — Title 1 [8A · 120.0]"
     )
 
     rewritten = _rewrite_playlist_report(report, "Monday Night", concept, ["1", "2", "3", "4"], tracks_by_id)
