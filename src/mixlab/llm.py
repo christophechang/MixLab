@@ -659,8 +659,18 @@ Your output must be a JSON array where each element has exactly this schema:
   "title": "...",
   "mood": "...",
   "track_ids": ["id1", "id2", ...],
+  "transitions": [
+    {"from_id": "id1", "to_id": "id2", "is_risky": false, "risk_type": ""},
+    {"from_id": "id2", "to_id": "id3", "is_risky": true,  "risk_type": "chapter_pivot"}
+  ],
   "report": "..."
 }
+
+transitions: one entry per consecutive pair in track_ids (len(track_ids) - 1 entries).
+is_risky: true if the move is a notable harmonic or energy risk.
+risk_type: one of "chapter_pivot" | "peak_impact" | "deliberate_reset" | "closer_move" \
+           | "cut_only" | "low_tonal_risk" | "" (empty string when is_risky=false).
+"cut_only" means: risky, with no mechanism that earns it — just a hard cut.
 
 Give each concept a compelling creative name — not the pool name from Stage 1.
 The track_ids must be the final selected tracks in play order.
@@ -668,27 +678,17 @@ The "report" value must be a single string (with \\n for line breaks) in this ex
 
 CONCEPT: [title]
 
-[1–2 sentences: the set's thesis — what it asks of the room. Not mood alone; intention.]
+[1–2 sentences: thesis — what this set asks of the room.]
 
-Track order (Camelot / BPM):
-[Artist — Title [Key · BPM] for each track in play order, one track per line]
+Track order:
+[For each track in play order, one line:]
+N. Artist — Title [Key · BPM] | Role: [role] | Why: [one short phrase] | Risk: [one short phrase or "none"]
 
-Arc: [One sentence describing the overall energy shape.]
+Assumptions: [only if material — [unverified] tracks, vocal clash, tight blend window. One line each. Omit section if nothing material.]
 
-[One line per track in play order. No blank lines between them. \
-Format: Artist — Title (role) — one sentence on why this track at this moment. \
-If the move to the next track is non-obvious (Camelot jump 3+ positions or BPM shift >5 BPM), \
-append the mechanism in the same line after a semicolon. Nothing else.]
-
-Standout transitions or calculated risks: [Only for risks not already covered in the track lines \
-above. One sentence per item. If nothing qualifies, omit this section entirely — do not write it.]
-
-Assumptions:
-- [One bullet per flag. Lead with the risk. Cover only genuine uncertainty: [unverified] tracks, \
-vocal clash risks, transition-window concerns. Omit section if nothing material.]
-
-First decide whether the set would still make sense without any written justification. Only then write \
-the report.
+Role options: opener, builder, pivot, peak, cleanser, closer, utility.
+Risk: describe the transition risk into this track (not out of it). "none" if clean.
+Why: why this track at this moment — one phrase, no full sentences needed.
 
 Be opinionated, musical, and honest. Peer-to-peer, no marketing language, no filler. When choosing \
 between sounding clever and being right, be right.
@@ -711,18 +711,24 @@ strong concepts, produce 4. Do not pad with weak concepts to hit a number. If th
 produce even 3 distinct, coherent sets, return a single-element array with a diagnostic object instead \
 of concept objects: [{"diagnostic": "...explanation of why the pool is insufficient..."}] — this is \
 useful information, not a failure.""",
-    """Produce EXACTLY TWO concepts from the same pool using different strategies:
+    """Produce EXACTLY THREE concepts from the same pool using these strategies:
 
-1. "conservative" (mood field = "conservative"): maximise retention of anchor and supporting seeds. \
-Add library tracks only to strengthen transitions or fill a genuinely absent role. If the set is musically \
-coherent with nearly all seeds, this will be close to the original.
+1. "practical" (mood = "practical"): maximise harmonic continuity. Prefer adjacent Camelot keys \
+(distance ≤ 1). BPM moves ≤ 2 BPM per step where possible. Preserve all strong seed adjacency \
+pairs. Protect anchors. Avoid unearned key jumps.
 
-2. "bold" (mood field = "bold"): prioritise musical arc and role completeness. Replace optional seeds \
-(and supporting seeds if doing so materially improves the set) with library tracks. Anchors still protected.
+2. "balanced" (mood = "balanced"): one major key jump (distance 2–3) or single BPM arc allowed. \
+Anchors protected. Optional seeds may be swapped when a library track clearly serves the arc \
+better. Adjacency pairs are hints, not constraints.
 
-Both concepts must meet the anchor protection rules. Label each concept's mood field with exactly \
-"conservative" or "bold". If the pool is too thin to produce one strong set, return a single-element \
-diagnostic: [{"diagnostic": "..."}].""",
+3. "adventurous" (mood = "adventurous"): prioritise set narrative and role completeness. Chapter \
+pivots and peak impacts are permitted when musically justified — name the mechanism. Anchors \
+protected; adjacency pairs may be broken with one-sentence reason. Optional and supporting seeds \
+replaceable if a library track serves the arc materially better.
+
+Label each concept's mood field with exactly "practical", "balanced", or "adventurous".
+All three must meet the anchor protection rules and the seed retention floor.
+If the pool is too thin to produce even one strong set: [{"diagnostic": "..."}].""",
 )
 
 _SHORTFALL_THRESHOLD = 4
@@ -1216,7 +1222,7 @@ async def stage2_curate_and_report(
             )
         prompt = (
             f"{intent_section}"
-            f"Curate two completion variants from the following {n} BPM zone shortlists. "
+            f"Curate three completion variants from the following {n} BPM zone shortlists. "
             f'This is a playlist completion run seeded from the Rekordbox playlist "{playlist_name}".\n\n'
             "Each shortlist below represents one natural BPM zone from the source playlist. "
             "Tracks marked [seed] are from the original playlist; other tracks are library additions.\n\n"
@@ -1225,7 +1231,7 @@ async def stage2_curate_and_report(
             "2. You may drop outlier zones if they break set coherence.\n"
             f"3. Retain at least {minimum_seed_tracks} seed tracks total (anchors protected as per brief).\n"
             "4. When two otherwise equally suitable tracks compete, prefer the one marked unplayed.\n\n"
-            "Produce EXACTLY TWO concepts as described in your instructions (conservative + bold).\n\n"
+            "Produce EXACTLY THREE concepts as described in your instructions (practical / balanced / adventurous).\n\n"
             f"In each concept's report, after the thesis paragraph, include:\nSource playlist: {playlist_name}\n"
             "State: seeds retained / dropped / added. For any notable drop or addition, one sentence of reasoning.\n\n"
             + "\n\n".join(sections)

@@ -1064,7 +1064,7 @@ async def test_stage2_rendering_unplayed_falls_back_to_play_count_when_unplayed_
 
 
 @respx.mock
-async def test_stage2_playlist_mode_prompt_contains_two_concept_instruction(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_stage2_playlist_mode_prompt_contains_three_concept_instruction(monkeypatch: pytest.MonkeyPatch) -> None:
     from mixlab.llm import stage2_curate_and_report
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
@@ -1082,7 +1082,7 @@ async def test_stage2_playlist_mode_prompt_contains_two_concept_instruction(monk
 
     body = _json.loads(route.calls[0].request.content.decode())
     user_prompt: str = body["messages"][0]["content"]
-    assert "EXACTLY TWO" in user_prompt
+    assert "EXACTLY THREE" in user_prompt
 
 
 @respx.mock
