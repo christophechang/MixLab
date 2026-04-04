@@ -29,10 +29,19 @@ class PlayedTrack(BaseModel):
     title: str
 
 
+class Transition(BaseModel):
+    from_id: str
+    to_id: str
+    is_risky: bool = False
+    risk_type: str = ""  # "chapter_pivot" | "peak_impact" | "deliberate_reset"
+                         # | "closer_move" | "cut_only" | "low_tonal_risk" | ""
+
+
 class MixConcept(BaseModel):
     title: str
     mood: str
     track_ids: list[str]
+    transitions: list[Transition] = Field(default_factory=list)
 
 
 SeedTier = Literal["anchor", "supporting", "optional"]
@@ -78,12 +87,29 @@ class IntentBrief:
 
 
 @dataclass
+class DJPracticalityScore:
+    bpm_smoothness: float     # 0.0–1.0
+    harmonic_ratio: float     # 0.0–1.0
+    risk_justified: float     # 0.0–1.0
+    fragment_preserved: float # 0.0–1.0
+
+    @property
+    def overall(self) -> float:
+        return (
+            self.bpm_smoothness       * 0.30
+            + self.harmonic_ratio     * 0.30
+            + self.risk_justified     * 0.25
+            + self.fragment_preserved * 0.15
+        )
+
+
+@dataclass
 class CompletionVariant:
-    strategy: Literal["conservative", "bold"]
+    strategy: Literal["practical", "balanced", "adventurous"]
     concept: MixConcept
     anchor_retention_rate: float  # retained_anchors / total_anchors
-    role_coverage: float  # filled_missing_roles / total_missing_roles
+    practicality_score: DJPracticalityScore
 
     @property
     def score(self) -> float:
-        return self.anchor_retention_rate * 0.65 + self.role_coverage * 0.35
+        return self.practicality_score.overall
