@@ -35,7 +35,4 @@ def test_format_report_context_playlist_includes_active_options() -> None:
         stage2_provider="minimax",
         export_dir=Path("output/playlists"),
     )
-    assert (
-        result
-        == "Report context: Monday Night playlist (Electronica, All Tracks, stage 2: minimax, export enabled)"
-    )
+    assert result == "Report context: Monday Night playlist (Electronica, All Tracks, stage 2: minimax, export enabled)"

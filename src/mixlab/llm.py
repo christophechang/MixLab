@@ -889,9 +889,7 @@ def _score_variant(
     role_coverage = 0.0
     if intent_brief is not None and intent_brief.missing_roles:
         energies_in_concept: list[int] = [
-            t.energy
-            for tid in concept.track_ids
-            if (t := tracks_by_id.get(tid)) is not None and t.energy is not None
+            t.energy for tid in concept.track_ids if (t := tracks_by_id.get(tid)) is not None and t.energy is not None
         ]
         filled = 0
         for role in intent_brief.missing_roles:
