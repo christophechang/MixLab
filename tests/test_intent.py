@@ -1,7 +1,22 @@
 from __future__ import annotations
 
-from mixlab.llm import _minimum_playlist_seed_retention, _parse_intent_brief, _select_best_variant
-from mixlab.models import CompletionVariant, DJPracticalityScore, IntentBrief, MixConcept, SeedAnalysis, Track
+from mixlab.llm import (
+    _compute_practicality_score,  # noqa: PLC2701
+    _minimum_playlist_seed_retention,
+    _pair_consecutive,  # noqa: PLC2701
+    _parse_intent_brief,
+    _select_best_variant,
+)
+from mixlab.models import (
+    AdjacencyFragment,
+    CompletionVariant,
+    DJPracticalityScore,
+    IntentBrief,
+    MixConcept,
+    SeedAnalysis,
+    Track,
+    Transition,
+)
 
 
 def _make_track(track_id: str, *, bpm: float = 124.0, camelot_key: str = "8A", energy: int | None = None) -> Track:
@@ -144,3 +159,118 @@ def test_select_best_variant_single_variant_returned_as_is() -> None:
         anchor_retention_rate=1.0, practicality_score=_make_practicality(0.8),
     )
     assert _select_best_variant([v]) is v
+
+
+def test_pair_consecutive_adjacent_returns_true() -> None:
+    assert _pair_consecutive("a", "b", ["a", "b", "c"]) is True
+
+
+def test_pair_consecutive_not_adjacent_returns_false() -> None:
+    assert _pair_consecutive("a", "c", ["a", "b", "c"]) is False
+
+
+def test_pair_consecutive_missing_id_returns_false() -> None:
+    assert _pair_consecutive("x", "b", ["a", "b", "c"]) is False
+
+
+def test_compute_practicality_score_perfect_bpm_smoothness() -> None:
+    """All same BPM → stdev of deltas is 0 → bpm_smoothness=1.0."""
+    concept = MixConcept(title="T", mood="practical", track_ids=["1", "2", "3", "4"])
+    tracks_by_id = {str(i): _make_track(str(i), bpm=124.0, camelot_key="8A") for i in range(1, 5)}
+    score = _compute_practicality_score(concept, tracks_by_id, None)
+    assert score.bpm_smoothness == 1.0
+
+
+def test_compute_practicality_score_perfect_harmonic_ratio() -> None:
+    """All adjacent Camelot keys (distance ≤ 1) → harmonic_ratio=1.0."""
+    concept = MixConcept(title="T", mood="practical", track_ids=["1", "2", "3"])
+    tracks_by_id = {
+        "1": _make_track("1", camelot_key="8A"),
+        "2": _make_track("2", camelot_key="9A"),
+        "3": _make_track("3", camelot_key="9B"),
+    }
+    score = _compute_practicality_score(concept, tracks_by_id, None)
+    assert score.harmonic_ratio == 1.0
+
+
+def test_compute_practicality_score_zero_harmonic_ratio() -> None:
+    """Keys far apart → harmonic_ratio=0.0."""
+    concept = MixConcept(title="T", mood="practical", track_ids=["1", "2"])
+    tracks_by_id = {
+        "1": _make_track("1", camelot_key="1A"),
+        "2": _make_track("2", camelot_key="7B"),
+    }
+    score = _compute_practicality_score(concept, tracks_by_id, None)
+    assert score.harmonic_ratio == 0.0
+
+
+def test_compute_practicality_score_no_transitions_gives_full_risk_score() -> None:
+    """No Transition annotations → no annotated risks → risk_justified=1.0."""
+    concept = MixConcept(title="T", mood="practical", track_ids=["1", "2"])
+    tracks_by_id = {"1": _make_track("1"), "2": _make_track("2")}
+    score = _compute_practicality_score(concept, tracks_by_id, None)
+    assert score.risk_justified == 1.0
+
+
+def test_compute_practicality_score_cut_only_penalises_risk_score() -> None:
+    """All transitions cut_only → risk_justified=0.0."""
+    concept = MixConcept(
+        title="T", mood="practical",
+        track_ids=["1", "2", "3"],
+        transitions=[
+            Transition(from_id="1", to_id="2", is_risky=True, risk_type="cut_only"),
+            Transition(from_id="2", to_id="3", is_risky=True, risk_type="cut_only"),
+        ],
+    )
+    tracks_by_id = {str(i): _make_track(str(i)) for i in range(1, 4)}
+    score = _compute_practicality_score(concept, tracks_by_id, None)
+    assert score.risk_justified == 0.0
+
+
+def test_compute_practicality_score_named_risk_type_not_penalised() -> None:
+    """chapter_pivot is a justified risk → risk_justified=1.0."""
+    concept = MixConcept(
+        title="T", mood="practical",
+        track_ids=["1", "2"],
+        transitions=[
+            Transition(from_id="1", to_id="2", is_risky=True, risk_type="chapter_pivot"),
+        ],
+    )
+    tracks_by_id = {"1": _make_track("1"), "2": _make_track("2")}
+    score = _compute_practicality_score(concept, tracks_by_id, None)
+    assert score.risk_justified == 1.0
+
+
+def test_compute_practicality_score_fragment_preserved_with_adjacency() -> None:
+    """Strong adjacency pair preserved in sequence → fragment_preserved=1.0."""
+    frag = AdjacencyFragment(track_ids=["1", "2"], confidence=0.9, reason="bpm_close")
+    brief = IntentBrief(
+        overall_vibe="Test", energy_shape="unclear", risk_tolerance="medium",
+        is_coherent_set=True, seed_analyses=[], missing_roles=[],
+        strong_adjacencies=[frag], bpm_range=(120.0, 125.0),
+    )
+    concept = MixConcept(title="T", mood="practical", track_ids=["1", "2", "3"])
+    tracks_by_id = {str(i): _make_track(str(i)) for i in range(1, 4)}
+    score = _compute_practicality_score(concept, tracks_by_id, brief)
+    assert score.fragment_preserved == 1.0
+
+
+def test_compute_practicality_score_fragment_broken_reduces_score() -> None:
+    """Strong adjacency pair broken (reversed) → fragment_preserved=0.0."""
+    frag = AdjacencyFragment(track_ids=["1", "2"], confidence=0.9, reason="bpm_close")
+    brief = IntentBrief(
+        overall_vibe="Test", energy_shape="unclear", risk_tolerance="medium",
+        is_coherent_set=True, seed_analyses=[], missing_roles=[],
+        strong_adjacencies=[frag], bpm_range=(120.0, 125.0),
+    )
+    concept = MixConcept(title="T", mood="practical", track_ids=["2", "1", "3"])
+    tracks_by_id = {str(i): _make_track(str(i)) for i in range(1, 4)}
+    score = _compute_practicality_score(concept, tracks_by_id, brief)
+    assert score.fragment_preserved == 0.0
+
+
+def test_compute_practicality_score_overall_is_weighted_sum() -> None:
+    """overall = bpm_smoothness*0.30 + harmonic_ratio*0.30 + risk_justified*0.25 + fragment_preserved*0.15."""
+    s = DJPracticalityScore(bpm_smoothness=1.0, harmonic_ratio=0.5, risk_justified=0.8, fragment_preserved=0.6)
+    expected = 1.0 * 0.30 + 0.5 * 0.30 + 0.8 * 0.25 + 0.6 * 0.15
+    assert abs(s.overall - expected) < 1e-9

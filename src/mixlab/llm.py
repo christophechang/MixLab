@@ -5,6 +5,7 @@ import math
 import os
 import random
 import re
+import statistics
 import sys
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
@@ -12,9 +13,11 @@ from typing import Any, Callable, Literal, cast
 
 import httpx
 
+from mixlab.clustering import camelot_distance
 from mixlab.config import TRACK_COUNT_TARGETS
 from mixlab.models import (
     CompletionVariant,
+    DJPracticalityScore,
     IntentBrief,
     MixConcept,
     RiskTolerance,
@@ -866,6 +869,64 @@ def _minimum_playlist_seed_retention(seed_count: int, intent_brief: IntentBrief 
     anchor_floor = math.ceil(anchor_count * 0.75)
     supporting_floor = math.ceil(supporting_count * 0.40)
     return anchor_floor + supporting_floor
+
+
+def _pair_consecutive(a: str, b: str, ids: list[str]) -> bool:
+    """Return True if b immediately follows a in ids."""
+    return any(ids[i] == a and ids[i + 1] == b for i in range(len(ids) - 1))
+
+
+def _compute_practicality_score(
+    concept: MixConcept,
+    tracks_by_id: dict[str, Track],
+    intent_brief: IntentBrief | None,
+) -> DJPracticalityScore:
+    """Compute a DJ Practicality Score deterministically from a concept's track sequence."""
+    track_sequence = [tracks_by_id[tid] for tid in concept.track_ids if tid in tracks_by_id]
+    n = len(track_sequence)
+
+    # bpm_smoothness: how even the consecutive BPM steps are
+    if n < 3:
+        bpm_smoothness = 1.0
+    else:
+        bpm_deltas = [abs(track_sequence[i + 1].bpm - track_sequence[i].bpm) for i in range(n - 1)]
+        std = statistics.stdev(bpm_deltas)
+        bpm_smoothness = max(0.0, 1.0 - std / 10.0)
+
+    # harmonic_ratio: fraction of consecutive pairs that are Camelot-compatible (distance ≤ 1)
+    if n < 2:
+        harmonic_ratio = 1.0
+    else:
+        total_pairs = n - 1
+        compatible = sum(
+            1 for i in range(total_pairs)
+            if camelot_distance(track_sequence[i].camelot_key, track_sequence[i + 1].camelot_key) <= 1
+        )
+        harmonic_ratio = compatible / total_pairs
+
+    # risk_justified: penalise transitions annotated is_risky=True with risk_type "cut_only" or ""
+    risky = [t for t in concept.transitions if t.is_risky]
+    unjustified = [t for t in risky if t.risk_type in ("cut_only", "")]
+    risk_justified = 1.0 if not risky else max(0.0, 1.0 - len(unjustified) / len(risky))
+
+    # fragment_preserved: fraction of strong adjacency pairs preserved in sequence
+    if intent_brief is None or not intent_brief.strong_adjacencies:
+        fragment_preserved = 1.0
+    else:
+        concept_ids = list(concept.track_ids)
+        preserved = sum(
+            1
+            for frag in intent_brief.strong_adjacencies
+            if _pair_consecutive(frag.track_ids[0], frag.track_ids[1], concept_ids)
+        )
+        fragment_preserved = preserved / len(intent_brief.strong_adjacencies)
+
+    return DJPracticalityScore(
+        bpm_smoothness=bpm_smoothness,
+        harmonic_ratio=harmonic_ratio,
+        risk_justified=risk_justified,
+        fragment_preserved=fragment_preserved,
+    )
 
 
 def _score_variant(
