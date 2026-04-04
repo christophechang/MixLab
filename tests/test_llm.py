@@ -41,7 +41,7 @@ def _curated_payload() -> str:
                 "title": "Dark Rollers",
                 "mood": "heavy and relentless",
                 "track_ids": ["1", "2", "3", "4"],
-                "report": "CONCEPT: Dark Rollers\n\nA relentless journey.\n\nTrack order (Camelot / BPM):\nArtist 1 — Title 1 [8A · 174.0 BPM]\n\nArc: Builds relentlessly.\n\nOpener: Sets a dark tone.\n\nCloser: Resolves with weight.\n\nStandout transitions or calculated risks: The 8A to 9A move is deliberate.\n\nAssumptions: Energy levels inferred from BPM and key metadata.",
+                "report": "CONCEPT: Dark Rollers\n\nA relentless journey.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 174.0] | Role: opener | Why: sets dark tone | Risk: none",
             }
         ]
     )
@@ -194,7 +194,7 @@ async def test_stage2_strips_hallucinated_ids(monkeypatch: pytest.MonkeyPatch) -
                 "title": "T",
                 "mood": "m",
                 "track_ids": ["1", "2", "3", "4", "999"],
-                "report": "CONCEPT: T\n\nBrief.\n\nTrack order (Camelot / BPM):\n\nArc: x\n\nOpener: x\n\nCloser: x\n\nStandout transitions or calculated risks: x\n\nAssumptions: x",
+                "report": "CONCEPT: T\n\nBrief.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 120.0] | Role: opener | Why: sets tone | Risk: none",
             }
         ]
     )
@@ -1207,7 +1207,7 @@ async def test_stage2_playlist_mode_report_rewrites_seed_counts_deterministicall
                     "Seed tracks retained: 1.\n"
                     "Seed tracks dropped: 0.\n"
                     "Library tracks added: 7.\n\n"
-                    "Track order (Camelot / BPM):\nArtist 1 — Title 1 [8A · 120.0]"
+                    "Track order:\nArtist 1 — Title 1 [8A · 120.0]"
                 ),
             }
         ]
@@ -1244,7 +1244,7 @@ async def test_stage2_playlist_mode_raises_when_retention_below_minimum(monkeypa
                 "title": "Set",
                 "mood": "m",
                 "track_ids": ["1", "2", "3", "4", "11", "12", "13", "14", "15", "16", "17", "18"],
-                "report": "CONCEPT: Set\n\nThesis.\n\nTrack order (Camelot / BPM):\nArtist 1 — Title 1 [8A · 120.0]",
+                "report": "CONCEPT: Set\n\nThesis.\n\nTrack order:\nArtist 1 — Title 1 [8A · 120.0]",
             }
         ]
     )
