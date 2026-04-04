@@ -629,3 +629,37 @@ def test_build_zone_shortlists_ranks_harmonically_compatible_library_tracks_firs
     ids_in_order = shortlists[0].track_ids
     assert "lib1" in ids_in_order and "lib2" in ids_in_order
     assert ids_in_order.index("lib1") < ids_in_order.index("lib2")
+
+
+def test_compute_deterministic_intent_chapter_split_sets_incoherent() -> None:
+    """Seeds split by a 20 BPM gap should yield is_coherent_set=False."""
+    tracks_by_id = {
+        "a1": _make_track("a1", bpm=120.0),
+        "a2": _make_track("a2", bpm=121.0),
+        "a3": _make_track("a3", bpm=122.0),
+        "b1": _make_track("b1", bpm=142.0),
+        "b2": _make_track("b2", bpm=143.0),
+    }
+    brief = compute_deterministic_intent(["a1", "a2", "a3", "b1", "b2"], tracks_by_id)
+    assert brief.is_coherent_set is False
+
+
+def test_compute_deterministic_intent_tight_bpm_range_is_coherent() -> None:
+    """Seeds within 10 BPM should yield is_coherent_set=True."""
+    tracks_by_id = {
+        str(i): _make_track(str(i), bpm=120.0 + i) for i in range(5)
+    }
+    brief = compute_deterministic_intent([str(i) for i in range(5)], tracks_by_id)
+    assert brief.is_coherent_set is True
+
+
+def test_compute_deterministic_intent_single_track_chapter_not_absorbed() -> None:
+    """A single-track zone separated by >=12 BPM must produce 2 zones → incoherent."""
+    tracks_by_id = {
+        "lone": _make_track("lone", bpm=110.0),
+        "c1": _make_track("c1", bpm=125.0),
+        "c2": _make_track("c2", bpm=126.0),
+        "c3": _make_track("c3", bpm=127.0),
+    }
+    brief = compute_deterministic_intent(["lone", "c1", "c2", "c3"], tracks_by_id)
+    assert brief.is_coherent_set is False

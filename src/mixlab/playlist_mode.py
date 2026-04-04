@@ -194,11 +194,14 @@ def compute_deterministic_intent(
         if tid in tracks_by_id
     ]
 
+    zones = cluster_seed_zones(tracks, min_zone_tracks=1)
+    is_coherent_set = len(zones) <= 1
+
     return IntentBrief(
         overall_vibe="Analysing...",
         energy_shape=energy_shape,
         risk_tolerance=risk_tolerance,
-        is_coherent_set=True,
+        is_coherent_set=is_coherent_set,
         seed_analyses=analyses,
         missing_roles=missing_roles,
         strong_adjacencies=[f for f in adjacencies if f.confidence >= 0.6],
