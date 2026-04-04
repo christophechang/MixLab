@@ -460,6 +460,81 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
     assert seen_library_genres == ["Electronica"]
 
 
+def test_run_playlist_mode_exports_all_ranked_variants(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import mixlab.__main__ as main_mod
+
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_PLAYLIST_XML)
+    monkeypatch.setattr(main_mod, "_XML_PATH", xml_path)
+
+    exported_titles: list[str] = []
+    generated_titles: list[str] = []
+
+    async def fake_stage2(
+        shortlists: list[MixConcept],
+        tracks_by_id: dict[str, Track],
+        stage2_provider: str | None = None,
+        custom_genre_label: str | None = None,
+        custom_genre_sub_genres: list[str] | None = None,
+        playlist_name: str | None = None,
+        seed_ids: frozenset[str] | None = None,
+        seed_track_ids: list[str] | None = None,
+        unplayed_ids: set[str] | None = None,
+        intent_brief: IntentBrief | None = None,
+    ) -> tuple[list[MixConcept], str]:
+        del shortlists, tracks_by_id, stage2_provider, custom_genre_label, custom_genre_sub_genres
+        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief
+        return (
+            [
+                MixConcept(title="WINNER - PRACTICAL - Gravity Well", mood="practical", track_ids=["1", "2", "3", "4"]),
+                MixConcept(title="BALANCED - The Long Exhale", mood="balanced", track_ids=["1", "2", "3", "4"]),
+                MixConcept(title="ADVENTUROUS - Signal & Noise", mood="adventurous", track_ids=["1", "2", "3", "4"]),
+            ],
+            "Playlist report",
+        )
+
+    def fake_generate_merged_xml_bytes(
+        concepts: list[MixConcept],
+        raw_tracks_xml: dict[str, object],
+        folder_name: str = "Generated Playlists",
+        unplayed_ids: list[str] | None = None,
+    ) -> bytes:
+        del raw_tracks_xml, folder_name, unplayed_ids
+        generated_titles.extend(concept.title for concept in concepts)
+        return b"<xml/>"
+
+    def fake_export_merged_xml(
+        concepts: list[MixConcept],
+        raw_tracks_xml: dict[str, object],
+        output_path: Path,
+        folder_name: str = "Generated Playlists",
+        unplayed_ids: list[str] | None = None,
+    ) -> Path:
+        del raw_tracks_xml, folder_name, unplayed_ids
+        exported_titles.extend(concept.title for concept in concepts)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"<xml/>")
+        return output_path
+
+    async def fake_send_report(*args: object, **kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(main_mod, "stage2_curate_and_report", fake_stage2)
+    monkeypatch.setattr(main_mod, "generate_merged_xml_bytes", fake_generate_merged_xml_bytes)
+    monkeypatch.setattr(main_mod, "export_merged_xml", fake_export_merged_xml)
+    monkeypatch.setattr(main_mod, "send_report", fake_send_report)
+
+    asyncio.run(main_mod.run_playlist_mode("Monday Night", None, tmp_path, None, False))
+
+    expected_titles = [
+        "WINNER - PRACTICAL - Gravity Well",
+        "BALANCED - The Long Exhale",
+        "ADVENTUROUS - Signal & Noise",
+    ]
+    assert generated_titles == expected_titles
+    assert exported_titles == expected_titles
+
+
 def test_run_playlist_mode_playlist_not_found_exits(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import mixlab.__main__ as main_mod
 
@@ -606,6 +681,31 @@ def test_score_candidate_gives_unplayed_bonus() -> None:
     score_unplayed = _score_candidate(track, zone_seeds, 124.0, missing_roles=[], is_unplayed=True)
     score_played = _score_candidate(track, zone_seeds, 124.0, missing_roles=[], is_unplayed=False)
     assert score_unplayed > score_played
+
+
+def test_score_candidate_opener_bonus_prefers_same_genre_and_zone_fit() -> None:
+    zone_seeds = [
+        _make_track_full("s1", bpm=124.0, camelot_key="8A"),
+        _make_track_full("s2", bpm=125.0, camelot_key="9A"),
+    ]
+    same_genre_opener = _make_track_full("c1", bpm=124.5, camelot_key="8A", energy=3)
+    off_profile_opener = Track(
+        track_id="c2",
+        artist="Artist c2",
+        title="Title c2",
+        bpm=124.5,
+        camelot_key="8A",
+        genre="Electronica",
+        energy=3,
+    )
+
+    score_same = _score_candidate(
+        same_genre_opener, zone_seeds, 124.5, missing_roles=["opener"], is_unplayed=False
+    )
+    score_off = _score_candidate(
+        off_profile_opener, zone_seeds, 124.5, missing_roles=["opener"], is_unplayed=False
+    )
+    assert score_same > score_off
 
 
 def test_build_zone_shortlists_ranks_harmonically_compatible_library_tracks_first() -> None:

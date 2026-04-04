@@ -356,7 +356,18 @@ def _score_candidate(
 
     role_score = 0.0
     if track.energy is not None and missing_roles:
-        if ("opener" in missing_roles and track.energy <= 3) or ("peak" in missing_roles and track.energy >= 7):
+        if "opener" in missing_roles and track.energy <= 3:
+            # Low energy alone should not dominate opener selection; reward opener candidates
+            # that also fit the seed zone's tempo, key, and general genre profile.
+            same_genre = any(track.genre == seed.genre for seed in zone_seeds)
+            opener_bpm_close = abs(track.bpm - zone_mid_bpm) <= 2.0
+            if camelot_score == 1.0 and opener_bpm_close:
+                role_score = 0.8 if same_genre else 0.65
+            elif camelot_score == 1.0:
+                role_score = 0.45
+            else:
+                role_score = 0.15
+        elif "peak" in missing_roles and track.energy >= 7:
             role_score = 0.8
         elif "builder" in missing_roles and 4 <= track.energy <= 6:
             role_score = 0.5

@@ -231,7 +231,6 @@ async def run_playlist_mode(
         print(report, file=sys.stderr)
         sys.exit(1)
 
-    concept = all_concepts[0]
     elapsed = time.monotonic() - t_start
     mins, secs = divmod(int(elapsed), 60)
     elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
@@ -249,17 +248,17 @@ async def run_playlist_mode(
     raw_tracks_xml = parse_raw_tracks(_XML_PATH)
     today = datetime.date.today().isoformat()
     folder_name = f"Mix Lab - {playlist_name} - {today}"
-    merged_bytes = generate_merged_xml_bytes([concept], raw_tracks_xml, folder_name, None)
+    merged_bytes = generate_merged_xml_bytes(all_concepts, raw_tracks_xml, folder_name, None)
     xml_attachments: list[tuple[str, bytes]] = [("rekordbox_export.xml", merged_bytes)] if merged_bytes else []
 
     if export_dir is not None:
-        out_path = export_merged_xml([concept], raw_tracks_xml, export_dir / "rekordbox_export.xml", folder_name)
+        out_path = export_merged_xml(all_concepts, raw_tracks_xml, export_dir / "rekordbox_export.xml", folder_name)
         if out_path is not None:
             print(f"Exported: {out_path}")
 
     await send_report(
         report,
-        [concept],
+        [all_concepts[0]],
         [],
         tracks_by_id,
         counts={},

@@ -589,9 +589,10 @@ Weakness is practical: a track whose intro gives no workable mix point, a vocal 
 no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment \
 used so early it makes everything after feel like a comedown.
 - ORDER them as the intended play sequence: opener first, closer last.
-- The opener plays to a room that isn't committed yet. It must work as ambient architecture — rewarding \
-attention without requiring it. It should not telegraph where the set is going. A track that demands \
-engagement in its first 32 bars is the wrong opener regardless of its quality.
+- The opener plays to a room that isn't committed yet. It can work as ambient architecture or as a restrained, \
+low-slung groove — the point is headroom, not drift. Reward attention without requiring it, and avoid \
+telegraphing the set too early. A track that demands full engagement in its first 32 bars is the wrong \
+opener regardless of its quality.
 - The closer must signal its own finality before it arrives. The room should feel the set ending. The \
 default closer resolves — it has weight, sufficient outro length to mix out of cleanly, and leaves the \
 room with a feeling rather than a question. A track whose energy rises continuously into its final bars \
@@ -727,6 +728,10 @@ protected; adjacency pairs may be broken with one-sentence reason. Optional and 
 replaceable if a library track serves the arc materially better.
 
 Label each concept's mood field with exactly "practical", "balanced", or "adventurous".
+When multiple credible openers exist, do not default to the same obviously ambient opener in every concept. \
+Practical may open with the cleanest restrained groove, balanced may open warmer or more melodic, and \
+adventurous may open stranger or more spacious. Reuse the same opener across all three only if it is clearly \
+superior for blendability and intent.
 All three must meet the anchor protection rules and the seed retention floor.
 If the pool is too thin to produce even one strong set: [{"diagnostic": "..."}].""",
 )
@@ -1065,6 +1070,24 @@ def _rewrite_playlist_report(
     return prefix.rstrip() + f"\n\n{summary}\n\n{marker}{suffix}"
 
 
+def _playlist_variant_label(strategy: str, *, is_winner: bool) -> str:
+    base = strategy.upper()
+    return f"WINNER - {base}" if is_winner else base
+
+
+def _label_playlist_report_section(report: str, strategy: str, *, is_winner: bool) -> str:
+    label = _playlist_variant_label(strategy, is_winner=is_winner)
+    report = report.strip()
+    if not report:
+        return f"VARIANT: {label}"
+    return f"VARIANT: {label}\n\n{report}"
+
+
+def _retitle_playlist_concept(concept: MixConcept, strategy: str, *, is_winner: bool) -> MixConcept:
+    label = _playlist_variant_label(strategy, is_winner=is_winner)
+    return concept.model_copy(update={"title": f"{label} - {concept.title}"})
+
+
 async def _call_stage2_raw(
     prompt: str,
     stage2_system: str,
@@ -1267,6 +1290,12 @@ async def stage2_curate_and_report(
     curated, report = _parse_curated_concepts(raw, valid_ids)
 
     if playlist_name is not None and seed_ids is not None and curated:
+        section_reports = report.split("\n\n---\n\n") if report else []
+        report_by_title = (
+            {concept.title: section for concept, section in zip(curated, section_reports, strict=False)}
+            if len(section_reports) == len(curated)
+            else {}
+        )
         playlist_seed_track_ids = seed_track_ids or sorted(seed_ids)
         minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids), intent_brief)
 
@@ -1307,10 +1336,19 @@ async def stage2_curate_and_report(
                 )
             variants = []  # suppress rejected_summary on retry path
 
+        ordered_variants = (
+            [best] + sorted(
+                [v for v in variants if v.concept is not concept],
+                key=lambda v: _STRATEGY_PRIORITY.get(v.strategy, 99),
+            )
+            if variants
+            else []
+        )
+
         # Summarise rejected variants in report
         rejected_summary = ""
-        if variants:
-            rejected = [v for v in variants if v.concept is not concept]
+        if ordered_variants:
+            rejected = ordered_variants[1:]
             if rejected:
                 parts = [
                     f"{v.strategy} (practicality: {v.practicality_score.overall:.2f}, "
@@ -1319,10 +1357,38 @@ async def stage2_curate_and_report(
                 ]
                 rejected_summary = "\nAlternative strategies considered: " + "; ".join(parts) + "."
 
-        report = _rewrite_playlist_report(
-            report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id, rejected_summary
-        )
-        curated = [concept]
+        if variants:
+            ordered_reports: list[str] = []
+            ordered_concepts: list[MixConcept] = []
+            for variant in ordered_variants:
+                is_winner = variant.concept is concept
+                base_report = report_by_title.get(variant.concept.title, "")
+                if is_winner:
+                    base_report = _rewrite_playlist_report(
+                        base_report,
+                        playlist_name,
+                        variant.concept,
+                        playlist_seed_track_ids,
+                        tracks_by_id,
+                        rejected_summary,
+                    )
+                ordered_reports.append(
+                    _label_playlist_report_section(base_report, variant.strategy, is_winner=is_winner)
+                )
+                ordered_concepts.append(
+                    _retitle_playlist_concept(variant.concept, variant.strategy, is_winner=is_winner)
+                )
+            report = "\n\n---\n\n".join(ordered_reports)
+            curated = ordered_concepts
+        else:
+            report = _label_playlist_report_section(
+                _rewrite_playlist_report(
+                    report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id, rejected_summary
+                ),
+                concept.mood.lower(),
+                is_winner=True,
+            )
+            curated = [_retitle_playlist_concept(concept, concept.mood.lower(), is_winner=True)]
 
     warnings: list[str] = []
     for concept in curated:

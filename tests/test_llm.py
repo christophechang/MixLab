@@ -6,7 +6,7 @@ import pytest
 import respx
 from httpx import Response
 
-from mixlab.models import MixConcept, Track
+from mixlab.models import CompletionVariant, DJPracticalityScore, MixConcept, Track
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _MINIMAX_URL = "https://api.minimax.io/v1/text/chatcompletion_v2"
@@ -1264,6 +1264,90 @@ async def test_stage2_playlist_mode_raises_when_retention_below_minimum(monkeypa
             seed_ids=frozenset({str(i) for i in range(1, 11)}),
             seed_track_ids=[str(i) for i in range(1, 11)],
         )
+
+
+@respx.mock
+async def test_stage2_playlist_mode_returns_winner_first_with_labeled_titles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    payload = json.dumps(
+        [
+            {
+                "title": "Balanced Set",
+                "mood": "balanced",
+                "track_ids": ["1", "2", "3", "4"],
+                "report": "CONCEPT: Balanced Set\n\nThesis.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 120.0]",
+            },
+            {
+                "title": "Practical Set",
+                "mood": "practical",
+                "track_ids": ["1", "2", "3", "4"],
+                "report": "CONCEPT: Practical Set\n\nThesis.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 120.0]",
+            },
+            {
+                "title": "Adventurous Set",
+                "mood": "adventurous",
+                "track_ids": ["1", "2", "3", "4"],
+                "report": "CONCEPT: Adventurous Set\n\nThesis.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 120.0]",
+            },
+        ]
+    )
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(payload)))
+
+    def fake_score_variant(
+        concept: MixConcept,
+        seed_track_ids: list[str],
+        intent_brief: object,
+        tracks_by_id: dict[str, Track],
+    ) -> CompletionVariant:
+        del seed_track_ids, intent_brief, tracks_by_id
+        score_by_strategy = {
+            "practical": 0.9,
+            "balanced": 0.7,
+            "adventurous": 0.6,
+        }
+        score = score_by_strategy[concept.mood]
+        return CompletionVariant(
+            strategy=concept.mood,  # type: ignore[arg-type]
+            concept=concept,
+            anchor_retention_rate=1.0,
+            practicality_score=DJPracticalityScore(score, score, score, score),
+        )
+
+    monkeypatch.setattr("mixlab.llm._score_variant", fake_score_variant)
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=120.0 + i, camelot_key="8A", genre="House")
+        for i in range(1, 5)
+    }
+
+    concepts, report = await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset({"1", "2", "3", "4"}),
+        seed_track_ids=["1", "2", "3", "4"],
+    )
+
+    assert [concept.title for concept in concepts] == [
+        "WINNER - PRACTICAL - Practical Set",
+        "BALANCED - Balanced Set",
+        "ADVENTUROUS - Adventurous Set",
+    ]
+    assert report.startswith("VARIANT: WINNER - PRACTICAL")
+    assert "VARIANT: BALANCED" in report
+    assert "VARIANT: ADVENTUROUS" in report
+    assert report.index("VARIANT: WINNER - PRACTICAL") < report.index("VARIANT: BALANCED")
+    assert report.index("VARIANT: BALANCED") < report.index("VARIANT: ADVENTUROUS")
+    assert (
+        "Alternative strategies considered: balanced (practicality: 0.70, anchor retention: 100%) — not selected; "
+        "adventurous (practicality: 0.60, anchor retention: 100%) — not selected."
+    ) in report
+    assert "Alternative strategies considered: practical" not in report
 
 
 # ---------------------------------------------------------------------------
