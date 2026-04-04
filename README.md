@@ -12,7 +12,7 @@ For background on why this was built and how it works in practice, read the [Mix
 2. If `CATALOG_API_URL` is set, fetches your play history and filters out already-played tracks; otherwise uses the full collection
 3. Prints a crate availability table (no LLM cost)
 4. If `--genre` is specified, scopes the collection to that genre (or custom cross-genre pool), runs Stage 1 shortlisting, then writes a full Stage 2 mix planning report
-5. If `--playlist` is specified, uses that Rekordbox playlist as the seed, builds natural BPM-zone shortlists around the seed tracks, then writes a single playlist-completion report
+5. If `--playlist` is specified, uses that Rekordbox playlist as the seed, infers the set's intent, builds natural BPM-zone shortlists around the seed tracks, generates conservative and bold completion variants, then writes the best playlist-completion report
 6. Optionally exports a Rekordbox-compatible merged XML file
 7. Sends the report and any XML attachment to a Discord channel
 
@@ -205,9 +205,11 @@ For standard and custom genre runs, a Rekordbox-compatible merged XML file can b
 Playlist mode is a different workflow from genre mode:
 
 - The source Rekordbox playlist is treated as the seed and MixLab aims to complete or extend it, not replace it
+- MixLab first runs an intent-analysis pass over the seed playlist to infer the overall vibe, energy shape, anchor tracks, and any missing set roles
 - Seed tracks are clustered into natural BPM zones
 - Each zone becomes a shortlist containing the seed tracks for that zone plus nearby library tracks
-- Stage 2 produces exactly one final concept, with the report explaining which seed tracks were retained, which were dropped, and which library tracks were added
+- Stage 2 generates exactly two completion variants (`conservative` and `bold`) and MixLab auto-selects the stronger one
+- The final report explains which seed tracks were retained, which were dropped, which library tracks were added, and which alternative strategy was rejected
 
 Important playlist-mode rules:
 
@@ -221,6 +223,12 @@ Playlist runs use the same report context header as genre runs, for example:
 
 ```text
 Report context: Monday Night playlist (Electronica, All Tracks)
+```
+
+Playlist runs also print a compact intent summary before the final report, for example:
+
+```text
+Intent brief: Deep, rolling warm-up with a late lift | energy: single_arc | risk: medium | anchors: 3 | missing roles: peak
 ```
 
 If you export playlist mode, the merged XML contains the single completed concept only; it does not add an **All Unplayed Tunes** playlist.
