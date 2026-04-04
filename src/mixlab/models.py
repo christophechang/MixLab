@@ -34,7 +34,7 @@ class Transition(BaseModel):
     to_id: str
     is_risky: bool = False
     risk_type: str = ""  # "chapter_pivot" | "peak_impact" | "deliberate_reset"
-                         # | "closer_move" | "cut_only" | "low_tonal_risk" | ""
+    # | "closer_move" | "cut_only" | "low_tonal_risk" | ""
 
 
 class MixConcept(BaseModel):
@@ -88,17 +88,17 @@ class IntentBrief:
 
 @dataclass
 class DJPracticalityScore:
-    bpm_smoothness: float     # 0.0–1.0
-    harmonic_ratio: float     # 0.0–1.0
-    risk_justified: float     # 0.0–1.0
-    fragment_preserved: float # 0.0–1.0
+    bpm_smoothness: float  # 0.0–1.0
+    harmonic_ratio: float  # 0.0–1.0
+    risk_justified: float  # 0.0–1.0
+    fragment_preserved: float  # 0.0–1.0
 
     @property
     def overall(self) -> float:
         return (
-            self.bpm_smoothness       * 0.30
-            + self.harmonic_ratio     * 0.30
-            + self.risk_justified     * 0.25
+            self.bpm_smoothness * 0.30
+            + self.harmonic_ratio * 0.30
+            + self.risk_justified * 0.25
             + self.fragment_preserved * 0.15
         )
 

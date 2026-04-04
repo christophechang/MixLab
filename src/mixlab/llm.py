@@ -844,7 +844,7 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
             continue
         raw_transitions = item.get("transitions", [])
         transitions: list[Transition] = []
-        for tr in (raw_transitions if isinstance(raw_transitions, list) else []):
+        for tr in raw_transitions if isinstance(raw_transitions, list) else []:
             if isinstance(tr, dict):
                 transitions.append(
                     Transition(
@@ -923,7 +923,8 @@ def _compute_practicality_score(
     else:
         total_pairs = n - 1
         compatible = sum(
-            1 for i in range(total_pairs)
+            1
+            for i in range(total_pairs)
             if camelot_distance(track_sequence[i].camelot_key, track_sequence[i + 1].camelot_key) <= 1
         )
         harmonic_ratio = compatible / total_pairs
@@ -963,9 +964,12 @@ def _score_variant(
     concept_id_set = set(concept.track_ids)
     strategy_raw = concept.mood.lower()
     strategy: Literal["practical", "balanced", "adventurous"] = (
-        "practical" if strategy_raw == "practical"
-        else "balanced" if strategy_raw == "balanced"
-        else "adventurous" if strategy_raw == "adventurous"
+        "practical"
+        if strategy_raw == "practical"
+        else "balanced"
+        if strategy_raw == "balanced"
+        else "adventurous"
+        if strategy_raw == "adventurous"
         else "practical"
     )
 

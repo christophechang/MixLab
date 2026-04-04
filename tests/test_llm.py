@@ -1136,8 +1136,12 @@ def test_rewrite_playlist_report_injects_summary_at_track_order_marker() -> None
     concept = MixConcept(title="Set", mood="practical", track_ids=["1", "2", "5", "6"])
     tracks_by_id = {
         str(i): Track(
-            track_id=str(i), artist=f"Artist {i}", title=f"Title {i}",
-            bpm=120.0, camelot_key="8A", genre="House",
+            track_id=str(i),
+            artist=f"Artist {i}",
+            title=f"Title {i}",
+            bpm=120.0,
+            camelot_key="8A",
+            genre="House",
         )
         for i in range(1, 7)
     }
@@ -1270,15 +1274,20 @@ async def test_stage2_playlist_mode_raises_when_retention_below_minimum(monkeypa
 def test_parse_curated_concepts_parses_transitions() -> None:
     from mixlab.llm import _parse_curated_concepts  # noqa: PLC2701
 
-    raw = json.dumps([{
-        "title": "T", "mood": "practical",
-        "track_ids": ["1", "2", "3", "4"],
-        "transitions": [
-            {"from_id": "1", "to_id": "2", "is_risky": False, "risk_type": ""},
-            {"from_id": "2", "to_id": "3", "is_risky": True, "risk_type": "chapter_pivot"},
-        ],
-        "report": "x",
-    }])
+    raw = json.dumps(
+        [
+            {
+                "title": "T",
+                "mood": "practical",
+                "track_ids": ["1", "2", "3", "4"],
+                "transitions": [
+                    {"from_id": "1", "to_id": "2", "is_risky": False, "risk_type": ""},
+                    {"from_id": "2", "to_id": "3", "is_risky": True, "risk_type": "chapter_pivot"},
+                ],
+                "report": "x",
+            }
+        ]
+    )
     concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
     assert len(concepts[0].transitions) == 2
     assert concepts[0].transitions[1].is_risky is True
@@ -1297,14 +1306,19 @@ def test_parse_curated_concepts_unmatched_transition_ids_stored_as_is() -> None:
     """Transition IDs not in track_ids are stored without filtering — ignored at scoring time."""
     from mixlab.llm import _parse_curated_concepts  # noqa: PLC2701
 
-    raw = json.dumps([{
-        "title": "T", "mood": "m",
-        "track_ids": ["1", "2", "3", "4"],
-        "transitions": [
-            {"from_id": "99", "to_id": "100", "is_risky": True, "risk_type": "cut_only"},
-        ],
-        "report": "x",
-    }])
+    raw = json.dumps(
+        [
+            {
+                "title": "T",
+                "mood": "m",
+                "track_ids": ["1", "2", "3", "4"],
+                "transitions": [
+                    {"from_id": "99", "to_id": "100", "is_risky": True, "risk_type": "cut_only"},
+                ],
+                "report": "x",
+            }
+        ]
+    )
     concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
     # stored verbatim — scorer ignores them when looking up consecutive pairs
     assert len(concepts[0].transitions) == 1

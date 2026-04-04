@@ -4,8 +4,8 @@ from mixlab.llm import (
     _compute_practicality_score,  # noqa: PLC2701
     _minimum_playlist_seed_retention,
     _pair_consecutive,  # noqa: PLC2701
-    _passes_floor,  # noqa: PLC2701
     _parse_intent_brief,
+    _passes_floor,  # noqa: PLC2701
     _score_variant,  # noqa: PLC2701
     _select_best_variant,
 )
@@ -143,12 +143,16 @@ def test_select_best_variant_prefers_higher_practicality_score() -> None:
     concept_a = MixConcept(title="A", mood="practical", track_ids=["1", "2", "3"])
     concept_b = MixConcept(title="B", mood="balanced", track_ids=["1", "4", "5"])
     v_a = CompletionVariant(
-        strategy="practical", concept=concept_a,
-        anchor_retention_rate=1.0, practicality_score=_make_practicality(0.9),
+        strategy="practical",
+        concept=concept_a,
+        anchor_retention_rate=1.0,
+        practicality_score=_make_practicality(0.9),
     )
     v_b = CompletionVariant(
-        strategy="balanced", concept=concept_b,
-        anchor_retention_rate=0.5, practicality_score=_make_practicality(0.6),
+        strategy="balanced",
+        concept=concept_b,
+        anchor_retention_rate=0.5,
+        practicality_score=_make_practicality(0.6),
     )
     best = _select_best_variant([v_a, v_b])
     assert best.strategy == "practical"
@@ -157,8 +161,10 @@ def test_select_best_variant_prefers_higher_practicality_score() -> None:
 def test_select_best_variant_single_variant_returned_as_is() -> None:
     concept = MixConcept(title="T", mood="practical", track_ids=["1"])
     v = CompletionVariant(
-        strategy="practical", concept=concept,
-        anchor_retention_rate=1.0, practicality_score=_make_practicality(0.8),
+        strategy="practical",
+        concept=concept,
+        anchor_retention_rate=1.0,
+        practicality_score=_make_practicality(0.8),
     )
     assert _select_best_variant([v]) is v
 
@@ -217,7 +223,8 @@ def test_compute_practicality_score_no_transitions_gives_full_risk_score() -> No
 def test_compute_practicality_score_cut_only_penalises_risk_score() -> None:
     """All transitions cut_only → risk_justified=0.0."""
     concept = MixConcept(
-        title="T", mood="practical",
+        title="T",
+        mood="practical",
         track_ids=["1", "2", "3"],
         transitions=[
             Transition(from_id="1", to_id="2", is_risky=True, risk_type="cut_only"),
@@ -232,7 +239,8 @@ def test_compute_practicality_score_cut_only_penalises_risk_score() -> None:
 def test_compute_practicality_score_named_risk_type_not_penalised() -> None:
     """chapter_pivot is a justified risk → risk_justified=1.0."""
     concept = MixConcept(
-        title="T", mood="practical",
+        title="T",
+        mood="practical",
         track_ids=["1", "2"],
         transitions=[
             Transition(from_id="1", to_id="2", is_risky=True, risk_type="chapter_pivot"),
@@ -247,9 +255,14 @@ def test_compute_practicality_score_fragment_preserved_with_adjacency() -> None:
     """Strong adjacency pair preserved in sequence → fragment_preserved=1.0."""
     frag = AdjacencyFragment(track_ids=["1", "2"], confidence=0.9, reason="bpm_close")
     brief = IntentBrief(
-        overall_vibe="Test", energy_shape="unclear", risk_tolerance="medium",
-        is_coherent_set=True, seed_analyses=[], missing_roles=[],
-        strong_adjacencies=[frag], bpm_range=(120.0, 125.0),
+        overall_vibe="Test",
+        energy_shape="unclear",
+        risk_tolerance="medium",
+        is_coherent_set=True,
+        seed_analyses=[],
+        missing_roles=[],
+        strong_adjacencies=[frag],
+        bpm_range=(120.0, 125.0),
     )
     concept = MixConcept(title="T", mood="practical", track_ids=["1", "2", "3"])
     tracks_by_id = {str(i): _make_track(str(i)) for i in range(1, 4)}
@@ -261,9 +274,14 @@ def test_compute_practicality_score_fragment_broken_reduces_score() -> None:
     """Strong adjacency pair broken (reversed) → fragment_preserved=0.0."""
     frag = AdjacencyFragment(track_ids=["1", "2"], confidence=0.9, reason="bpm_close")
     brief = IntentBrief(
-        overall_vibe="Test", energy_shape="unclear", risk_tolerance="medium",
-        is_coherent_set=True, seed_analyses=[], missing_roles=[],
-        strong_adjacencies=[frag], bpm_range=(120.0, 125.0),
+        overall_vibe="Test",
+        energy_shape="unclear",
+        risk_tolerance="medium",
+        is_coherent_set=True,
+        seed_analyses=[],
+        missing_roles=[],
+        strong_adjacencies=[frag],
+        bpm_range=(120.0, 125.0),
     )
     concept = MixConcept(title="T", mood="practical", track_ids=["2", "1", "3"])
     tracks_by_id = {str(i): _make_track(str(i)) for i in range(1, 4)}
@@ -286,12 +304,24 @@ def test_select_best_variant_tiebreak_prefers_practical() -> None:
         MixConcept(title="A", mood="adventurous", track_ids=["3"]),
     ]
     variants = [
-        CompletionVariant(strategy="adventurous", concept=concepts[2],
-                          anchor_retention_rate=1.0, practicality_score=_make_practicality(0.7)),
-        CompletionVariant(strategy="balanced", concept=concepts[1],
-                          anchor_retention_rate=1.0, practicality_score=_make_practicality(0.7)),
-        CompletionVariant(strategy="practical", concept=concepts[0],
-                          anchor_retention_rate=1.0, practicality_score=_make_practicality(0.7)),
+        CompletionVariant(
+            strategy="adventurous",
+            concept=concepts[2],
+            anchor_retention_rate=1.0,
+            practicality_score=_make_practicality(0.7),
+        ),
+        CompletionVariant(
+            strategy="balanced",
+            concept=concepts[1],
+            anchor_retention_rate=1.0,
+            practicality_score=_make_practicality(0.7),
+        ),
+        CompletionVariant(
+            strategy="practical",
+            concept=concepts[0],
+            anchor_retention_rate=1.0,
+            practicality_score=_make_practicality(0.7),
+        ),
     ]
     best = _select_best_variant(variants)
     assert best.strategy == "practical"
@@ -303,10 +333,18 @@ def test_passes_floor_with_intent_brief_per_tier() -> None:
     # floor: ceil(4*0.75)=3 anchors, ceil(2*0.40)=1 supporting
     concept_pass = MixConcept(title="P", mood="practical", track_ids=["a1", "a2", "a3", "s1", "x1"])
     concept_fail = MixConcept(title="F", mood="practical", track_ids=["a1", "s1", "s2", "x1", "x2"])
-    v_pass = CompletionVariant(strategy="practical", concept=concept_pass,
-                               anchor_retention_rate=0.75, practicality_score=_make_practicality(0.8))
-    v_fail = CompletionVariant(strategy="practical", concept=concept_fail,
-                               anchor_retention_rate=0.25, practicality_score=_make_practicality(0.9))
+    v_pass = CompletionVariant(
+        strategy="practical",
+        concept=concept_pass,
+        anchor_retention_rate=0.75,
+        practicality_score=_make_practicality(0.8),
+    )
+    v_fail = CompletionVariant(
+        strategy="practical",
+        concept=concept_fail,
+        anchor_retention_rate=0.25,
+        practicality_score=_make_practicality(0.9),
+    )
     seed_ids = ["a1", "a2", "a3", "a4", "s1", "s2"]
     min_seeds = _minimum_playlist_seed_retention(len(seed_ids), brief)
     assert _passes_floor(v_pass, brief, seed_ids, min_seeds) is True
@@ -320,8 +358,9 @@ def test_passes_floor_optional_seeds_do_not_satisfy_anchor_requirement() -> None
     # concept keeps only 2 anchors but 10 optional seeds — total retained > floor sum, but per-tier fails
     opt_ids = [f"o{i}" for i in range(10)]
     concept = MixConcept(title="T", mood="practical", track_ids=["a1", "a2"] + opt_ids)
-    v = CompletionVariant(strategy="practical", concept=concept,
-                          anchor_retention_rate=0.5, practicality_score=_make_practicality(0.9))
+    v = CompletionVariant(
+        strategy="practical", concept=concept, anchor_retention_rate=0.5, practicality_score=_make_practicality(0.9)
+    )
     seed_ids = ["a1", "a2", "a3", "a4"]
     min_seeds = _minimum_playlist_seed_retention(len(seed_ids), brief)
     assert _passes_floor(v, brief, seed_ids, min_seeds) is False

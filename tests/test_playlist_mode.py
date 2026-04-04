@@ -646,9 +646,7 @@ def test_compute_deterministic_intent_chapter_split_sets_incoherent() -> None:
 
 def test_compute_deterministic_intent_tight_bpm_range_is_coherent() -> None:
     """Seeds within 10 BPM should yield is_coherent_set=True."""
-    tracks_by_id = {
-        str(i): _make_track(str(i), bpm=120.0 + i) for i in range(5)
-    }
+    tracks_by_id = {str(i): _make_track(str(i), bpm=120.0 + i) for i in range(5)}
     brief = compute_deterministic_intent([str(i) for i in range(5)], tracks_by_id)
     assert brief.is_coherent_set is True
 

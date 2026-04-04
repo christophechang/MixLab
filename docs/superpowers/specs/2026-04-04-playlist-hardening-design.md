@@ -36,7 +36,7 @@ Stage 2 JSON
        report             → compact format (all modes)
 
 Python scoring:
-  camelot_distance()     → bpm_delta + camelot_jump per pair (deterministic)
+  camelot_distance()             → Camelot wheel steps between two keys (deterministic)
   _compute_practicality_score()  → DJPracticalityScore from sequence + LLM annotations
   _select_best_variant()         → max(practicality_score.overall), tiebreak by strategy priority
 ```
@@ -99,6 +99,8 @@ class CompletionVariant:
         return self.practicality_score.overall
 ```
 
+`anchor_retention_rate` is stored on the variant and surfaced in the rejected summary, but is not part of `score`. Anchor protection is enforced by pre-filtering variants before selection using per-tier checks: a variant passes only if it retains at least `ceil(anchor_count * 0.75)` anchors **and** at least `ceil(supporting_count * 0.40)` supporting tracks. Total retained-seed count is not sufficient — a variant that drops all anchors but keeps many optional seeds would satisfy a combined total but fails the per-tier check. If no variant passes, the code falls through to the existing retry path (see Playlist Selection Flow section below).
+
 ---
 
 ## New Function: `camelot_distance` in `clustering.py`
@@ -138,11 +140,11 @@ def camelot_distance(key_a: str, key_b: str) -> int:
 ```python
 from mixlab.playlist_mode import cluster_seed_zones  # already in same file
 
-zones = cluster_seed_zones(tracks)
+zones = cluster_seed_zones(tracks, min_zone_tracks=1)
 is_coherent_set = len(zones) <= 1
 ```
 
-This reuses the existing zone clustering logic — if the seed set splits into 2+ zones (gap ≥ 12 BPM), the set is treated as chapters.
+Pass `min_zone_tracks=1` to disable the undersized-zone merge that the default args apply. Without this, a single-track intro or outro chapter is absorbed into its neighbour and the zone count collapses, incorrectly leaving `is_coherent_set=True`. With `min_zone_tracks=1`, any gap ≥ 12 BPM produces a distinct zone regardless of zone size.
 
 ---
 
@@ -192,7 +194,7 @@ else:
     risk_justified = max(0.0, 1.0 - len(unjustified) / len(risky))
 ```
 
-For pairs without a matching `Transition` annotation, assume `is_risky=False` (no penalty).
+For pairs without a matching `Transition` annotation, assume `is_risky=False` (no penalty for `risk_justified`). Note: `bpm_smoothness` and `harmonic_ratio` always run over all consecutive pairs in `track_ids` regardless of how many transition annotations the LLM returned — those two components are the deterministic fallback that applies even when `transitions` is empty.
 
 ### fragment_preserved (0.15 weight)
 
@@ -266,9 +268,51 @@ if len(variants) > 1:
 
 ---
 
+## Playlist Selection Flow in `llm.py`
+
+The current orchestration (post-parse) selects the best variant and then checks the floor. This must change to pre-filter:
+
+```python
+# After _parse_curated_concepts:
+all_variants = [_score_variant(c, playlist_seed_track_ids, intent_brief, tracks_by_id) for c in curated]
+seed_id_set = set(playlist_seed_track_ids)
+
+# Pre-filter: per-tier retention floor (requires intent_brief; falls back to flat check without one)
+def _passes_floor(v: CompletionVariant, intent_brief: IntentBrief | None) -> bool:
+    concept_ids = set(v.concept.track_ids)
+    if intent_brief is not None and intent_brief.anchor_ids:
+        anchor_floor = math.ceil(len(intent_brief.anchor_ids) * 0.75)
+        supporting_floor = math.ceil(len(intent_brief.supporting_ids) * 0.40)
+        return (
+            sum(1 for aid in intent_brief.anchor_ids if aid in concept_ids) >= anchor_floor
+            and sum(1 for sid in intent_brief.supporting_ids if sid in concept_ids) >= supporting_floor
+        )
+    # Flat fallback when no intent_brief
+    retained = sum(1 for tid in playlist_seed_track_ids if tid in concept_ids)
+    return retained >= minimum_seed_tracks
+
+passing = [v for v in all_variants if _passes_floor(v, intent_brief)]
+candidates = passing if passing else all_variants  # fall through to retry below if all fail
+
+best = _select_best_variant(candidates)
+concept = best.concept
+
+# Retry only if no variant passed the floor
+if not passing:
+    # ... existing retry path, unchanged: one-concept retry with explicit drop justification
+    # On retry: do NOT emit rejected_summary — the original variants were all failures,
+    # not meaningful alternatives to the retry result.
+```
+
+The retry prompt continues to request **one concept only** — this is intentional. By the time the retry fires, all three variants have already failed the floor; the retry is a targeted recovery ask ("include as many dropped seeds as possible, justify each exclusion"), not a re-run of variant generation. The rejected summary must be suppressed on the retry path for the same reason.
+
+---
+
 ## Stage 2 Prompt Changes
 
 ### Three variants replacing conservative/bold
+
+Update **both** `_STAGE2_SYSTEM_PLAYLIST` (system prompt) **and** the runtime prompt builder string in `_call_stage2` (currently line 1123: `"Curate two completion variants..."` and line 1132: `"Produce EXACTLY TWO concepts (conservative + bold)"`). Both must be updated or the LLM receives contradictory instructions.
 
 Update `_STAGE2_SYSTEM_PLAYLIST` variant instructions:
 
@@ -345,7 +389,7 @@ Why: why this track at this moment — one phrase, no full sentences needed.
 
 ## Parsing Changes in `_parse_curated_concepts`
 
-After parsing each item dict, also parse `transitions`:
+After parsing each item dict, also parse `transitions`. The parser stores all well-formed dicts without ID validation — unmatched entries are ignored at scoring time, not parse time (`_compute_practicality_score` looks up transitions by consecutive `(from_id, to_id)` pair; any entry whose IDs don't appear as an adjacent pair in `concept.track_ids` is simply never matched and has no effect):
 
 ```python
 raw_transitions = item.get("transitions", [])
@@ -372,10 +416,11 @@ concept = MixConcept(
 | `src/mixlab/models.py` | Modify | Add `Transition` (Pydantic); add `DJPracticalityScore` (dataclass); add `transitions` to `MixConcept`; update `CompletionVariant` (strategy type, replace `role_coverage` with `practicality_score`) |
 | `src/mixlab/clustering.py` | Modify | Add public `camelot_distance(key_a, key_b) -> int` |
 | `src/mixlab/playlist_mode.py` | Modify | Update `compute_deterministic_intent` to detect chapters via `cluster_seed_zones` |
-| `src/mixlab/llm.py` | Modify | Update JSON schema (add `transitions`); update report format spec; update `_STAGE2_SYSTEM_PLAYLIST` (3 variants); update `_parse_curated_concepts` (parse transitions); add `_compute_practicality_score` + `_pair_consecutive`; update `_score_variant` + `_select_best_variant`; update rejected variant summary for 3 variants |
+| `src/mixlab/llm.py` | Modify | Update JSON schema (add `transitions`); update report format spec; update `_STAGE2_SYSTEM_PLAYLIST` (3 variants) **and** runtime prompt builder strings ("Curate two..." → three, "Produce EXACTLY TWO..." → three, "conservative + bold" → "practical / balanced / adventurous"); update `_parse_curated_concepts` (parse transitions); add `_compute_practicality_score` + `_pair_consecutive`; update `_score_variant` + `_select_best_variant`; update playlist selection flow to pre-filter by retention floor before calling `_select_best_variant`; update rejected variant summary for 3 variants; update `_rewrite_playlist_report` marker from `"Track order (Camelot / BPM):"` to `"Track order:"` |
 | `tests/test_clustering.py` | Modify | Add tests for `camelot_distance` |
 | `tests/test_playlist_mode.py` | Modify | Add test for chapter detection in `compute_deterministic_intent` |
-| `tests/test_intent.py` | Modify | Update existing `CompletionVariant` constructions (remove `role_coverage` kwarg, add `practicality_score`); add tests for `_compute_practicality_score`, `_select_best_variant` (3 variants, tiebreak) |
+| `tests/test_intent.py` | Modify | Update existing `CompletionVariant` constructions (remove `role_coverage` kwarg, add `practicality_score`); add tests for `_compute_practicality_score`, `_select_best_variant` (3 variants, tiebreak); add test for pre-filter selection flow (variant below floor excluded, best of passing variants wins) |
+| `tests/test_llm.py` | Modify | Add test for `_parse_curated_concepts` transitions normalization (unmatched IDs ignored, missing `transitions` key yields empty list); add test for `_rewrite_playlist_report` with `Track order:` header (summary injected at correct position) |
 
 ---
 
@@ -383,7 +428,7 @@ concept = MixConcept(
 
 | Risk | Mitigation |
 |---|---|
-| LLM returns 0 transitions or mismatched IDs | `_compute_practicality_score` falls back to deterministic BPM/Camelot pair analysis for any missing annotations |
+| LLM returns 0 transitions or mismatched IDs | `bpm_smoothness` and `harmonic_ratio` are always computed from `track_ids` directly; unmatched `Transition` entries are ignored; consecutive pairs with no matching annotation are treated as `is_risky=False` for `risk_justified` |
 | 3 variants instead of 2 increases Stage 2 token usage | Transitions array is ~400–600 extra tokens; compact report saves ~300–500 per concept; net is roughly flat |
 | `camelot_distance` with cross-ring keys | Tested explicitly; formula handles A↔B ring crossing correctly |
 | `practical > balanced > adventurous` tiebreak feels arbitrary | Practical is the conservative fallback — if scores are tied, safer is better; this is intentional |
