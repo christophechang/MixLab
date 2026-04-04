@@ -935,10 +935,15 @@ def _score_variant(
     intent_brief: IntentBrief | None,
     tracks_by_id: dict[str, Track],
 ) -> CompletionVariant:
-    """Compute a CompletionVariant with anchor_retention_rate and role_coverage scores."""
+    """Compute a CompletionVariant with anchor_retention_rate and practicality_score."""
     concept_id_set = set(concept.track_ids)
     strategy_raw = concept.mood.lower()
-    strategy: Literal["conservative", "bold"] = "bold" if strategy_raw == "bold" else "conservative"
+    strategy: Literal["practical", "balanced", "adventurous"] = (
+        "practical" if strategy_raw == "practical"
+        else "balanced" if strategy_raw == "balanced"
+        else "adventurous" if strategy_raw == "adventurous"
+        else "practical"
+    )
 
     if intent_brief is not None and intent_brief.anchor_ids:
         retained_anchors = sum(1 for aid in intent_brief.anchor_ids if aid in concept_id_set)
@@ -947,32 +952,44 @@ def _score_variant(
         retained_seeds = sum(1 for sid in seed_track_ids if sid in concept_id_set)
         anchor_retention_rate = retained_seeds / max(len(seed_track_ids), 1)
 
-    role_coverage = 0.0
-    if intent_brief is not None and intent_brief.missing_roles:
-        energies_in_concept: list[int] = [
-            t.energy for tid in concept.track_ids if (t := tracks_by_id.get(tid)) is not None and t.energy is not None
-        ]
-        filled = 0
-        for role in intent_brief.missing_roles:
-            if (
-                (role == "opener" and any(e <= 3 for e in energies_in_concept))
-                or (role == "peak" and any(e >= 7 for e in energies_in_concept))
-                or (role == "builder" and any(4 <= e <= 6 for e in energies_in_concept))
-            ):
-                filled += 1
-        role_coverage = filled / len(intent_brief.missing_roles)
+    practicality_score = _compute_practicality_score(concept, tracks_by_id, intent_brief)
 
     return CompletionVariant(
         strategy=strategy,
         concept=concept,
         anchor_retention_rate=anchor_retention_rate,
-        role_coverage=role_coverage,
+        practicality_score=practicality_score,
     )
 
 
+_STRATEGY_PRIORITY: dict[str, int] = {"practical": 0, "balanced": 1, "adventurous": 2}
+
+
 def _select_best_variant(variants: list[CompletionVariant]) -> CompletionVariant:
-    """Return the highest-scoring variant (anchor_retention * 0.65 + role_coverage * 0.35)."""
-    return max(variants, key=lambda v: v.score)
+    """Return highest-scoring variant; ties broken by practical > balanced > adventurous."""
+    return max(
+        variants,
+        key=lambda v: (v.score, -_STRATEGY_PRIORITY.get(v.strategy, 99)),
+    )
+
+
+def _passes_floor(
+    variant: CompletionVariant,
+    intent_brief: IntentBrief | None,
+    playlist_seed_track_ids: list[str],
+    minimum_seed_tracks: int,
+) -> bool:
+    """Return True if variant meets the per-tier retention floor."""
+    concept_ids = set(variant.concept.track_ids)
+    if intent_brief is not None and intent_brief.anchor_ids:
+        anchor_floor = math.ceil(len(intent_brief.anchor_ids) * 0.75)
+        supporting_floor = math.ceil(len(intent_brief.supporting_ids) * 0.40)
+        return (
+            sum(1 for aid in intent_brief.anchor_ids if aid in concept_ids) >= anchor_floor
+            and sum(1 for sid in intent_brief.supporting_ids if sid in concept_ids) >= supporting_floor
+        )
+    retained = sum(1 for tid in playlist_seed_track_ids if tid in concept_ids)
+    return retained >= minimum_seed_tracks
 
 
 def _format_playlist_track_labels(track_ids: list[str], tracks_by_id: dict[str, Track], limit: int = 8) -> str:
@@ -1225,14 +1242,19 @@ async def stage2_curate_and_report(
         playlist_seed_track_ids = seed_track_ids or sorted(seed_ids)
         minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids), intent_brief)
 
-        # Score and select best variant from up to 2 returned concepts
+        # Score all returned concepts
         variants = [_score_variant(c, playlist_seed_track_ids, intent_brief, tracks_by_id) for c in curated]
-        best = _select_best_variant(variants)
+
+        # Pre-filter: per-tier retention floor before selection
+        passing = [v for v in variants if _passes_floor(v, intent_brief, playlist_seed_track_ids, minimum_seed_tracks)]
+        candidates = passing if passing else variants
+
+        best = _select_best_variant(candidates)
         concept = best.concept
 
-        # Check weighted retention floor
-        retained_ids, dropped_ids, _ = _playlist_retention_stats(concept, playlist_seed_track_ids)
-        if len(retained_ids) < minimum_seed_tracks:
+        # Retry only if no variant passed the floor
+        if not passing:
+            retained_ids, dropped_ids, _ = _playlist_retention_stats(concept, playlist_seed_track_ids)
             dropped_labels = _format_playlist_track_labels(dropped_ids, tracks_by_id, limit=len(dropped_ids))
             retry_prompt = (
                 f"Your previous attempt retained only {len(retained_ids)} seed tracks "
@@ -1255,18 +1277,19 @@ async def stage2_curate_and_report(
                     "Stage 2 playlist curation retained too few seed tracks after retry: "
                     f"{len(retained_ids)} retained, minimum acceptable {minimum_seed_tracks}."
                 )
+            variants = []  # suppress rejected_summary on retry path
 
-        # Summarise rejected variant in report (if there was one)
+        # Summarise rejected variants in report
         rejected_summary = ""
-        if len(variants) > 1:
+        if variants:
             rejected = [v for v in variants if v.concept is not concept]
             if rejected:
-                other = rejected[0]
-                rejected_summary = (
-                    f"\nAlternative strategy considered: {other.strategy} "
-                    f"(anchor retention: {other.anchor_retention_rate:.0%}, "
-                    f"role coverage: {other.role_coverage:.0%}) \u2014 not selected."
-                )
+                parts = [
+                    f"{v.strategy} (practicality: {v.practicality_score.overall:.2f}, "
+                    f"anchor retention: {v.anchor_retention_rate:.0%}) — not selected"
+                    for v in rejected
+                ]
+                rejected_summary = "\nAlternative strategies considered: " + "; ".join(parts) + "."
 
         report = _rewrite_playlist_report(
             report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id, rejected_summary

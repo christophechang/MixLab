@@ -4,7 +4,9 @@ from mixlab.llm import (
     _compute_practicality_score,  # noqa: PLC2701
     _minimum_playlist_seed_retention,
     _pair_consecutive,  # noqa: PLC2701
+    _passes_floor,  # noqa: PLC2701
     _parse_intent_brief,
+    _score_variant,  # noqa: PLC2701
     _select_best_variant,
 )
 from mixlab.models import (
@@ -274,3 +276,61 @@ def test_compute_practicality_score_overall_is_weighted_sum() -> None:
     s = DJPracticalityScore(bpm_smoothness=1.0, harmonic_ratio=0.5, risk_justified=0.8, fragment_preserved=0.6)
     expected = 1.0 * 0.30 + 0.5 * 0.30 + 0.8 * 0.25 + 0.6 * 0.15
     assert abs(s.overall - expected) < 1e-9
+
+
+def test_select_best_variant_tiebreak_prefers_practical() -> None:
+    """When practicality scores are equal, practical > balanced > adventurous."""
+    concepts = [
+        MixConcept(title="P", mood="practical", track_ids=["1"]),
+        MixConcept(title="B", mood="balanced", track_ids=["2"]),
+        MixConcept(title="A", mood="adventurous", track_ids=["3"]),
+    ]
+    variants = [
+        CompletionVariant(strategy="adventurous", concept=concepts[2],
+                          anchor_retention_rate=1.0, practicality_score=_make_practicality(0.7)),
+        CompletionVariant(strategy="balanced", concept=concepts[1],
+                          anchor_retention_rate=1.0, practicality_score=_make_practicality(0.7)),
+        CompletionVariant(strategy="practical", concept=concepts[0],
+                          anchor_retention_rate=1.0, practicality_score=_make_practicality(0.7)),
+    ]
+    best = _select_best_variant(variants)
+    assert best.strategy == "practical"
+
+
+def test_passes_floor_with_intent_brief_per_tier() -> None:
+    """Variant retaining all anchors and enough supporting passes."""
+    brief = _make_brief_with_tiers(anchor_ids=["a1", "a2", "a3", "a4"], supporting_ids=["s1", "s2"])
+    # floor: ceil(4*0.75)=3 anchors, ceil(2*0.40)=1 supporting
+    concept_pass = MixConcept(title="P", mood="practical", track_ids=["a1", "a2", "a3", "s1", "x1"])
+    concept_fail = MixConcept(title="F", mood="practical", track_ids=["a1", "s1", "s2", "x1", "x2"])
+    v_pass = CompletionVariant(strategy="practical", concept=concept_pass,
+                               anchor_retention_rate=0.75, practicality_score=_make_practicality(0.8))
+    v_fail = CompletionVariant(strategy="practical", concept=concept_fail,
+                               anchor_retention_rate=0.25, practicality_score=_make_practicality(0.9))
+    seed_ids = ["a1", "a2", "a3", "a4", "s1", "s2"]
+    min_seeds = _minimum_playlist_seed_retention(len(seed_ids), brief)
+    assert _passes_floor(v_pass, brief, seed_ids, min_seeds) is True
+    assert _passes_floor(v_fail, brief, seed_ids, min_seeds) is False
+
+
+def test_passes_floor_optional_seeds_do_not_satisfy_anchor_requirement() -> None:
+    """A variant with many optional seeds but too few anchors must fail the floor."""
+    brief = _make_brief_with_tiers(anchor_ids=["a1", "a2", "a3", "a4"], supporting_ids=[])
+    # floor: ceil(4*0.75)=3 anchors
+    # concept keeps only 2 anchors but 10 optional seeds — total retained > floor sum, but per-tier fails
+    opt_ids = [f"o{i}" for i in range(10)]
+    concept = MixConcept(title="T", mood="practical", track_ids=["a1", "a2"] + opt_ids)
+    v = CompletionVariant(strategy="practical", concept=concept,
+                          anchor_retention_rate=0.5, practicality_score=_make_practicality(0.9))
+    seed_ids = ["a1", "a2", "a3", "a4"]
+    min_seeds = _minimum_playlist_seed_retention(len(seed_ids), brief)
+    assert _passes_floor(v, brief, seed_ids, min_seeds) is False
+
+
+def test_score_variant_returns_completion_variant_with_practicality_score() -> None:
+    concept = MixConcept(title="T", mood="practical", track_ids=["1", "2", "3"])
+    tracks_by_id = {str(i): _make_track(str(i), bpm=124.0, camelot_key="8A") for i in range(1, 4)}
+    variant = _score_variant(concept, ["1", "2"], None, tracks_by_id)
+    assert variant.strategy == "practical"
+    assert isinstance(variant.practicality_score, DJPracticalityScore)
+    assert 0.0 <= variant.score <= 1.0
