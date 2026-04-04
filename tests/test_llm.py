@@ -1232,3 +1232,52 @@ async def test_stage2_playlist_mode_raises_when_retention_below_minimum(monkeypa
             seed_ids=frozenset({str(i) for i in range(1, 11)}),
             seed_track_ids=[str(i) for i in range(1, 11)],
         )
+
+
+# ---------------------------------------------------------------------------
+# _parse_curated_concepts — transitions parsing
+# ---------------------------------------------------------------------------
+
+
+def test_parse_curated_concepts_parses_transitions() -> None:
+    from mixlab.llm import _parse_curated_concepts  # noqa: PLC2701
+
+    raw = json.dumps([{
+        "title": "T", "mood": "practical",
+        "track_ids": ["1", "2", "3", "4"],
+        "transitions": [
+            {"from_id": "1", "to_id": "2", "is_risky": False, "risk_type": ""},
+            {"from_id": "2", "to_id": "3", "is_risky": True, "risk_type": "chapter_pivot"},
+        ],
+        "report": "x",
+    }])
+    concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
+    assert len(concepts[0].transitions) == 2
+    assert concepts[0].transitions[1].is_risky is True
+    assert concepts[0].transitions[1].risk_type == "chapter_pivot"
+
+
+def test_parse_curated_concepts_missing_transitions_key_yields_empty_list() -> None:
+    from mixlab.llm import _parse_curated_concepts  # noqa: PLC2701
+
+    raw = json.dumps([{"title": "T", "mood": "m", "track_ids": ["1", "2", "3", "4"], "report": "x"}])
+    concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
+    assert concepts[0].transitions == []
+
+
+def test_parse_curated_concepts_unmatched_transition_ids_stored_as_is() -> None:
+    """Transition IDs not in track_ids are stored without filtering — ignored at scoring time."""
+    from mixlab.llm import _parse_curated_concepts  # noqa: PLC2701
+
+    raw = json.dumps([{
+        "title": "T", "mood": "m",
+        "track_ids": ["1", "2", "3", "4"],
+        "transitions": [
+            {"from_id": "99", "to_id": "100", "is_risky": True, "risk_type": "cut_only"},
+        ],
+        "report": "x",
+    }])
+    concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
+    # stored verbatim — scorer ignores them when looking up consecutive pairs
+    assert len(concepts[0].transitions) == 1
+    assert concepts[0].transitions[0].from_id == "99"

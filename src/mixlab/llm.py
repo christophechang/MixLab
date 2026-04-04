@@ -25,6 +25,7 @@ from mixlab.models import (
     SeedTier,
     SetRole,
     Track,
+    Transition,
 )
 
 _MAX_TRACKS_PER_CALL = 40
@@ -835,8 +836,25 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
         track_ids = [str(tid) for tid in (raw_ids if isinstance(raw_ids, list) else []) if str(tid) in valid_ids]
         if len(track_ids) < _MIN_CONCEPT_TRACKS:
             continue
+        raw_transitions = item.get("transitions", [])
+        transitions: list[Transition] = []
+        for tr in (raw_transitions if isinstance(raw_transitions, list) else []):
+            if isinstance(tr, dict):
+                transitions.append(
+                    Transition(
+                        from_id=str(tr.get("from_id", "")),
+                        to_id=str(tr.get("to_id", "")),
+                        is_risky=bool(tr.get("is_risky", False)),
+                        risk_type=str(tr.get("risk_type", "")),
+                    )
+                )
         curated.append(
-            MixConcept(title=str(item.get("title", "")), mood=str(item.get("mood", "")), track_ids=track_ids)
+            MixConcept(
+                title=str(item.get("title", "")),
+                mood=str(item.get("mood", "")),
+                track_ids=track_ids,
+                transitions=transitions,
+            )
         )
         report_parts.append(str(item.get("report", "")))
 
