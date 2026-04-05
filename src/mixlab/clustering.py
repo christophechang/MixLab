@@ -34,6 +34,29 @@ def _camelot_compatible(a: str, b: str) -> bool:
     return bool(num_a == num_b and mode_a != mode_b)
 
 
+def camelot_distance(key_a: str, key_b: str) -> int:
+    """Return minimum Camelot wheel steps between two keys (0 = identical, 1 = adjacent).
+
+    Adjacent = ±1 same ring (wraps 12↔1), or same number opposite ring.
+    Returns 999 if either key is unparseable.
+    """
+    ma = _CAMELOT_RE.match(key_a)
+    mb = _CAMELOT_RE.match(key_b)
+    if not ma or not mb:
+        return 999
+    num_a, mode_a = int(ma.group(1)), ma.group(2).upper()
+    num_b, mode_b = int(mb.group(1)), mb.group(2).upper()
+    if num_a == num_b and mode_a == mode_b:
+        return 0
+    if num_a == num_b:  # same number, opposite ring
+        return 1
+    ring_dist = min(abs(num_a - num_b), 12 - abs(num_a - num_b))
+    if mode_a == mode_b:
+        return ring_dist
+    # Cross-ring: minimum path is same-ring distance + one ring crossing
+    return ring_dist + 1
+
+
 def group_by_genre(tracks: list[Track], genre_map: dict[str, list[str]]) -> dict[str, list[Track]]:
     buckets: dict[str, list[Track]] = {}
     for track in tracks:

@@ -5,15 +5,28 @@ import math
 import os
 import random
 import re
+import statistics
 import sys
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Literal, cast
 
 import httpx
 
+from mixlab.clustering import camelot_distance
 from mixlab.config import TRACK_COUNT_TARGETS
-from mixlab.models import MixConcept, Track
+from mixlab.models import (
+    CompletionVariant,
+    DJPracticalityScore,
+    IntentBrief,
+    MixConcept,
+    RiskTolerance,
+    SeedAnalysis,
+    SeedTier,
+    SetRole,
+    Track,
+    Transition,
+)
 
 _MAX_TRACKS_PER_CALL = 40
 _MAX_TRACKS_PER_CALL_CUSTOM = 60  # larger chunks for custom multi-genre pools
@@ -114,10 +127,73 @@ Respond ONLY with a JSON array:
 """
 
 
-def _tracks_to_text(tracks: list[Track], seed_ids: frozenset[str] | None = None) -> str:
+# ---------------------------------------------------------------------------
+# Stage 0 — intent extraction (free provider cascade, playlist mode only)
+# ---------------------------------------------------------------------------
+
+_STAGE0_SYSTEM = """\
+You are a DJ set analyst. You will receive seed tracks from a DJ's draft playlist in original order.
+
+Classify each track and describe the set's intent.
+
+Tier definitions:
+- anchor: 2–4 tracks that define the set's identity. The DJ would never swap these out.
+- supporting: tracks that serve the arc; keep by default, replaceable with musical reason.
+- optional: filler or candidates — lowest priority to retain.
+
+Inferred role options: opener, builder, pivot, peak, cleanser, closer, utility, unknown
+
+Use energy:N/8 when present. When absent, reason from BPM, Camelot key, and list position:
+- Opener candidate: first 1–2 positions, energy 1–3/8 or lowest BPM relative to pool
+- Peak candidate: energy 7–8/8 or highest BPM
+- Closer candidate: last 1–2 positions
+
+missing_roles: list which of [opener, builder, peak, cleanser, closer] appear absent.
+
+Risk tolerance — BPM spread and Camelot key spread across all seeds:
+- low: BPM spread < 10, mostly adjacent keys
+- medium: BPM spread 10–20, 1–2 key jumps
+- high: BPM spread > 20 or large Camelot jumps throughout
+
+is_coherent_set: true if one set idea; false if distinct chapters.
+
+Return ONLY a JSON object (no prose, no markdown fence):
+{
+  "overall_vibe": "one sentence about what this set is trying to do",
+  "is_coherent_set": true,
+  "risk_tolerance": "medium",
+  "missing_roles": ["opener"],
+  "seed_analyses": [
+    {"track_id": "123", "tier": "anchor", "inferred_role": "peak"}
+  ]
+}\
+"""
+
+
+def _make_alias_map(tracks: list[Track]) -> tuple[dict[str, str], dict[str, str]]:
+    """Return (alias_to_id, id_to_alias) for a Stage 1 track list.
+
+    Aliases are T001, T002, … — short sequential labels that LLMs reproduce
+    exactly, replacing opaque Rekordbox IDs that models hallucinate.
+    """
+    alias_to_id: dict[str, str] = {}
+    id_to_alias: dict[str, str] = {}
+    for i, track in enumerate(tracks, start=1):
+        alias = f"T{i:03d}"
+        alias_to_id[alias] = track.track_id
+        id_to_alias[track.track_id] = alias
+    return alias_to_id, id_to_alias
+
+
+def _tracks_to_text(
+    tracks: list[Track],
+    seed_ids: frozenset[str] | None = None,
+    id_to_alias: dict[str, str] | None = None,
+) -> str:
     lines = []
     for t in tracks:
-        line = f"ID:{t.track_id} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key}"
+        display_id = id_to_alias[t.track_id] if id_to_alias is not None else t.track_id
+        line = f"ID:{display_id} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key}"
         if t.year is not None:
             line += f" | {t.year}"
         if t.energy is not None:
@@ -155,6 +231,150 @@ def _parse_concepts(raw: str) -> list[MixConcept]:
             # pre-extraction string here to recover whatever complete objects exist.
             data = _extract_complete_objects(raw_for_recovery)
     return [MixConcept(**item) for item in data]
+
+
+def _parse_intent_brief(
+    raw: str,
+    seed_tracks: list[Track],
+    bpm_range: tuple[float, float],
+) -> IntentBrief:
+    """Parse Stage 0 LLM output into an IntentBrief.
+
+    Falls back gracefully: unknown tier → supporting, missing tracks → supporting.
+    """
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
+        raw = re.sub(r"\n?```\s*$", "", raw)
+    raw = raw.strip()
+
+    # Extract outermost {...}
+    first = raw.find("{")
+    last = raw.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        raw = raw[first : last + 1]
+
+    try:
+        data: dict[str, object] = json.loads(raw)
+    except json.JSONDecodeError:
+        data = {}
+
+    valid_tiers = {"anchor", "supporting", "optional"}
+    valid_roles = {"opener", "builder", "pivot", "peak", "cleanser", "closer", "utility", "unknown"}
+    valid_risk = {"low", "medium", "high"}
+
+    analyses_raw = data.get("seed_analyses", [])
+    analysed_ids: dict[str, SeedAnalysis] = {}
+    for item in analyses_raw if isinstance(analyses_raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        tid = str(item.get("track_id", ""))
+        tier_raw = str(item.get("tier", "supporting"))
+        role_raw = str(item.get("inferred_role", "unknown"))
+        # cast: mypy cannot narrow str → Literal after set membership test
+        tier = cast("SeedTier", tier_raw if tier_raw in valid_tiers else "supporting")
+        role = cast("SetRole", role_raw if role_raw in valid_roles else "unknown")
+        drop_cost = {"anchor": 0.1, "supporting": 0.5, "optional": 0.9}.get(tier, 0.5)
+        analysed_ids[tid] = SeedAnalysis(
+            track_id=tid,
+            tier=tier,
+            inferred_role=role,
+            drop_cost=drop_cost,
+        )
+
+    # Ensure every seed has an analysis (fill missing with 'supporting')
+    analyses: list[SeedAnalysis] = []
+    for t in seed_tracks:
+        if t.track_id in analysed_ids:
+            analyses.append(analysed_ids[t.track_id])
+        else:
+            analyses.append(
+                SeedAnalysis(
+                    track_id=t.track_id,
+                    tier="supporting",
+                    inferred_role="unknown",
+                    drop_cost=0.5,
+                )
+            )
+
+    missing_roles_raw = data.get("missing_roles", [])
+    missing_roles_strs = [
+        cast("SetRole", r)
+        for r in (missing_roles_raw if isinstance(missing_roles_raw, list) else [])
+        if isinstance(r, str) and r in valid_roles
+    ]
+
+    risk_raw = str(data.get("risk_tolerance", "medium"))
+    risk_tolerance = cast("RiskTolerance", risk_raw if risk_raw in valid_risk else "medium")
+
+    is_coherent = bool(data.get("is_coherent_set", True))
+    overall_vibe = str(data.get("overall_vibe", "Intent unclear."))
+
+    return IntentBrief(
+        overall_vibe=overall_vibe,
+        energy_shape="unclear",  # Stage 0 LLM doesn't compute this; deterministic step does
+        risk_tolerance=risk_tolerance,
+        is_coherent_set=is_coherent,
+        seed_analyses=analyses,
+        missing_roles=missing_roles_strs,
+        strong_adjacencies=[],  # populated later by deterministic step
+        bpm_range=bpm_range,
+    )
+
+
+async def stage0_intent_brief(
+    seed_tracks: list[Track],
+    seed_track_ids: list[str],
+    state: CascadeState,
+    bpm_range: tuple[float, float],
+) -> IntentBrief:
+    """Run Stage 0 intent extraction using the free provider cascade.
+
+    Falls back to a deterministic-only IntentBrief if the LLM call fails or
+    the seed set is too small (<= 5 tracks) for meaningful classification.
+
+    The returned brief always has energy_shape and strong_adjacencies populated
+    by the deterministic pass regardless of LLM success.
+    """
+    # Avoid circular import — playlist_mode imports from llm
+    from mixlab.playlist_mode import compute_deterministic_intent
+
+    tracks_by_id = {t.track_id: t for t in seed_tracks}
+    det_brief = compute_deterministic_intent(seed_track_ids, tracks_by_id)
+
+    if len(seed_tracks) <= 5:
+        # Too few tracks for LLM classification to be reliable
+        return det_brief
+
+    prompt = f"Seed playlist ({len(seed_tracks)} tracks in original order):\n" + _tracks_to_text(
+        seed_tracks, seed_ids=frozenset(seed_track_ids)
+    )
+
+    for _ in range(len(_CASCADE)):
+        provider = _CASCADE[state.index]
+        try:
+            result = await provider(prompt, system=_STAGE0_SYSTEM)
+            if result is None:
+                state.index = (state.index + 1) % len(_CASCADE)
+                continue
+            if not result.strip():
+                raise ValueError(f"Provider {provider.__name__} returned empty content for Stage 0.")
+            llm_brief = _parse_intent_brief(result, seed_tracks, bpm_range)
+            # Merge: use LLM tiers but deterministic shape + adjacencies
+            llm_brief.energy_shape = det_brief.energy_shape
+            llm_brief.strong_adjacencies = det_brief.strong_adjacencies
+            llm_brief.bpm_range = det_brief.bpm_range
+            state.consecutive_failures = 0
+            return llm_brief
+        except Exception as exc:  # noqa: BLE001 — cascade
+            print(f"Stage 0 provider {provider.__name__} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            state.consecutive_failures += 1
+            state.index = (state.index + 1) % len(_CASCADE)
+
+    # All providers failed — fall back to deterministic
+    print("Stage 0 LLM failed — using deterministic intent brief.", file=sys.stderr)
+    state.consecutive_failures = 0  # reset so later Stage 1 calls get a fresh start
+    return det_brief
 
 
 async def _call_openai_compat(
@@ -278,6 +498,32 @@ def make_cascade_state() -> CascadeState:
     return CascadeState()
 
 
+def _print_stage1_provider_summary(
+    provider_name: str,
+    genre: str,
+    input_track_count: int,
+    parsed: list[MixConcept],
+    cleaned: list[MixConcept],
+    kept: list[MixConcept],
+) -> None:
+    print(
+        f"Stage 1 provider: {provider_name} | genre={genre} | input={input_track_count} tracks | "
+        f"parsed={len(parsed)} | cleaned={len(cleaned)} | kept={len(kept)}"
+    )
+    for raw_concept, cleaned_concept in zip(parsed, cleaned, strict=False):
+        status = "kept" if len(cleaned_concept.track_ids) >= _MIN_SHORTLIST_TRACKS else "dropped (<8)"
+        print(
+            f"  - {cleaned_concept.title} | raw={len(raw_concept.track_ids)} | "
+            f"kept={len(cleaned_concept.track_ids)} | {status}"
+        )
+    if not cleaned:
+        print("  - no concepts returned")
+
+
+def _print_stage1_provider_attempt(provider_name: str, genre: str, input_track_count: int) -> None:
+    print(f"Stage 1 trying provider: {provider_name} | genre={genre} | input={input_track_count} tracks")
+
+
 async def _call_stage1_once(
     tracks: list[Track],
     genre: str,
@@ -285,13 +531,14 @@ async def _call_stage1_once(
     custom: bool = False,
     seed_ids: frozenset[str] | None = None,
 ) -> list[MixConcept]:
-    valid_ids = {t.track_id for t in tracks}
-    prompt = f"Genre: {genre}\n\nTracks:\n{_tracks_to_text(tracks, seed_ids=seed_ids)}"
+    alias_to_id, id_to_alias = _make_alias_map(tracks)
+    prompt = f"Genre: {genre}\n\nTracks:\n{_tracks_to_text(tracks, seed_ids=seed_ids, id_to_alias=id_to_alias)}"
     system = _STAGE1_SYSTEM_PLAYLIST if seed_ids is not None else _STAGE1_SYSTEM_CUSTOM if custom else _STAGE1_SYSTEM
 
     for _ in range(len(_CASCADE)):
         provider = _CASCADE[state.index]
         try:
+            _print_stage1_provider_attempt(provider.__name__, genre, len(tracks))
             result = await provider(prompt, system=system)
             if result is None:  # provider not configured — skip silently, no failure counted
                 state.index = (state.index + 1) % len(_CASCADE)
@@ -299,12 +546,19 @@ async def _call_stage1_once(
             if not result.strip():  # provider returned empty content — treat as a failure
                 raise ValueError(f"Provider {provider.__name__} returned empty content.")
             concepts = _parse_concepts(result)
+            # Map aliases back to real IDs. Aliases not in the map are hallucinated — drop them.
             cleaned = [
-                MixConcept(title=c.title, mood=c.mood, track_ids=[tid for tid in c.track_ids if tid in valid_ids])
+                MixConcept(
+                    title=c.title,
+                    mood=c.mood,
+                    track_ids=[alias_to_id[a] for a in c.track_ids if a in alias_to_id],
+                )
                 for c in concepts
             ]
+            kept = [c for c in cleaned if len(c.track_ids) >= _MIN_SHORTLIST_TRACKS]
+            _print_stage1_provider_summary(provider.__name__, genre, len(tracks), concepts, cleaned, kept)
             state.consecutive_failures = 0
-            return [c for c in cleaned if len(c.track_ids) >= _MIN_SHORTLIST_TRACKS]
+            return kept
         except Exception as exc:  # noqa: BLE001 — cascade
             print(f"Provider {provider.__name__} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             state.consecutive_failures += 1
@@ -389,9 +643,10 @@ Weakness is practical: a track whose intro gives no workable mix point, a vocal 
 no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment \
 used so early it makes everything after feel like a comedown.
 - ORDER them as the intended play sequence: opener first, closer last.
-- The opener plays to a room that isn't committed yet. It must work as ambient architecture — rewarding \
-attention without requiring it. It should not telegraph where the set is going. A track that demands \
-engagement in its first 32 bars is the wrong opener regardless of its quality.
+- The opener plays to a room that isn't committed yet. It can work as ambient architecture or as a restrained, \
+low-slung groove — the point is headroom, not drift. Reward attention without requiring it, and avoid \
+telegraphing the set too early. A track that demands full engagement in its first 32 bars is the wrong \
+opener regardless of its quality.
 - The closer must signal its own finality before it arrives. The room should feel the set ending. The \
 default closer resolves — it has weight, sufficient outro length to mix out of cleanly, and leaves the \
 room with a feeling rather than a question. A track whose energy rises continuously into its final bars \
@@ -459,8 +714,18 @@ Your output must be a JSON array where each element has exactly this schema:
   "title": "...",
   "mood": "...",
   "track_ids": ["id1", "id2", ...],
+  "transitions": [
+    {"from_id": "id1", "to_id": "id2", "is_risky": false, "risk_type": ""},
+    {"from_id": "id2", "to_id": "id3", "is_risky": true,  "risk_type": "chapter_pivot"}
+  ],
   "report": "..."
 }
+
+transitions: one entry per consecutive pair in track_ids (len(track_ids) - 1 entries).
+is_risky: true if the move is a notable harmonic or energy risk.
+risk_type: one of "chapter_pivot" | "peak_impact" | "deliberate_reset" | "closer_move" \
+           | "cut_only" | "low_tonal_risk" | "" (empty string when is_risky=false).
+"cut_only" means: risky, with no mechanism that earns it — just a hard cut.
 
 Give each concept a compelling creative name — not the pool name from Stage 1.
 The track_ids must be the final selected tracks in play order.
@@ -468,27 +733,17 @@ The "report" value must be a single string (with \\n for line breaks) in this ex
 
 CONCEPT: [title]
 
-[1–2 sentences: the set's thesis — what it asks of the room. Not mood alone; intention.]
+[1–2 sentences: thesis — what this set asks of the room.]
 
-Track order (Camelot / BPM):
-[Artist — Title [Key · BPM] for each track in play order, one track per line]
+Track order:
+[For each track in play order, one line:]
+N. Artist — Title [Key · BPM] | Role: [role] | Why: [one short phrase] | Risk: [one short phrase or "none"]
 
-Arc: [One sentence describing the overall energy shape.]
+Assumptions: [only if material — [unverified] tracks, vocal clash, tight blend window. One line each. Omit section if nothing material.]
 
-[One line per track in play order. No blank lines between them. \
-Format: Artist — Title (role) — one sentence on why this track at this moment. \
-If the move to the next track is non-obvious (Camelot jump 3+ positions or BPM shift >5 BPM), \
-append the mechanism in the same line after a semicolon. Nothing else.]
-
-Standout transitions or calculated risks: [Only for risks not already covered in the track lines \
-above. One sentence per item. If nothing qualifies, omit this section entirely — do not write it.]
-
-Assumptions:
-- [One bullet per flag. Lead with the risk. Cover only genuine uncertainty: [unverified] tracks, \
-vocal clash risks, transition-window concerns. Omit section if nothing material.]
-
-First decide whether the set would still make sense without any written justification. Only then write \
-the report.
+Role options: opener, builder, pivot, peak, cleanser, closer, utility.
+Risk: describe the transition risk into this track (not out of it). "none" if clean.
+Why: why this track at this moment — one phrase, no full sentences needed.
 
 Be opinionated, musical, and honest. Peer-to-peer, no marketing language, no filler. When choosing \
 between sounding clever and being right, be right.
@@ -511,7 +766,28 @@ strong concepts, produce 4. Do not pad with weak concepts to hit a number. If th
 produce even 3 distinct, coherent sets, return a single-element array with a diagnostic object instead \
 of concept objects: [{"diagnostic": "...explanation of why the pool is insufficient..."}] — this is \
 useful information, not a failure.""",
-    """Produce EXACTLY ONE concept. Do not return multiple alternatives. If the pool is too thin to produce one strong, seed-led set, return a single-element array with a diagnostic object instead of a concept object: [{"diagnostic": "...explanation of why the pool is insufficient..."}].""",
+    """Produce EXACTLY THREE concepts from the same pool using these strategies:
+
+1. "practical" (mood = "practical"): maximise harmonic continuity. Prefer adjacent Camelot keys \
+(distance ≤ 1). BPM moves ≤ 2 BPM per step where possible. Preserve all strong seed adjacency \
+pairs. Protect anchors. Avoid unearned key jumps.
+
+2. "balanced" (mood = "balanced"): one major key jump (distance 2–3) or single BPM arc allowed. \
+Anchors protected. Optional seeds may be swapped when a library track clearly serves the arc \
+better. Adjacency pairs are hints, not constraints.
+
+3. "adventurous" (mood = "adventurous"): prioritise set narrative and role completeness. Chapter \
+pivots and peak impacts are permitted when musically justified — name the mechanism. Anchors \
+protected; adjacency pairs may be broken with one-sentence reason. Optional and supporting seeds \
+replaceable if a library track serves the arc materially better.
+
+Label each concept's mood field with exactly "practical", "balanced", or "adventurous".
+When multiple credible openers exist, do not default to the same obviously ambient opener in every concept. \
+Practical may open with the cleanest restrained groove, balanced may open warmer or more melodic, and \
+adventurous may open stranger or more spacious. Reuse the same opener across all three only if it is clearly \
+superior for blendability and intent.
+All three must meet the anchor protection rules and the seed retention floor.
+If the pool is too thin to produce even one strong set: [{"diagnostic": "..."}].""",
 )
 
 _SHORTFALL_THRESHOLD = 4
@@ -625,8 +901,25 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
         track_ids = [str(tid) for tid in (raw_ids if isinstance(raw_ids, list) else []) if str(tid) in valid_ids]
         if len(track_ids) < _MIN_CONCEPT_TRACKS:
             continue
+        raw_transitions = item.get("transitions", [])
+        transitions: list[Transition] = []
+        for tr in raw_transitions if isinstance(raw_transitions, list) else []:
+            if isinstance(tr, dict):
+                transitions.append(
+                    Transition(
+                        from_id=str(tr.get("from_id", "")),
+                        to_id=str(tr.get("to_id", "")),
+                        is_risky=bool(tr.get("is_risky", False)),
+                        risk_type=str(tr.get("risk_type", "")),
+                    )
+                )
         curated.append(
-            MixConcept(title=str(item.get("title", "")), mood=str(item.get("mood", "")), track_ids=track_ids)
+            MixConcept(
+                title=str(item.get("title", "")),
+                mood=str(item.get("mood", "")),
+                track_ids=track_ids,
+                transitions=transitions,
+            )
         )
         report_parts.append(str(item.get("report", "")))
 
@@ -644,10 +937,146 @@ def _playlist_retention_stats(
     return retained_ids, dropped_ids, added_ids
 
 
-def _minimum_playlist_seed_retention(seed_count: int) -> int:
+def _minimum_playlist_seed_retention(seed_count: int, intent_brief: IntentBrief | None = None) -> int:
+    """Return the minimum number of seed tracks Stage 2 must retain.
+
+    With an IntentBrief: floor is per-tier (75% of anchors + 40% of supporting).
+    Without: falls back to the flat 60% floor.
+    """
     if seed_count <= 0:
         return 0
-    return math.ceil(seed_count * _PLAYLIST_MINIMUM_SEED_RATIO)
+    if intent_brief is None or not intent_brief.seed_analyses:
+        return math.ceil(seed_count * _PLAYLIST_MINIMUM_SEED_RATIO)
+    anchor_count = len(intent_brief.anchor_ids)
+    supporting_count = len(intent_brief.supporting_ids)
+    anchor_floor = math.ceil(anchor_count * 0.75)
+    supporting_floor = math.ceil(supporting_count * 0.40)
+    return anchor_floor + supporting_floor
+
+
+def _pair_consecutive(a: str, b: str, ids: list[str]) -> bool:
+    """Return True if b immediately follows a in ids."""
+    return any(ids[i] == a and ids[i + 1] == b for i in range(len(ids) - 1))
+
+
+def _compute_practicality_score(
+    concept: MixConcept,
+    tracks_by_id: dict[str, Track],
+    intent_brief: IntentBrief | None,
+) -> DJPracticalityScore:
+    """Compute a DJ Practicality Score deterministically from a concept's track sequence."""
+    track_sequence = [tracks_by_id[tid] for tid in concept.track_ids if tid in tracks_by_id]
+    n = len(track_sequence)
+
+    # bpm_smoothness: how even the consecutive BPM steps are
+    if n < 3:
+        bpm_smoothness = 1.0
+    else:
+        bpm_deltas = [abs(track_sequence[i + 1].bpm - track_sequence[i].bpm) for i in range(n - 1)]
+        std = statistics.stdev(bpm_deltas)
+        bpm_smoothness = max(0.0, 1.0 - std / 10.0)
+
+    # harmonic_ratio: fraction of consecutive pairs that are Camelot-compatible (distance ≤ 1)
+    if n < 2:
+        harmonic_ratio = 1.0
+    else:
+        total_pairs = n - 1
+        compatible = sum(
+            1
+            for i in range(total_pairs)
+            if camelot_distance(track_sequence[i].camelot_key, track_sequence[i + 1].camelot_key) <= 1
+        )
+        harmonic_ratio = compatible / total_pairs
+
+    # risk_justified: penalise transitions annotated is_risky=True with risk_type "cut_only" or ""
+    risky = [t for t in concept.transitions if t.is_risky]
+    unjustified = [t for t in risky if t.risk_type in ("cut_only", "")]
+    risk_justified = 1.0 if not risky else max(0.0, 1.0 - len(unjustified) / len(risky))
+
+    # fragment_preserved: fraction of strong adjacency pairs preserved in sequence
+    if intent_brief is None or not intent_brief.strong_adjacencies:
+        fragment_preserved = 1.0
+    else:
+        concept_ids = list(concept.track_ids)
+        preserved = sum(
+            1
+            for frag in intent_brief.strong_adjacencies
+            if _pair_consecutive(frag.track_ids[0], frag.track_ids[1], concept_ids)
+        )
+        fragment_preserved = preserved / len(intent_brief.strong_adjacencies)
+
+    return DJPracticalityScore(
+        bpm_smoothness=bpm_smoothness,
+        harmonic_ratio=harmonic_ratio,
+        risk_justified=risk_justified,
+        fragment_preserved=fragment_preserved,
+    )
+
+
+def _score_variant(
+    concept: MixConcept,
+    seed_track_ids: list[str],
+    intent_brief: IntentBrief | None,
+    tracks_by_id: dict[str, Track],
+) -> CompletionVariant:
+    """Compute a CompletionVariant with anchor_retention_rate and practicality_score."""
+    concept_id_set = set(concept.track_ids)
+    strategy_raw = concept.mood.lower()
+    strategy: Literal["practical", "balanced", "adventurous"] = (
+        "practical"
+        if strategy_raw == "practical"
+        else "balanced"
+        if strategy_raw == "balanced"
+        else "adventurous"
+        if strategy_raw == "adventurous"
+        else "practical"
+    )
+
+    if intent_brief is not None and intent_brief.anchor_ids:
+        retained_anchors = sum(1 for aid in intent_brief.anchor_ids if aid in concept_id_set)
+        anchor_retention_rate = retained_anchors / len(intent_brief.anchor_ids)
+    else:
+        retained_seeds = sum(1 for sid in seed_track_ids if sid in concept_id_set)
+        anchor_retention_rate = retained_seeds / max(len(seed_track_ids), 1)
+
+    practicality_score = _compute_practicality_score(concept, tracks_by_id, intent_brief)
+
+    return CompletionVariant(
+        strategy=strategy,
+        concept=concept,
+        anchor_retention_rate=anchor_retention_rate,
+        practicality_score=practicality_score,
+    )
+
+
+_STRATEGY_PRIORITY: dict[str, int] = {"practical": 0, "balanced": 1, "adventurous": 2}
+
+
+def _select_best_variant(variants: list[CompletionVariant]) -> CompletionVariant:
+    """Return highest-scoring variant; ties broken by practical > balanced > adventurous."""
+    return max(
+        variants,
+        key=lambda v: (v.score, -_STRATEGY_PRIORITY.get(v.strategy, 99)),
+    )
+
+
+def _passes_floor(
+    variant: CompletionVariant,
+    intent_brief: IntentBrief | None,
+    playlist_seed_track_ids: list[str],
+    minimum_seed_tracks: int,
+) -> bool:
+    """Return True if variant meets the per-tier retention floor."""
+    concept_ids = set(variant.concept.track_ids)
+    if intent_brief is not None and intent_brief.anchor_ids:
+        anchor_floor = math.ceil(len(intent_brief.anchor_ids) * 0.75)
+        supporting_floor = math.ceil(len(intent_brief.supporting_ids) * 0.40)
+        return (
+            sum(1 for aid in intent_brief.anchor_ids if aid in concept_ids) >= anchor_floor
+            and sum(1 for sid in intent_brief.supporting_ids if sid in concept_ids) >= supporting_floor
+        )
+    retained = sum(1 for tid in playlist_seed_track_ids if tid in concept_ids)
+    return retained >= minimum_seed_tracks
 
 
 def _format_playlist_track_labels(track_ids: list[str], tracks_by_id: dict[str, Track], limit: int = 8) -> str:
@@ -669,6 +1098,7 @@ def _rewrite_playlist_report(
     concept: MixConcept,
     seed_track_ids: list[str],
     tracks_by_id: dict[str, Track],
+    rejected_summary: str = "",
 ) -> str:
     retained_ids, dropped_ids, added_ids = _playlist_retention_stats(concept, seed_track_ids)
     retained_suffix = ""
@@ -679,10 +1109,10 @@ def _rewrite_playlist_report(
         f"Source playlist: {playlist_name}\n"
         f"Seed tracks retained: {len(retained_ids)}{retained_suffix}.\n"
         f"Seed tracks dropped: {len(dropped_ids)}.\n"
-        f"Library tracks added: {len(added_ids)}."
+        f"Library tracks added: {len(added_ids)}." + rejected_summary
     )
 
-    marker = "Track order (Camelot / BPM):"
+    marker = "Track order:"
     if marker not in report:
         return report.rstrip() + f"\n\n{summary}"
 
@@ -692,6 +1122,24 @@ def _rewrite_playlist_report(
         prefix = prefix[:source_index]
 
     return prefix.rstrip() + f"\n\n{summary}\n\n{marker}{suffix}"
+
+
+def _playlist_variant_label(strategy: str, *, is_winner: bool) -> str:
+    base = strategy.upper()
+    return f"WINNER - {base}" if is_winner else base
+
+
+def _label_playlist_report_section(report: str, strategy: str, *, is_winner: bool) -> str:
+    label = _playlist_variant_label(strategy, is_winner=is_winner)
+    report = report.strip()
+    if not report:
+        return f"VARIANT: {label}"
+    return f"VARIANT: {label}\n\n{report}"
+
+
+def _retitle_playlist_concept(concept: MixConcept, strategy: str, *, is_winner: bool) -> MixConcept:
+    label = _playlist_variant_label(strategy, is_winner=is_winner)
+    return concept.model_copy(update={"title": f"{label} - {concept.title}"})
 
 
 async def _call_stage2_raw(
@@ -759,6 +1207,7 @@ async def stage2_curate_and_report(
     seed_ids: frozenset[str] | None = None,
     seed_track_ids: list[str] | None = None,
     unplayed_ids: set[str] | None = None,
+    intent_brief: IntentBrief | None = None,
 ) -> tuple[list[MixConcept], str]:
     provider = (stage2_provider or os.environ.get("STAGE2_PROVIDER", "anthropic")).lower()
     use_minimax = provider == "minimax"
@@ -818,26 +1267,54 @@ async def stage2_curate_and_report(
 
     if playlist_name is not None:
         playlist_seed_track_ids = seed_track_ids or sorted(seed_ids or [])
-        minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids))
+        minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids), intent_brief)
+        # Build intent brief section for injection into prompt
+        intent_section = ""
+        if intent_brief is not None:
+            anchor_labels = (
+                ", ".join(
+                    f"{tracks_by_id[tid].artist} \u2014 {tracks_by_id[tid].title}"
+                    for tid in sorted(intent_brief.anchor_ids)
+                    if tid in tracks_by_id
+                )
+                or "none identified"
+            )
+            adjacency_hints = (
+                "; ".join(
+                    f"{tracks_by_id[f.track_ids[0]].artist} \u2014 {tracks_by_id[f.track_ids[0]].title}"
+                    f" \u2192 "
+                    f"{tracks_by_id[f.track_ids[1]].artist} \u2014 {tracks_by_id[f.track_ids[1]].title}"
+                    f" (confidence: {f.confidence:.1f})"
+                    for f in intent_brief.strong_adjacencies
+                    if len(f.track_ids) >= 2 and f.track_ids[0] in tracks_by_id and f.track_ids[1] in tracks_by_id
+                )
+                or "none detected"
+            )
+            missing_roles_str = ", ".join(str(r) for r in intent_brief.missing_roles) or "none identified"
+            intent_section = (
+                f"DJ INTENT BRIEF\n"
+                f"Vibe: {intent_brief.overall_vibe}\n"
+                f"Energy shape: {intent_brief.energy_shape}\n"
+                f"Risk tolerance: {intent_brief.risk_tolerance}\n"
+                f"Anchor tracks (protect these): {anchor_labels}\n"
+                f"Missing roles to fill: {missing_roles_str}\n"
+                f"Intentional adjacencies (preserve if possible): {adjacency_hints}\n"
+                f"Coherent set: {'yes' if intent_brief.is_coherent_set else 'no \u2014 treat as chapters'}\n\n"
+            )
         prompt = (
-            f"Curate and narrate a SINGLE mix concept from the following {n} BPM zone shortlists. "
+            f"{intent_section}"
+            f"Curate three completion variants from the following {n} BPM zone shortlists. "
             f'This is a playlist completion run seeded from the Rekordbox playlist "{playlist_name}".\n\n'
             "Each shortlist below represents one natural BPM zone from the source playlist. "
             "Tracks marked [seed] are from the original playlist; other tracks are library additions.\n\n"
             "Your task:\n"
-            "1. Identify the dominant zone(s) — where most seed tracks live. These form the backbone of the concept.\n"
-            "2. You may drop outlier zones entirely if they are too thin or their BPM range breaks set coherence. "
-            "Dropping a zone's seed tracks counts as intentional cuts — this is expected.\n"
-            "3. Within the zone(s) you keep, treat [seed] tracks as the default choice. Only drop a seed track if it "
-            "clearly breaks tempo flow, harmonic logic, or blendability — not because a library track is marginally better.\n"
-            "4. Add library tracks only to strengthen transitions or fill genuine gaps.\n\n"
-            f"Retain at least {minimum_seed_tracks} seed tracks total across all kept zones.\n\n"
-            "When two otherwise equally suitable tracks compete for a slot, prefer the one marked unplayed. "
-            "Played tracks are fully eligible when they are the stronger musical choice.\n\n"
-            "Produce EXACTLY ONE concept. Not 2, not 3 — one.\n\n"
-            f"In the report, after the concept thesis paragraph, include a short section:\nSource playlist: {playlist_name}\n"
-            "State how many seed tracks were retained, how many were dropped, and how many library tracks "
-            "were added. For any notable drop or addition, give one sentence of musical reasoning.\n\n"
+            "1. Identify the dominant zone(s) — where most seed tracks live.\n"
+            "2. You may drop outlier zones if they break set coherence.\n"
+            f"3. Retain at least {minimum_seed_tracks} seed tracks total (anchors protected as per brief).\n"
+            "4. When two otherwise equally suitable tracks compete, prefer the one marked unplayed.\n\n"
+            "Produce EXACTLY THREE concepts as described in your instructions (practical / balanced / adventurous).\n\n"
+            f"In each concept's report, after the thesis paragraph, include:\nSource playlist: {playlist_name}\n"
+            "State: seeds retained / dropped / added. For any notable drop or addition, one sentence of reasoning.\n\n"
             + "\n\n".join(sections)
         )
     else:
@@ -867,17 +1344,34 @@ async def stage2_curate_and_report(
     curated, report = _parse_curated_concepts(raw, valid_ids)
 
     if playlist_name is not None and seed_ids is not None and curated:
+        section_reports = report.split("\n\n---\n\n") if report else []
+        report_by_title = (
+            {concept.title: section for concept, section in zip(curated, section_reports, strict=False)}
+            if len(section_reports) == len(curated)
+            else {}
+        )
         playlist_seed_track_ids = seed_track_ids or sorted(seed_ids)
-        concept = curated[0]
-        retained_ids, dropped_ids, _ = _playlist_retention_stats(concept, playlist_seed_track_ids)
-        minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids))
-        if len(retained_ids) < minimum_seed_tracks:
+        minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids), intent_brief)
+
+        # Score all returned concepts
+        variants = [_score_variant(c, playlist_seed_track_ids, intent_brief, tracks_by_id) for c in curated]
+
+        # Pre-filter: per-tier retention floor before selection
+        passing = [v for v in variants if _passes_floor(v, intent_brief, playlist_seed_track_ids, minimum_seed_tracks)]
+        candidates = passing if passing else variants
+
+        best = _select_best_variant(candidates)
+        concept = best.concept
+
+        # Retry only if no variant passed the floor
+        if not passing:
+            retained_ids, dropped_ids, _ = _playlist_retention_stats(concept, playlist_seed_track_ids)
             dropped_labels = _format_playlist_track_labels(dropped_ids, tracks_by_id, limit=len(dropped_ids))
             retry_prompt = (
                 f"Your previous attempt retained only {len(retained_ids)} seed tracks "
                 f"(minimum required: {minimum_seed_tracks}).\n"
-                f"Seed tracks you dropped: {dropped_labels}.\n"
-                "Retry: include as many of these dropped seed tracks as possible. "
+                f"Dropped seeds: {dropped_labels}.\n"
+                "Retry with one concept only. Include as many dropped seeds as possible. "
                 "For each one still excluded, give one sentence of musical justification.\n\n"
             ) + prompt
             raw, stage2_model_display = await _call_stage2_raw(
@@ -894,7 +1388,61 @@ async def stage2_curate_and_report(
                     "Stage 2 playlist curation retained too few seed tracks after retry: "
                     f"{len(retained_ids)} retained, minimum acceptable {minimum_seed_tracks}."
                 )
-        report = _rewrite_playlist_report(report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id)
+            variants = []  # suppress rejected_summary on retry path
+
+        ordered_variants = (
+            [best] + sorted(
+                [v for v in variants if v.concept is not concept],
+                key=lambda v: _STRATEGY_PRIORITY.get(v.strategy, 99),
+            )
+            if variants
+            else []
+        )
+
+        # Summarise rejected variants in report
+        rejected_summary = ""
+        if ordered_variants:
+            rejected = ordered_variants[1:]
+            if rejected:
+                parts = [
+                    f"{v.strategy} (practicality: {v.practicality_score.overall:.2f}, "
+                    f"anchor retention: {v.anchor_retention_rate:.0%}) — not selected"
+                    for v in rejected
+                ]
+                rejected_summary = "\nAlternative strategies considered: " + "; ".join(parts) + "."
+
+        if variants:
+            ordered_reports: list[str] = []
+            ordered_concepts: list[MixConcept] = []
+            for variant in ordered_variants:
+                is_winner = variant.concept is concept
+                base_report = report_by_title.get(variant.concept.title, "")
+                if is_winner:
+                    base_report = _rewrite_playlist_report(
+                        base_report,
+                        playlist_name,
+                        variant.concept,
+                        playlist_seed_track_ids,
+                        tracks_by_id,
+                        rejected_summary,
+                    )
+                ordered_reports.append(
+                    _label_playlist_report_section(base_report, variant.strategy, is_winner=is_winner)
+                )
+                ordered_concepts.append(
+                    _retitle_playlist_concept(variant.concept, variant.strategy, is_winner=is_winner)
+                )
+            report = "\n\n---\n\n".join(ordered_reports)
+            curated = ordered_concepts
+        else:
+            report = _label_playlist_report_section(
+                _rewrite_playlist_report(
+                    report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id, rejected_summary
+                ),
+                concept.mood.lower(),
+                is_winner=True,
+            )
+            curated = [_retitle_playlist_concept(concept, concept.mood.lower(), is_winner=True)]
 
     warnings: list[str] = []
     for concept in curated:

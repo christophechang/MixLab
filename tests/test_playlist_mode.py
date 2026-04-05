@@ -6,12 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from mixlab.models import MixConcept, Track
+from mixlab.models import IntentBrief, MixConcept, Track
 from mixlab.playlist_mode import (
+    _score_candidate,  # noqa: PLC2701
     build_playlist_pool,
     build_zone_shortlists,
     cluster_seed_zones,
+    compute_deterministic_intent,
+    detect_adjacency_fragments,
+    detect_energy_shape,
     filter_tracks_for_playlist_genre,
+    identify_missing_roles,
     resolve_playlist,
 )
 
@@ -352,6 +357,7 @@ def test_run_playlist_mode_happy_path(
         seed_ids: frozenset[str] | None = None,
         seed_track_ids: list[str] | None = None,
         unplayed_ids: set[str] | None = None,
+        intent_brief: IntentBrief | None = None,
     ) -> tuple[list[MixConcept], str]:
         assert playlist_name == "Monday Night"
         assert seed_ids == frozenset({"1", "2", "3", "4"})
@@ -415,8 +421,9 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
         library_tracks: list[Track],
         unplayed_ids: set[str] | None,
         all_tracks_flag: bool = False,
+        intent_brief: IntentBrief | None = None,
     ) -> list[MixConcept]:
-        del seed_tracks, unplayed_ids, all_tracks_flag
+        del seed_tracks, unplayed_ids, all_tracks_flag, intent_brief
         seen_library_genres.extend(sorted({t.genre for t in library_tracks}))
         return [
             MixConcept(
@@ -436,9 +443,10 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
         seed_ids: frozenset[str] | None = None,
         seed_track_ids: list[str] | None = None,
         unplayed_ids: set[str] | None = None,
+        intent_brief: IntentBrief | None = None,
     ) -> tuple[list[MixConcept], str]:
         del shortlists, tracks_by_id, stage2_provider, custom_genre_label, custom_genre_sub_genres
-        del playlist_name, seed_ids, seed_track_ids, unplayed_ids
+        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief
         return ([MixConcept(title="Completed Set", mood="warm", track_ids=["1", "2", "3", "4"])], "Playlist report")
 
     async def fake_send_report(*args: object, **kwargs: object) -> bool:
@@ -452,6 +460,81 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
     assert seen_library_genres == ["Electronica"]
 
 
+def test_run_playlist_mode_exports_all_ranked_variants(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import mixlab.__main__ as main_mod
+
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_PLAYLIST_XML)
+    monkeypatch.setattr(main_mod, "_XML_PATH", xml_path)
+
+    exported_titles: list[str] = []
+    generated_titles: list[str] = []
+
+    async def fake_stage2(
+        shortlists: list[MixConcept],
+        tracks_by_id: dict[str, Track],
+        stage2_provider: str | None = None,
+        custom_genre_label: str | None = None,
+        custom_genre_sub_genres: list[str] | None = None,
+        playlist_name: str | None = None,
+        seed_ids: frozenset[str] | None = None,
+        seed_track_ids: list[str] | None = None,
+        unplayed_ids: set[str] | None = None,
+        intent_brief: IntentBrief | None = None,
+    ) -> tuple[list[MixConcept], str]:
+        del shortlists, tracks_by_id, stage2_provider, custom_genre_label, custom_genre_sub_genres
+        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief
+        return (
+            [
+                MixConcept(title="WINNER - PRACTICAL - Gravity Well", mood="practical", track_ids=["1", "2", "3", "4"]),
+                MixConcept(title="BALANCED - The Long Exhale", mood="balanced", track_ids=["1", "2", "3", "4"]),
+                MixConcept(title="ADVENTUROUS - Signal & Noise", mood="adventurous", track_ids=["1", "2", "3", "4"]),
+            ],
+            "Playlist report",
+        )
+
+    def fake_generate_merged_xml_bytes(
+        concepts: list[MixConcept],
+        raw_tracks_xml: dict[str, object],
+        folder_name: str = "Generated Playlists",
+        unplayed_ids: list[str] | None = None,
+    ) -> bytes:
+        del raw_tracks_xml, folder_name, unplayed_ids
+        generated_titles.extend(concept.title for concept in concepts)
+        return b"<xml/>"
+
+    def fake_export_merged_xml(
+        concepts: list[MixConcept],
+        raw_tracks_xml: dict[str, object],
+        output_path: Path,
+        folder_name: str = "Generated Playlists",
+        unplayed_ids: list[str] | None = None,
+    ) -> Path:
+        del raw_tracks_xml, folder_name, unplayed_ids
+        exported_titles.extend(concept.title for concept in concepts)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"<xml/>")
+        return output_path
+
+    async def fake_send_report(*args: object, **kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(main_mod, "stage2_curate_and_report", fake_stage2)
+    monkeypatch.setattr(main_mod, "generate_merged_xml_bytes", fake_generate_merged_xml_bytes)
+    monkeypatch.setattr(main_mod, "export_merged_xml", fake_export_merged_xml)
+    monkeypatch.setattr(main_mod, "send_report", fake_send_report)
+
+    asyncio.run(main_mod.run_playlist_mode("Monday Night", None, tmp_path, None, False))
+
+    expected_titles = [
+        "WINNER - PRACTICAL - Gravity Well",
+        "BALANCED - The Long Exhale",
+        "ADVENTUROUS - Signal & Noise",
+    ]
+    assert generated_titles == expected_titles
+    assert exported_titles == expected_titles
+
+
 def test_run_playlist_mode_playlist_not_found_exits(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import mixlab.__main__ as main_mod
 
@@ -461,3 +544,220 @@ def test_run_playlist_mode_playlist_not_found_exits(monkeypatch: pytest.MonkeyPa
 
     with pytest.raises(SystemExit, match="1"):
         asyncio.run(main_mod.run_playlist_mode("Missing", None, None, None, False))
+
+
+# ---------------------------------------------------------------------------
+# Intent analysis helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_track_full(
+    track_id: str,
+    *,
+    bpm: float = 124.0,
+    camelot_key: str = "8A",
+    energy: int | None = None,
+    play_count: int = 0,
+) -> Track:
+    return Track(
+        track_id=track_id,
+        artist=f"Artist {track_id}",
+        title=f"Title {track_id}",
+        bpm=bpm,
+        camelot_key=camelot_key,
+        genre="House",
+        energy=energy,
+        play_count=play_count,
+    )
+
+
+def test_detect_adjacency_fragments_compatible_pair_returns_high_confidence() -> None:
+    t1 = _make_track_full("1", bpm=124.0, camelot_key="8A")
+    t2 = _make_track_full("2", bpm=126.0, camelot_key="9A")  # adjacent Camelot, close BPM
+    tracks_by_id = {"1": t1, "2": t2}
+    frags = detect_adjacency_fragments(["1", "2"], tracks_by_id)
+    assert len(frags) == 1
+    assert frags[0].confidence >= 0.8
+    assert "camelot" in frags[0].reason
+
+
+def test_detect_adjacency_fragments_incompatible_pair_omitted() -> None:
+    t1 = _make_track_full("1", bpm=124.0, camelot_key="1A")
+    t2 = _make_track_full("2", bpm=145.0, camelot_key="7B")  # far BPM, incompatible key
+    tracks_by_id = {"1": t1, "2": t2}
+    frags = detect_adjacency_fragments(["1", "2"], tracks_by_id)
+    assert len(frags) == 0
+
+
+def test_detect_adjacency_fragments_only_camelot_compatible_returns_medium_confidence() -> None:
+    t1 = _make_track_full("1", bpm=124.0, camelot_key="8A")
+    t2 = _make_track_full("2", bpm=140.0, camelot_key="9A")  # compatible key, BPM too far
+    tracks_by_id = {"1": t1, "2": t2}
+    frags = detect_adjacency_fragments(["1", "2"], tracks_by_id)
+    assert len(frags) == 1
+    assert frags[0].confidence == 0.6
+    assert frags[0].reason == "camelot_compatible"
+
+
+def test_detect_energy_shape_rising_returns_single_arc() -> None:
+    ids = ["1", "2", "3", "4", "5", "6"]
+    tracks_by_id = {
+        "1": _make_track_full("1", energy=1),
+        "2": _make_track_full("2", energy=2),
+        "3": _make_track_full("3", energy=4),
+        "4": _make_track_full("4", energy=6),
+        "5": _make_track_full("5", energy=7),
+        "6": _make_track_full("6", energy=8),
+    }
+    shape = detect_energy_shape(ids, tracks_by_id)
+    assert shape == "single_arc"
+
+
+def test_detect_energy_shape_returns_unclear_when_sparse() -> None:
+    ids = ["1", "2", "3"]
+    tracks_by_id = {
+        "1": _make_track_full("1", energy=None),
+        "2": _make_track_full("2", energy=5),
+        "3": _make_track_full("3", energy=None),
+    }
+    assert detect_energy_shape(ids, tracks_by_id) == "unclear"
+
+
+def test_identify_missing_roles_detects_no_peak_when_all_low_energy() -> None:
+    ids = [str(i) for i in range(1, 7)]
+    tracks_by_id = {str(i): _make_track_full(str(i), energy=3) for i in range(1, 7)}
+    missing = identify_missing_roles(ids, tracks_by_id)
+    assert "peak" in missing
+
+
+def test_identify_missing_roles_returns_empty_when_too_few_seeds() -> None:
+    ids = ["1", "2", "3"]
+    tracks_by_id = {str(i): _make_track_full(str(i), energy=3) for i in range(1, 4)}
+    assert identify_missing_roles(ids, tracks_by_id) == []
+
+
+def test_compute_deterministic_intent_returns_intent_brief() -> None:
+    ids = ["1", "2", "3", "4", "5"]
+    tracks_by_id = {
+        "1": _make_track_full("1", bpm=120.0, camelot_key="8A", energy=2),
+        "2": _make_track_full("2", bpm=122.0, camelot_key="9A", energy=4),
+        "3": _make_track_full("3", bpm=124.0, camelot_key="8A", energy=6),
+        "4": _make_track_full("4", bpm=126.0, camelot_key="8A", energy=7),
+        "5": _make_track_full("5", bpm=124.0, camelot_key="9A", energy=5),
+    }
+    brief = compute_deterministic_intent(ids, tracks_by_id)
+    assert isinstance(brief, IntentBrief)
+    assert brief.bpm_range == (120.0, 126.0)
+    assert len(brief.seed_analyses) == 5
+    assert all(s.tier == "supporting" for s in brief.seed_analyses)
+
+
+# ---------------------------------------------------------------------------
+# _score_candidate
+# ---------------------------------------------------------------------------
+
+
+def test_score_candidate_prefers_harmonically_compatible_track() -> None:
+    zone_seeds = [_make_track_full("s1", bpm=124.0, camelot_key="8A")]
+    compatible = _make_track_full("c1", bpm=125.0, camelot_key="9A")  # compatible key
+    incompatible = _make_track_full("c2", bpm=125.0, camelot_key="3B")  # incompatible key
+    score_compat = _score_candidate(compatible, zone_seeds, 124.0, missing_roles=[], is_unplayed=False)
+    score_incompat = _score_candidate(incompatible, zone_seeds, 124.0, missing_roles=[], is_unplayed=False)
+    assert score_compat > score_incompat
+
+
+def test_score_candidate_gives_role_bonus_for_peak_filler() -> None:
+    zone_seeds = [_make_track_full("s1", bpm=124.0, camelot_key="8A")]
+    peak_candidate = _make_track_full("c1", bpm=124.0, camelot_key="8A", energy=8)
+    non_peak = _make_track_full("c2", bpm=124.0, camelot_key="8A", energy=3)
+    score_peak = _score_candidate(peak_candidate, zone_seeds, 124.0, missing_roles=["peak"], is_unplayed=False)
+    score_non = _score_candidate(non_peak, zone_seeds, 124.0, missing_roles=["peak"], is_unplayed=False)
+    assert score_peak > score_non
+
+
+def test_score_candidate_gives_unplayed_bonus() -> None:
+    zone_seeds = [_make_track_full("s1", bpm=124.0, camelot_key="8A")]
+    track = _make_track_full("c1", bpm=124.0, camelot_key="8A")
+    score_unplayed = _score_candidate(track, zone_seeds, 124.0, missing_roles=[], is_unplayed=True)
+    score_played = _score_candidate(track, zone_seeds, 124.0, missing_roles=[], is_unplayed=False)
+    assert score_unplayed > score_played
+
+
+def test_score_candidate_opener_bonus_prefers_same_genre_and_zone_fit() -> None:
+    zone_seeds = [
+        _make_track_full("s1", bpm=124.0, camelot_key="8A"),
+        _make_track_full("s2", bpm=125.0, camelot_key="9A"),
+    ]
+    same_genre_opener = _make_track_full("c1", bpm=124.5, camelot_key="8A", energy=3)
+    off_profile_opener = Track(
+        track_id="c2",
+        artist="Artist c2",
+        title="Title c2",
+        bpm=124.5,
+        camelot_key="8A",
+        genre="Electronica",
+        energy=3,
+    )
+
+    score_same = _score_candidate(
+        same_genre_opener, zone_seeds, 124.5, missing_roles=["opener"], is_unplayed=False
+    )
+    score_off = _score_candidate(
+        off_profile_opener, zone_seeds, 124.5, missing_roles=["opener"], is_unplayed=False
+    )
+    assert score_same > score_off
+
+
+def test_build_zone_shortlists_ranks_harmonically_compatible_library_tracks_first() -> None:
+    """With IntentBrief, harmonically compatible library tracks rank above incompatible ones."""
+    seed_tracks = [
+        _make_track_full("s1", bpm=124.0, camelot_key="8A"),
+        _make_track_full("s2", bpm=125.0, camelot_key="9A"),
+        _make_track_full("s3", bpm=126.0, camelot_key="8A"),
+        _make_track_full("s4", bpm=123.0, camelot_key="7A"),
+    ]
+    compatible_lib = _make_track_full("lib1", bpm=124.5, camelot_key="8A")
+    incompatible_lib = _make_track_full("lib2", bpm=124.5, camelot_key="3B")
+
+    shortlists = build_zone_shortlists(
+        seed_tracks,
+        [compatible_lib, incompatible_lib],
+        unplayed_ids=None,
+        all_tracks_flag=False,
+    )
+    assert len(shortlists) >= 1
+    ids_in_order = shortlists[0].track_ids
+    assert "lib1" in ids_in_order and "lib2" in ids_in_order
+    assert ids_in_order.index("lib1") < ids_in_order.index("lib2")
+
+
+def test_compute_deterministic_intent_chapter_split_sets_incoherent() -> None:
+    """Seeds split by a 20 BPM gap should yield is_coherent_set=False."""
+    tracks_by_id = {
+        "a1": _make_track("a1", bpm=120.0),
+        "a2": _make_track("a2", bpm=121.0),
+        "a3": _make_track("a3", bpm=122.0),
+        "b1": _make_track("b1", bpm=142.0),
+        "b2": _make_track("b2", bpm=143.0),
+    }
+    brief = compute_deterministic_intent(["a1", "a2", "a3", "b1", "b2"], tracks_by_id)
+    assert brief.is_coherent_set is False
+
+
+def test_compute_deterministic_intent_tight_bpm_range_is_coherent() -> None:
+    """Seeds within 10 BPM should yield is_coherent_set=True."""
+    tracks_by_id = {str(i): _make_track(str(i), bpm=120.0 + i) for i in range(5)}
+    brief = compute_deterministic_intent([str(i) for i in range(5)], tracks_by_id)
+    assert brief.is_coherent_set is True
+
+
+def test_compute_deterministic_intent_single_track_chapter_not_absorbed() -> None:
+    """A single-track zone separated by >=12 BPM must produce 2 zones → incoherent."""
+    tracks_by_id = {
+        "lone": _make_track("lone", bpm=110.0),
+        "c1": _make_track("c1", bpm=125.0),
+        "c2": _make_track("c2", bpm=126.0),
+        "c3": _make_track("c3", bpm=127.0),
+    }
+    brief = compute_deterministic_intent(["lone", "c1", "c2", "c3"], tracks_by_id)
+    assert brief.is_coherent_set is False

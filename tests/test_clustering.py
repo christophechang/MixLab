@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from mixlab.clustering import (
     build_custom_genre_pool,
+    camelot_distance,
     count_outlier_genres,
     filter_by_bpm_range,
     group_by_genre,
@@ -241,3 +242,43 @@ def test_build_custom_genre_pool_returns_empty_for_no_matches() -> None:
     tracks = [_track(track_id="1", genre="Ambient", bpm=90.0)]
     pool = build_custom_genre_pool("170", tracks, _CUSTOM_GENRES, _CUSTOM_GENRE_MAP)
     assert pool == []
+
+
+# ---------------------------------------------------------------------------
+# camelot_distance
+# ---------------------------------------------------------------------------
+
+
+def test_camelot_distance_identical_keys_returns_zero() -> None:
+    assert camelot_distance("8A", "8A") == 0
+
+
+def test_camelot_distance_adjacent_same_ring_returns_one() -> None:
+    assert camelot_distance("8A", "9A") == 1
+
+
+def test_camelot_distance_adjacent_wraps_twelve_to_one() -> None:
+    assert camelot_distance("12A", "1A") == 1
+
+
+def test_camelot_distance_same_number_opposite_ring_returns_one() -> None:
+    assert camelot_distance("8A", "8B") == 1
+
+
+def test_camelot_distance_cross_ring_two_steps_apart() -> None:
+    # 8A to 9B: ring_dist=1, cross-ring adds 1 → 2
+    assert camelot_distance("8A", "9B") == 2
+
+
+def test_camelot_distance_unparseable_returns_999() -> None:
+    assert camelot_distance("X", "8A") == 999
+    assert camelot_distance("8A", "") == 999
+
+
+def test_camelot_distance_large_gap_same_ring() -> None:
+    # 1A to 7A: min(6, 12-6) = 6
+    assert camelot_distance("1A", "7A") == 6
+
+
+def test_camelot_distance_is_symmetric() -> None:
+    assert camelot_distance("3B", "9A") == camelot_distance("9A", "3B")
