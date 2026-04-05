@@ -884,10 +884,20 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
         raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
         raw = re.sub(r"\n?```\s*$", "", raw)
     raw = raw.strip()
+    if not raw:
+        raise ValueError("Stage 2 returned empty content — Anthropic API may have truncated the response.")
+    raw_for_recovery = raw
+    first_bracket = raw.find("[")
+    last_bracket = raw.rfind("]")
+    if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+        raw = raw[first_bracket : last_bracket + 1]
     try:
         data: list[dict[str, object]] = json.loads(raw)
     except json.JSONDecodeError:
-        data = json.loads(_fix_json_strings(raw))
+        try:
+            data = json.loads(_fix_json_strings(raw))
+        except json.JSONDecodeError:
+            data = _extract_complete_objects(raw_for_recovery)
 
     # Diagnostic: model signals the pool is too thin to produce 3+ distinct concepts.
     if len(data) == 1 and "diagnostic" in data[0] and "title" not in data[0]:
