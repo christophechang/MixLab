@@ -6,7 +6,7 @@ import pytest
 import respx
 from httpx import Response
 
-from mixlab.models import MixConcept, Track
+from mixlab.models import CompletionVariant, DJPracticalityScore, MixConcept, Track
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _MINIMAX_URL = "https://api.minimax.io/v1/text/chatcompletion_v2"
@@ -15,19 +15,19 @@ _MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 
-def _shortlist_payload(id_offset: int = 0) -> str:
-    """Stage 1 response — candidate pools, each with ≥8 track IDs."""
+def _shortlist_payload() -> str:
+    """Stage 1 response — candidate pools using T-prefixed aliases (T001, T002, …)."""
     return json.dumps(
         [
             {
                 "title": "Deep 122 BPM / 4A–7A Pool",
                 "mood": "heavy and relentless",
-                "track_ids": [str(id_offset + i) for i in range(9)],
+                "track_ids": [f"T{i:03d}" for i in range(1, 10)],
             },
             {
                 "title": "Liquid 124 BPM / 8A–11A Pool",
                 "mood": "smooth and atmospheric",
-                "track_ids": [str(id_offset + 9 + i) for i in range(8)],
+                "track_ids": [f"T{i:03d}" for i in range(10, 18)],
             },
         ]
     )
@@ -41,14 +41,14 @@ def _curated_payload() -> str:
                 "title": "Dark Rollers",
                 "mood": "heavy and relentless",
                 "track_ids": ["1", "2", "3", "4"],
-                "report": "CONCEPT: Dark Rollers\n\nA relentless journey.\n\nTrack order (Camelot / BPM):\nArtist 1 — Title 1 [8A · 174.0 BPM]\n\nArc: Builds relentlessly.\n\nOpener: Sets a dark tone.\n\nCloser: Resolves with weight.\n\nStandout transitions or calculated risks: The 8A to 9A move is deliberate.\n\nAssumptions: Energy levels inferred from BPM and key metadata.",
+                "report": "CONCEPT: Dark Rollers\n\nA relentless journey.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 174.0] | Role: opener | Why: sets dark tone | Risk: none",
             }
         ]
     )
 
 
-def _chat_response(id_offset: int = 0) -> dict[str, object]:
-    return {"choices": [{"message": {"content": _shortlist_payload(id_offset)}}]}
+def _chat_response() -> dict[str, object]:
+    return {"choices": [{"message": {"content": _shortlist_payload()}}]}
 
 
 def _anthropic_response(content: str) -> dict[str, object]:
@@ -83,6 +83,25 @@ async def test_stage1_skips_provider_if_key_missing(monkeypatch: pytest.MonkeyPa
 
 
 @respx.mock
+async def test_stage1_logs_provider_summary(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from mixlab.llm import make_cascade_state, stage1_concepts
+
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    respx.post(_GROQ_URL).mock(return_value=Response(200, json=_chat_response()))
+
+    await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())
+
+    captured = capsys.readouterr()
+    assert "Stage 1 trying provider: _try_groq | genre=Drum & Bass | input=20 tracks" in captured.out
+    assert "Stage 1 provider: _try_groq | genre=Drum & Bass | input=20 tracks | parsed=2 | cleaned=2 | kept=2" in captured.out
+    assert "Deep 122 BPM / 4A–7A Pool | raw=9 | kept=9 | kept" in captured.out
+    assert "Liquid 124 BPM / 8A–11A Pool | raw=8 | kept=8 | kept" in captured.out
+
+
+@respx.mock
 async def test_stage1_falls_through_cascade_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
     from mixlab.llm import make_cascade_state, stage1_concepts
 
@@ -105,18 +124,18 @@ async def test_stage1_chunks_large_clusters(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
-    # 50 tracks → two chunks (40 + 10); each call returns IDs valid for its chunk.
+    # 50 tracks → two chunks (40 + 10); each call returns aliases valid for its own chunk.
     respx.post(_GROQ_URL).mock(
         side_effect=[
-            Response(200, json=_chat_response(id_offset=0)),
-            Response(200, json=_chat_response(id_offset=40)),
+            Response(200, json=_chat_response()),
+            Response(200, json=_chat_response()),
         ]
     )
 
     shortlists = await stage1_concepts(_make_tracks(50), "Drum & Bass", make_cascade_state())
-    # Chunk 1 (tracks 0–39): both pools have valid IDs → 2 shortlists.
-    # Chunk 2 (tracks 40–49): only the first pool (IDs 40–48) fits within the chunk;
-    # the second pool starts at ID 49 and only "49" is valid → filtered below _MIN_SHORTLIST_TRACKS → 1 shortlist.
+    # Chunk 1 (tracks 0–39, aliases T001–T040): both pools (T001–T009, T010–T017) valid → 2 shortlists.
+    # Chunk 2 (tracks 40–49, aliases T001–T010): first pool (T001–T009) valid → 1 shortlist;
+    # second pool requests T010–T017 but only T010 exists in the 10-track chunk → dropped.
     assert len(shortlists) == 3
 
 
@@ -128,12 +147,33 @@ async def test_stage1_filters_pools_below_minimum(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
-    # Pool with only 3 valid IDs (below _MIN_SHORTLIST_TRACKS=8) should be dropped.
-    tiny_pool = json.dumps([{"title": "Tiny", "mood": "x", "track_ids": ["0", "1", "2"]}])
+    # Pool with only 3 valid aliases (below _MIN_SHORTLIST_TRACKS=8) should be dropped.
+    tiny_pool = json.dumps([{"title": "Tiny", "mood": "x", "track_ids": ["T001", "T002", "T003"]}])
     respx.post(_GROQ_URL).mock(return_value=Response(200, json={"choices": [{"message": {"content": tiny_pool}}]}))
 
     shortlists = await stage1_concepts(_make_tracks(10), "Drum & Bass", make_cascade_state())
     assert shortlists == []
+
+
+@respx.mock
+async def test_stage1_logs_when_all_shortlists_are_dropped(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mixlab.llm import make_cascade_state, stage1_concepts
+
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    tiny_pool = json.dumps([{"title": "Tiny", "mood": "x", "track_ids": ["T001", "T002", "T003"]}])
+    respx.post(_GROQ_URL).mock(return_value=Response(200, json={"choices": [{"message": {"content": tiny_pool}}]}))
+
+    shortlists = await stage1_concepts(_make_tracks(10), "Drum & Bass", make_cascade_state())
+
+    assert shortlists == []
+    captured = capsys.readouterr()
+    assert "Stage 1 provider: _try_groq | genre=Drum & Bass | input=10 tracks | parsed=1 | cleaned=1 | kept=0" in captured.out
+    assert "Tiny | raw=3 | kept=3 | dropped (<8)" in captured.out
 
 
 @respx.mock
@@ -194,7 +234,7 @@ async def test_stage2_strips_hallucinated_ids(monkeypatch: pytest.MonkeyPatch) -
                 "title": "T",
                 "mood": "m",
                 "track_ids": ["1", "2", "3", "4", "999"],
-                "report": "CONCEPT: T\n\nBrief.\n\nTrack order (Camelot / BPM):\n\nArc: x\n\nOpener: x\n\nCloser: x\n\nStandout transitions or calculated risks: x\n\nAssumptions: x",
+                "report": "CONCEPT: T\n\nBrief.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 120.0] | Role: opener | Why: sets tone | Risk: none",
             }
         ]
     )
@@ -492,8 +532,8 @@ async def test_stage1_sticky_stays_on_successful_provider(monkeypatch: pytest.Mo
 
     respx.post(_GROQ_URL).mock(
         side_effect=[
-            Response(200, json=_chat_response(id_offset=0)),
-            Response(200, json=_chat_response(id_offset=40)),
+            Response(200, json=_chat_response()),
+            Response(200, json=_chat_response()),
         ]
     )
 
@@ -515,8 +555,8 @@ async def test_stage1_advances_on_failure_and_stays_on_next(monkeypatch: pytest.
     respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
     respx.post(_GEMINI_URL).mock(
         side_effect=[
-            Response(200, json=_chat_response(id_offset=0)),
-            Response(200, json=_chat_response(id_offset=40)),
+            Response(200, json=_chat_response()),
+            Response(200, json=_chat_response()),
         ]
     )
 
@@ -578,8 +618,8 @@ async def test_stage1_consecutive_failures_reset_on_success(monkeypatch: pytest.
     respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
     respx.post(_GEMINI_URL).mock(
         side_effect=[
-            Response(200, json=_chat_response(id_offset=0)),
-            Response(200, json=_chat_response(id_offset=40)),
+            Response(200, json=_chat_response()),
+            Response(200, json=_chat_response()),
         ]
     )
 
@@ -1064,7 +1104,7 @@ async def test_stage2_rendering_unplayed_falls_back_to_play_count_when_unplayed_
 
 
 @respx.mock
-async def test_stage2_playlist_mode_prompt_contains_single_concept_instruction(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_stage2_playlist_mode_prompt_contains_three_concept_instruction(monkeypatch: pytest.MonkeyPatch) -> None:
     from mixlab.llm import stage2_curate_and_report
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
@@ -1082,7 +1122,7 @@ async def test_stage2_playlist_mode_prompt_contains_single_concept_instruction(m
 
     body = _json.loads(route.calls[0].request.content.decode())
     user_prompt: str = body["messages"][0]["content"]
-    assert "EXACTLY ONE" in user_prompt
+    assert "EXACTLY THREE" in user_prompt
 
 
 @respx.mock
@@ -1129,6 +1169,38 @@ async def test_stage2_playlist_mode_prompt_contains_seed_instruction(monkeypatch
     assert "Tracks marked [seed]" in user_prompt
 
 
+def test_rewrite_playlist_report_injects_summary_at_track_order_marker() -> None:
+    """With the new compact header 'Track order:', summary is injected before the track list."""
+    from mixlab.llm import _rewrite_playlist_report  # noqa: PLC2701
+
+    concept = MixConcept(title="Set", mood="practical", track_ids=["1", "2", "5", "6"])
+    tracks_by_id = {
+        str(i): Track(
+            track_id=str(i),
+            artist=f"Artist {i}",
+            title=f"Title {i}",
+            bpm=120.0,
+            camelot_key="8A",
+            genre="House",
+        )
+        for i in range(1, 7)
+    }
+    report = (
+        "CONCEPT: Set\n\nA driving set.\n\n"
+        "Track order:\n"
+        "1. Artist 1 — Title 1 [8A · 120.0] | Role: opener | Why: sets tone | Risk: none\n"
+        "2. Artist 2 — Title 2 [8A · 120.0] | Role: builder | Why: builds | Risk: none"
+    )
+    rewritten = _rewrite_playlist_report(report, "Monday", concept, ["1", "2", "3", "4"], tracks_by_id)
+
+    assert "Seed tracks retained: 2" in rewritten
+    assert "Seed tracks dropped: 2." in rewritten
+    # Summary must appear BEFORE the track list, not appended at end
+    summary_pos = rewritten.index("Seed tracks retained")
+    track_list_pos = rewritten.index("Track order:")
+    assert summary_pos < track_list_pos  # summary is injected before the "Track order:" marker line
+
+
 def test_rewrite_playlist_report_overwrites_incorrect_counts() -> None:
     from mixlab.llm import _rewrite_playlist_report
 
@@ -1145,7 +1217,7 @@ def test_rewrite_playlist_report_overwrites_incorrect_counts() -> None:
         "Seed tracks retained: 99.\n"
         "Seed tracks dropped: 0.\n"
         "Library tracks added: 0.\n\n"
-        "Track order (Camelot / BPM):\nArtist 1 — Title 1 [8A · 120.0]"
+        "Track order:\nArtist 1 — Title 1 [8A · 120.0]"
     )
 
     rewritten = _rewrite_playlist_report(report, "Monday Night", concept, ["1", "2", "3", "4"], tracks_by_id)
@@ -1175,7 +1247,7 @@ async def test_stage2_playlist_mode_report_rewrites_seed_counts_deterministicall
                     "Seed tracks retained: 1.\n"
                     "Seed tracks dropped: 0.\n"
                     "Library tracks added: 7.\n\n"
-                    "Track order (Camelot / BPM):\nArtist 1 — Title 1 [8A · 120.0]"
+                    "Track order:\nArtist 1 — Title 1 [8A · 120.0]"
                 ),
             }
         ]
@@ -1212,7 +1284,7 @@ async def test_stage2_playlist_mode_raises_when_retention_below_minimum(monkeypa
                 "title": "Set",
                 "mood": "m",
                 "track_ids": ["1", "2", "3", "4", "11", "12", "13", "14", "15", "16", "17", "18"],
-                "report": "CONCEPT: Set\n\nThesis.\n\nTrack order (Camelot / BPM):\nArtist 1 — Title 1 [8A · 120.0]",
+                "report": "CONCEPT: Set\n\nThesis.\n\nTrack order:\nArtist 1 — Title 1 [8A · 120.0]",
             }
         ]
     )
@@ -1232,3 +1304,146 @@ async def test_stage2_playlist_mode_raises_when_retention_below_minimum(monkeypa
             seed_ids=frozenset({str(i) for i in range(1, 11)}),
             seed_track_ids=[str(i) for i in range(1, 11)],
         )
+
+
+@respx.mock
+async def test_stage2_playlist_mode_returns_winner_first_with_labeled_titles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    payload = json.dumps(
+        [
+            {
+                "title": "Balanced Set",
+                "mood": "balanced",
+                "track_ids": ["1", "2", "3", "4"],
+                "report": "CONCEPT: Balanced Set\n\nThesis.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 120.0]",
+            },
+            {
+                "title": "Practical Set",
+                "mood": "practical",
+                "track_ids": ["1", "2", "3", "4"],
+                "report": "CONCEPT: Practical Set\n\nThesis.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 120.0]",
+            },
+            {
+                "title": "Adventurous Set",
+                "mood": "adventurous",
+                "track_ids": ["1", "2", "3", "4"],
+                "report": "CONCEPT: Adventurous Set\n\nThesis.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 120.0]",
+            },
+        ]
+    )
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(payload)))
+
+    def fake_score_variant(
+        concept: MixConcept,
+        seed_track_ids: list[str],
+        intent_brief: object,
+        tracks_by_id: dict[str, Track],
+    ) -> CompletionVariant:
+        del seed_track_ids, intent_brief, tracks_by_id
+        score_by_strategy = {
+            "practical": 0.9,
+            "balanced": 0.7,
+            "adventurous": 0.6,
+        }
+        score = score_by_strategy[concept.mood]
+        return CompletionVariant(
+            strategy=concept.mood,  # type: ignore[arg-type]
+            concept=concept,
+            anchor_retention_rate=1.0,
+            practicality_score=DJPracticalityScore(score, score, score, score),
+        )
+
+    monkeypatch.setattr("mixlab.llm._score_variant", fake_score_variant)
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=120.0 + i, camelot_key="8A", genre="House")
+        for i in range(1, 5)
+    }
+
+    concepts, report = await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset({"1", "2", "3", "4"}),
+        seed_track_ids=["1", "2", "3", "4"],
+    )
+
+    assert [concept.title for concept in concepts] == [
+        "WINNER - PRACTICAL - Practical Set",
+        "BALANCED - Balanced Set",
+        "ADVENTUROUS - Adventurous Set",
+    ]
+    assert report.startswith("VARIANT: WINNER - PRACTICAL")
+    assert "VARIANT: BALANCED" in report
+    assert "VARIANT: ADVENTUROUS" in report
+    assert report.index("VARIANT: WINNER - PRACTICAL") < report.index("VARIANT: BALANCED")
+    assert report.index("VARIANT: BALANCED") < report.index("VARIANT: ADVENTUROUS")
+    assert (
+        "Alternative strategies considered: balanced (practicality: 0.70, anchor retention: 100%) — not selected; "
+        "adventurous (practicality: 0.60, anchor retention: 100%) — not selected."
+    ) in report
+    assert "Alternative strategies considered: practical" not in report
+
+
+# ---------------------------------------------------------------------------
+# _parse_curated_concepts — transitions parsing
+# ---------------------------------------------------------------------------
+
+
+def test_parse_curated_concepts_parses_transitions() -> None:
+    from mixlab.llm import _parse_curated_concepts  # noqa: PLC2701
+
+    raw = json.dumps(
+        [
+            {
+                "title": "T",
+                "mood": "practical",
+                "track_ids": ["1", "2", "3", "4"],
+                "transitions": [
+                    {"from_id": "1", "to_id": "2", "is_risky": False, "risk_type": ""},
+                    {"from_id": "2", "to_id": "3", "is_risky": True, "risk_type": "chapter_pivot"},
+                ],
+                "report": "x",
+            }
+        ]
+    )
+    concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
+    assert len(concepts[0].transitions) == 2
+    assert concepts[0].transitions[1].is_risky is True
+    assert concepts[0].transitions[1].risk_type == "chapter_pivot"
+
+
+def test_parse_curated_concepts_missing_transitions_key_yields_empty_list() -> None:
+    from mixlab.llm import _parse_curated_concepts  # noqa: PLC2701
+
+    raw = json.dumps([{"title": "T", "mood": "m", "track_ids": ["1", "2", "3", "4"], "report": "x"}])
+    concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
+    assert concepts[0].transitions == []
+
+
+def test_parse_curated_concepts_unmatched_transition_ids_stored_as_is() -> None:
+    """Transition IDs not in track_ids are stored without filtering — ignored at scoring time."""
+    from mixlab.llm import _parse_curated_concepts  # noqa: PLC2701
+
+    raw = json.dumps(
+        [
+            {
+                "title": "T",
+                "mood": "m",
+                "track_ids": ["1", "2", "3", "4"],
+                "transitions": [
+                    {"from_id": "99", "to_id": "100", "is_risky": True, "risk_type": "cut_only"},
+                ],
+                "report": "x",
+            }
+        ]
+    )
+    concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
+    # stored verbatim — scorer ignores them when looking up consecutive pairs
+    assert len(concepts[0].transitions) == 1
+    assert concepts[0].transitions[0].from_id == "99"
