@@ -24,6 +24,7 @@ from mixlab.clustering import (
 from mixlab.config import CUSTOM_GENRES, GENRE_MAP, IGNORED_GENRES
 from mixlab.discord_client import send_report
 from mixlab.llm import (
+    _MIN_SHORTLIST_TRACKS,
     make_cascade_state,
     select_shortlists_for_stage2,
     select_stage1_window,
@@ -46,6 +47,7 @@ from mixlab.playlist_mode import (
 from mixlab.reader import apply_bpm_corrections, parse_collection, parse_playlists
 
 _XML_PATH = Path("import/rekordbox.xml")
+_DO_NOT_RECOMMEND_PLAYLIST = "DO NOT RECOMMEND"
 
 
 def _build_tracks_by_id(tracks: list[Track]) -> dict[str, Track]:
@@ -88,6 +90,56 @@ def _format_report_context(
         details.append("export enabled")
 
     return f"Report context: {base_label} ({', '.join(details)})"
+
+
+def _load_do_not_recommend_ids(xml_path: Path) -> set[str]:
+    playlists = parse_playlists(xml_path)
+    denylist_ids: set[str] = set()
+    target = _DO_NOT_RECOMMEND_PLAYLIST.casefold()
+
+    for playlist_path, track_ids in playlists.items():
+        playlist_name = playlist_path.rsplit("/", 1)[-1]
+        if playlist_path.casefold() == target or playlist_name.casefold() == target:
+            denylist_ids.update(track_id for track_id in track_ids if track_id)
+
+    return denylist_ids
+
+
+def _apply_do_not_recommend_filter(tracks: list[Track], xml_path: Path) -> list[Track]:
+    denylist_ids = _load_do_not_recommend_ids(xml_path)
+    filtered_tracks = [track for track in tracks if track.track_id not in denylist_ids]
+    filtered_count = len(tracks) - len(filtered_tracks)
+    print(
+        f'DO NOT RECOMMEND filter: excluded {filtered_count} track(s) from playlist "{_DO_NOT_RECOMMEND_PLAYLIST}".',
+        file=sys.stderr,
+    )
+    return filtered_tracks
+
+
+def _format_pipeline_counts(counts: dict[str, int]) -> str:
+    return ", ".join(f"{label}={count}" for label, count in counts.items()) if counts else "none"
+
+
+def _print_pipeline_summary(
+    *,
+    collection_count: int,
+    unplayed_count: int,
+    used_catalog_api: bool,
+    genre_cluster_counts: dict[str, int],
+    bpm_filtered_counts: dict[str, int],
+    same_genre_outlier_count: int,
+    stage1_shortlist_count: int,
+    stage2_shortlist_count: int,
+) -> None:
+    print("Pipeline summary:")
+    filter_label = "unplayed" if used_catalog_api else "eligible"
+    print(f"- Track pool: {unplayed_count} {filter_label} / {collection_count} in scoped collection")
+    print(f"- Genre scope before BPM filter: {_format_pipeline_counts(genre_cluster_counts)}")
+    print(f"- Genre scope after BPM filter: {_format_pipeline_counts(bpm_filtered_counts)}")
+    print(f"- Same-genre outliers considered: {same_genre_outlier_count}")
+    print(f"- Stage 1 shortlists: {stage1_shortlist_count}")
+    print(f"- Stage 2 shortlists sent: {stage2_shortlist_count}")
+    print()
 
 
 def _print_availability(
@@ -149,6 +201,7 @@ async def run_playlist_mode(
     all_tracks: bool,
 ) -> None:
     tracks = parse_collection(_XML_PATH)
+    tracks = _apply_do_not_recommend_filter(tracks, _XML_PATH)
     tracks = apply_bpm_corrections(tracks)
 
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
@@ -277,6 +330,7 @@ async def run(
 ) -> None:  # noqa: ARG001 — duration reserved
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
+    tracks = _apply_do_not_recommend_filter(tracks, _XML_PATH)
     tracks = apply_bpm_corrections(tracks)
 
     # 2. Fetch played tracks and filter (skipped when --all-tracks is set).
@@ -316,6 +370,9 @@ async def run(
     all_shortlists: list[MixConcept] = []
     custom_genre_sub_genres: list[str] | None = None
     genre_unplayed_track_ids_source: list[Track] = []
+    genre_cluster_counts: dict[str, int] = {}
+    bpm_filtered_counts: dict[str, int] = {}
+    same_genre_outlier_count = 0
 
     if is_custom:
         from mixlab.llm import _MAX_STAGE1_POOL_CUSTOM
@@ -338,9 +395,12 @@ async def run(
         # No outlier handling for custom genres — pool is already the full scope.
         genre_outliers: list[Track] = []
         outliers: list[Track] = []
+        genre_cluster_counts = {genre: len(pool)}
+        bpm_filtered_counts = {genre: len(stage1_pool)}
     else:
         clusters, outliers = partition_outliers(unplayed, GENRE_MAP)
         clusters = resolve_genre_clusters(genre, clusters, GENRE_MAP)
+        genre_cluster_counts = {genre_label: len(cluster_tracks) for genre_label, cluster_tracks in clusters.items()}
 
         if not clusters:
             print(f"No unplayed tracks found for genre '{genre}'.", file=sys.stderr)
@@ -348,17 +408,39 @@ async def run(
 
         # 6a. LLM Stage 1 — standard path.
         for genre_label, cluster_tracks in clusters.items():
-            sorted_tracks = sort_by_camelot(filter_by_bpm(cluster_tracks))
+            bpm_filtered = filter_by_bpm(cluster_tracks)
+            bpm_filtered_counts[genre_label] = len(bpm_filtered)
+            if len(bpm_filtered) < _MIN_SHORTLIST_TRACKS:
+                print(
+                    f"Stage 1: skipping {genre_label} — {len(bpm_filtered)} tracks after BPM filter "
+                    f"(minimum {_MIN_SHORTLIST_TRACKS})"
+                )
+                continue
+            sorted_tracks = sort_by_camelot(bpm_filtered)
             all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label, cascade_state))
 
         # Outliers ≥ 4 within this genre scope — shortlist as Misc.
         genre_outliers = [t for t in outliers if t.genre.lower() == genre.lower()]
+        same_genre_outlier_count = len(genre_outliers)
         if len(genre_outliers) >= 4:
             all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc", cascade_state))
 
         genre_unplayed_track_ids_source = [t for cluster_tracks in clusters.values() for t in cluster_tracks]
 
+    tracks_by_id = _build_tracks_by_id(tracks)
+    all_shortlists = [s for s in all_shortlists if any(tid in tracks_by_id for tid in s.track_ids)]
+    stage1_shortlist_count = len(all_shortlists)
     if not all_shortlists:
+        _print_pipeline_summary(
+            collection_count=len(tracks),
+            unplayed_count=len(unplayed),
+            used_catalog_api=used_catalog_api,
+            genre_cluster_counts=genre_cluster_counts,
+            bpm_filtered_counts=bpm_filtered_counts,
+            same_genre_outlier_count=same_genre_outlier_count,
+            stage1_shortlist_count=0,
+            stage2_shortlist_count=0,
+        )
         print("No shortlists generated — all tracks may have been excluded.", file=sys.stderr)
         sys.exit(1)
     if len(all_shortlists) < 3:
@@ -368,14 +450,23 @@ async def run(
         )
 
     # Select shortlists for Stage 2 — random sample from top candidates (ensures variety across runs).
-    tracks_by_id = _build_tracks_by_id(tracks)
-    all_shortlists = [s for s in all_shortlists if any(tid in tracks_by_id for tid in s.track_ids)]
     all_shortlists = select_shortlists_for_stage2(all_shortlists)
     if not all_shortlists:
         print("No shortlists survived track resolution — collection may be out of sync.", file=sys.stderr)
         sys.exit(1)
+    _print_pipeline_summary(
+        collection_count=len(tracks),
+        unplayed_count=len(unplayed),
+        used_catalog_api=used_catalog_api,
+        genre_cluster_counts=genre_cluster_counts,
+        bpm_filtered_counts=bpm_filtered_counts,
+        same_genre_outlier_count=same_genre_outlier_count,
+        stage1_shortlist_count=stage1_shortlist_count,
+        stage2_shortlist_count=len(all_shortlists),
+    )
 
     # 7. LLM Stage 2 — creative curation + full report (single Anthropic call).
+    print(f"Stage 2: curating {len(all_shortlists)} shortlist(s)...")
     all_concepts, report = await stage2_curate_and_report(
         all_shortlists,
         tracks_by_id,
