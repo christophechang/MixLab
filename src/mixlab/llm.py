@@ -170,10 +170,30 @@ Return ONLY a JSON object (no prose, no markdown fence):
 """
 
 
-def _tracks_to_text(tracks: list[Track], seed_ids: frozenset[str] | None = None) -> str:
+def _make_alias_map(tracks: list[Track]) -> tuple[dict[str, str], dict[str, str]]:
+    """Return (alias_to_id, id_to_alias) for a Stage 1 track list.
+
+    Aliases are T001, T002, … — short sequential labels that LLMs reproduce
+    exactly, replacing opaque Rekordbox IDs that models hallucinate.
+    """
+    alias_to_id: dict[str, str] = {}
+    id_to_alias: dict[str, str] = {}
+    for i, track in enumerate(tracks, start=1):
+        alias = f"T{i:03d}"
+        alias_to_id[alias] = track.track_id
+        id_to_alias[track.track_id] = alias
+    return alias_to_id, id_to_alias
+
+
+def _tracks_to_text(
+    tracks: list[Track],
+    seed_ids: frozenset[str] | None = None,
+    id_to_alias: dict[str, str] | None = None,
+) -> str:
     lines = []
     for t in tracks:
-        line = f"ID:{t.track_id} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key}"
+        display_id = id_to_alias[t.track_id] if id_to_alias is not None else t.track_id
+        line = f"ID:{display_id} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key}"
         if t.year is not None:
             line += f" | {t.year}"
         if t.energy is not None:
@@ -478,6 +498,32 @@ def make_cascade_state() -> CascadeState:
     return CascadeState()
 
 
+def _print_stage1_provider_summary(
+    provider_name: str,
+    genre: str,
+    input_track_count: int,
+    parsed: list[MixConcept],
+    cleaned: list[MixConcept],
+    kept: list[MixConcept],
+) -> None:
+    print(
+        f"Stage 1 provider: {provider_name} | genre={genre} | input={input_track_count} tracks | "
+        f"parsed={len(parsed)} | cleaned={len(cleaned)} | kept={len(kept)}"
+    )
+    for raw_concept, cleaned_concept in zip(parsed, cleaned, strict=False):
+        status = "kept" if len(cleaned_concept.track_ids) >= _MIN_SHORTLIST_TRACKS else "dropped (<8)"
+        print(
+            f"  - {cleaned_concept.title} | raw={len(raw_concept.track_ids)} | "
+            f"kept={len(cleaned_concept.track_ids)} | {status}"
+        )
+    if not cleaned:
+        print("  - no concepts returned")
+
+
+def _print_stage1_provider_attempt(provider_name: str, genre: str, input_track_count: int) -> None:
+    print(f"Stage 1 trying provider: {provider_name} | genre={genre} | input={input_track_count} tracks")
+
+
 async def _call_stage1_once(
     tracks: list[Track],
     genre: str,
@@ -485,13 +531,14 @@ async def _call_stage1_once(
     custom: bool = False,
     seed_ids: frozenset[str] | None = None,
 ) -> list[MixConcept]:
-    valid_ids = {t.track_id for t in tracks}
-    prompt = f"Genre: {genre}\n\nTracks:\n{_tracks_to_text(tracks, seed_ids=seed_ids)}"
+    alias_to_id, id_to_alias = _make_alias_map(tracks)
+    prompt = f"Genre: {genre}\n\nTracks:\n{_tracks_to_text(tracks, seed_ids=seed_ids, id_to_alias=id_to_alias)}"
     system = _STAGE1_SYSTEM_PLAYLIST if seed_ids is not None else _STAGE1_SYSTEM_CUSTOM if custom else _STAGE1_SYSTEM
 
     for _ in range(len(_CASCADE)):
         provider = _CASCADE[state.index]
         try:
+            _print_stage1_provider_attempt(provider.__name__, genre, len(tracks))
             result = await provider(prompt, system=system)
             if result is None:  # provider not configured — skip silently, no failure counted
                 state.index = (state.index + 1) % len(_CASCADE)
@@ -499,12 +546,19 @@ async def _call_stage1_once(
             if not result.strip():  # provider returned empty content — treat as a failure
                 raise ValueError(f"Provider {provider.__name__} returned empty content.")
             concepts = _parse_concepts(result)
+            # Map aliases back to real IDs. Aliases not in the map are hallucinated — drop them.
             cleaned = [
-                MixConcept(title=c.title, mood=c.mood, track_ids=[tid for tid in c.track_ids if tid in valid_ids])
+                MixConcept(
+                    title=c.title,
+                    mood=c.mood,
+                    track_ids=[alias_to_id[a] for a in c.track_ids if a in alias_to_id],
+                )
                 for c in concepts
             ]
+            kept = [c for c in cleaned if len(c.track_ids) >= _MIN_SHORTLIST_TRACKS]
+            _print_stage1_provider_summary(provider.__name__, genre, len(tracks), concepts, cleaned, kept)
             state.consecutive_failures = 0
-            return [c for c in cleaned if len(c.track_ids) >= _MIN_SHORTLIST_TRACKS]
+            return kept
         except Exception as exc:  # noqa: BLE001 — cascade
             print(f"Provider {provider.__name__} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             state.consecutive_failures += 1

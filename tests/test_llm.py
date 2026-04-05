@@ -15,19 +15,19 @@ _MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 
-def _shortlist_payload(id_offset: int = 0) -> str:
-    """Stage 1 response — candidate pools, each with ≥8 track IDs."""
+def _shortlist_payload() -> str:
+    """Stage 1 response — candidate pools using T-prefixed aliases (T001, T002, …)."""
     return json.dumps(
         [
             {
                 "title": "Deep 122 BPM / 4A–7A Pool",
                 "mood": "heavy and relentless",
-                "track_ids": [str(id_offset + i) for i in range(9)],
+                "track_ids": [f"T{i:03d}" for i in range(1, 10)],
             },
             {
                 "title": "Liquid 124 BPM / 8A–11A Pool",
                 "mood": "smooth and atmospheric",
-                "track_ids": [str(id_offset + 9 + i) for i in range(8)],
+                "track_ids": [f"T{i:03d}" for i in range(10, 18)],
             },
         ]
     )
@@ -47,8 +47,8 @@ def _curated_payload() -> str:
     )
 
 
-def _chat_response(id_offset: int = 0) -> dict[str, object]:
-    return {"choices": [{"message": {"content": _shortlist_payload(id_offset)}}]}
+def _chat_response() -> dict[str, object]:
+    return {"choices": [{"message": {"content": _shortlist_payload()}}]}
 
 
 def _anthropic_response(content: str) -> dict[str, object]:
@@ -83,6 +83,25 @@ async def test_stage1_skips_provider_if_key_missing(monkeypatch: pytest.MonkeyPa
 
 
 @respx.mock
+async def test_stage1_logs_provider_summary(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from mixlab.llm import make_cascade_state, stage1_concepts
+
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    respx.post(_GROQ_URL).mock(return_value=Response(200, json=_chat_response()))
+
+    await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())
+
+    captured = capsys.readouterr()
+    assert "Stage 1 trying provider: _try_groq | genre=Drum & Bass | input=20 tracks" in captured.out
+    assert "Stage 1 provider: _try_groq | genre=Drum & Bass | input=20 tracks | parsed=2 | cleaned=2 | kept=2" in captured.out
+    assert "Deep 122 BPM / 4A–7A Pool | raw=9 | kept=9 | kept" in captured.out
+    assert "Liquid 124 BPM / 8A–11A Pool | raw=8 | kept=8 | kept" in captured.out
+
+
+@respx.mock
 async def test_stage1_falls_through_cascade_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
     from mixlab.llm import make_cascade_state, stage1_concepts
 
@@ -105,18 +124,18 @@ async def test_stage1_chunks_large_clusters(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
-    # 50 tracks → two chunks (40 + 10); each call returns IDs valid for its chunk.
+    # 50 tracks → two chunks (40 + 10); each call returns aliases valid for its own chunk.
     respx.post(_GROQ_URL).mock(
         side_effect=[
-            Response(200, json=_chat_response(id_offset=0)),
-            Response(200, json=_chat_response(id_offset=40)),
+            Response(200, json=_chat_response()),
+            Response(200, json=_chat_response()),
         ]
     )
 
     shortlists = await stage1_concepts(_make_tracks(50), "Drum & Bass", make_cascade_state())
-    # Chunk 1 (tracks 0–39): both pools have valid IDs → 2 shortlists.
-    # Chunk 2 (tracks 40–49): only the first pool (IDs 40–48) fits within the chunk;
-    # the second pool starts at ID 49 and only "49" is valid → filtered below _MIN_SHORTLIST_TRACKS → 1 shortlist.
+    # Chunk 1 (tracks 0–39, aliases T001–T040): both pools (T001–T009, T010–T017) valid → 2 shortlists.
+    # Chunk 2 (tracks 40–49, aliases T001–T010): first pool (T001–T009) valid → 1 shortlist;
+    # second pool requests T010–T017 but only T010 exists in the 10-track chunk → dropped.
     assert len(shortlists) == 3
 
 
@@ -128,12 +147,33 @@ async def test_stage1_filters_pools_below_minimum(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
-    # Pool with only 3 valid IDs (below _MIN_SHORTLIST_TRACKS=8) should be dropped.
-    tiny_pool = json.dumps([{"title": "Tiny", "mood": "x", "track_ids": ["0", "1", "2"]}])
+    # Pool with only 3 valid aliases (below _MIN_SHORTLIST_TRACKS=8) should be dropped.
+    tiny_pool = json.dumps([{"title": "Tiny", "mood": "x", "track_ids": ["T001", "T002", "T003"]}])
     respx.post(_GROQ_URL).mock(return_value=Response(200, json={"choices": [{"message": {"content": tiny_pool}}]}))
 
     shortlists = await stage1_concepts(_make_tracks(10), "Drum & Bass", make_cascade_state())
     assert shortlists == []
+
+
+@respx.mock
+async def test_stage1_logs_when_all_shortlists_are_dropped(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mixlab.llm import make_cascade_state, stage1_concepts
+
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    tiny_pool = json.dumps([{"title": "Tiny", "mood": "x", "track_ids": ["T001", "T002", "T003"]}])
+    respx.post(_GROQ_URL).mock(return_value=Response(200, json={"choices": [{"message": {"content": tiny_pool}}]}))
+
+    shortlists = await stage1_concepts(_make_tracks(10), "Drum & Bass", make_cascade_state())
+
+    assert shortlists == []
+    captured = capsys.readouterr()
+    assert "Stage 1 provider: _try_groq | genre=Drum & Bass | input=10 tracks | parsed=1 | cleaned=1 | kept=0" in captured.out
+    assert "Tiny | raw=3 | kept=3 | dropped (<8)" in captured.out
 
 
 @respx.mock
@@ -492,8 +532,8 @@ async def test_stage1_sticky_stays_on_successful_provider(monkeypatch: pytest.Mo
 
     respx.post(_GROQ_URL).mock(
         side_effect=[
-            Response(200, json=_chat_response(id_offset=0)),
-            Response(200, json=_chat_response(id_offset=40)),
+            Response(200, json=_chat_response()),
+            Response(200, json=_chat_response()),
         ]
     )
 
@@ -515,8 +555,8 @@ async def test_stage1_advances_on_failure_and_stays_on_next(monkeypatch: pytest.
     respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
     respx.post(_GEMINI_URL).mock(
         side_effect=[
-            Response(200, json=_chat_response(id_offset=0)),
-            Response(200, json=_chat_response(id_offset=40)),
+            Response(200, json=_chat_response()),
+            Response(200, json=_chat_response()),
         ]
     )
 
@@ -578,8 +618,8 @@ async def test_stage1_consecutive_failures_reset_on_success(monkeypatch: pytest.
     respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
     respx.post(_GEMINI_URL).mock(
         side_effect=[
-            Response(200, json=_chat_response(id_offset=0)),
-            Response(200, json=_chat_response(id_offset=40)),
+            Response(200, json=_chat_response()),
+            Response(200, json=_chat_response()),
         ]
     )
 
