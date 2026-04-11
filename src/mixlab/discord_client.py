@@ -34,6 +34,7 @@ def format_report(
     counts: dict[str, tuple[int, int]] | None = None,
     show_unplayed: bool = True,
     report_context: str | None = None,
+    excluded_count: int = 0,
 ) -> str:
     lines: list[str] = []
 
@@ -59,6 +60,8 @@ def format_report(
                 filled = round((total / max_total) * bar_width)
                 bar = "█" * filled + "░" * (bar_width - filled)
                 lines.append(f"  {label:<20} {total:<4}  {bar}")
+        if excluded_count:
+            lines.append(f"\n  {excluded_count} track(s) excluded (DO NOT RECOMMEND)")
         lines.append("```\n")
 
     if skipped:
@@ -216,6 +219,7 @@ async def send_report(
     attachments: list[tuple[str, bytes]] | None = None,
     show_unplayed: bool = True,
     report_context: str | None = None,
+    excluded_count: int = 0,
 ) -> bool:
     client = make_discord_client()
     if client is None:
@@ -224,5 +228,7 @@ async def send_report(
     if tracks_by_id is None:
         tracks_by_id = {}
 
-    full_text = format_report(report, concepts, tracks_by_id, outliers, skipped, counts, show_unplayed, report_context)
+    full_text = format_report(
+        report, concepts, tracks_by_id, outliers, skipped, counts, show_unplayed, report_context, excluded_count
+    )
     return await client.post(full_text, attachments)

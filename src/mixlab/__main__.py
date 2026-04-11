@@ -531,6 +531,7 @@ async def run(
         attachments=xml_attachments,
         show_unplayed=used_catalog_api,
         report_context=report_context,
+        excluded_count=denylist_excluded,
     )
 
 

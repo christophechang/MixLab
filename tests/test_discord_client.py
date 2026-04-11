@@ -75,3 +75,18 @@ def test_format_report_includes_concept_headers() -> None:
     tracks_by_id = {"1": _make_track(1)}
     result = format_report("", [concept], tracks_by_id, [])
     assert "Dark Rollers" in result
+
+
+def test_format_report_excluded_count_appears_inside_snapshot_block() -> None:
+    result = format_report("", [], {}, [], counts=_COUNTS, show_unplayed=True, excluded_count=42)
+    # Must mention the count
+    assert "42 track(s) excluded (DO NOT RECOMMEND)" in result
+    # Must appear before the closing ``` of the code block
+    closing_tick = result.rindex("```")
+    excluded_pos = result.index("42 track(s) excluded")
+    assert excluded_pos < closing_tick
+
+
+def test_format_report_excluded_count_zero_omits_line() -> None:
+    result = format_report("", [], {}, [], counts=_COUNTS, show_unplayed=True, excluded_count=0)
+    assert "excluded" not in result
