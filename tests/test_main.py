@@ -9,8 +9,10 @@ from mixlab.__main__ import (
     _apply_do_not_recommend_filter,
     _format_pipeline_counts,
     _format_report_context,
+    _print_availability,
     _print_pipeline_summary,
 )
+from mixlab.playlist_exporter import build_merged_xml, parse_raw_tracks
 from mixlab.reader import parse_collection
 
 
@@ -95,9 +97,10 @@ def test_apply_do_not_recommend_filter_excludes_matching_playlist_tracks(
     xml_path = _write_xml(tmp_path, _DO_NOT_RECOMMEND_XML)
     tracks = parse_collection(xml_path)
 
-    filtered_tracks = _apply_do_not_recommend_filter(tracks, xml_path)
+    filtered_tracks, excluded_count = _apply_do_not_recommend_filter(tracks, xml_path)
 
     assert [track.track_id for track in filtered_tracks] == ["1", "4"]
+    assert excluded_count == 2
     captured = capsys.readouterr()
     assert 'DO NOT RECOMMEND filter: excluded 2 track(s) from playlist "DO NOT RECOMMEND".' in captured.err
 
@@ -108,11 +111,37 @@ def test_apply_do_not_recommend_filter_logs_zero_when_playlist_missing(
     xml_path = _write_xml(tmp_path, _NO_DENYLIST_XML)
     tracks = parse_collection(xml_path)
 
-    filtered_tracks = _apply_do_not_recommend_filter(tracks, xml_path)
+    filtered_tracks, excluded_count = _apply_do_not_recommend_filter(tracks, xml_path)
 
     assert [track.track_id for track in filtered_tracks] == ["1", "2"]
+    assert excluded_count == 0
     captured = capsys.readouterr()
     assert 'DO NOT RECOMMEND filter: excluded 0 track(s) from playlist "DO NOT RECOMMEND".' in captured.err
+
+
+def test_do_not_recommend_tracks_absent_from_all_unplayed_tunes_playlist(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Tracks filtered by the DO NOT RECOMMEND denylist must not appear in 'All Unplayed Tunes'."""
+    xml_path = _write_xml(tmp_path, _DO_NOT_RECOMMEND_XML)
+
+    tracks = parse_collection(xml_path)
+    filtered_tracks, _ = _apply_do_not_recommend_filter(tracks, xml_path)
+    unplayed_ids = [t.track_id for t in filtered_tracks]
+
+    raw_tracks_xml = parse_raw_tracks(xml_path)
+    root = build_merged_xml([], raw_tracks_xml, unplayed_ids=unplayed_ids)
+
+    assert root is not None
+    unplayed_node = root.find(".//PLAYLISTS//NODE[@Name='All Unplayed Tunes']")
+    assert unplayed_node is not None
+    keys = {el.get("Key") for el in unplayed_node.findall("TRACK")}
+
+    # TrackIDs 2 and 3 are in DO NOT RECOMMEND playlists — must not appear
+    assert "2" not in keys
+    assert "3" not in keys
+    # TrackIDs 1 and 4 are not denylisted — must appear
+    assert keys == {"1", "4"}
 
 
 def test_format_pipeline_counts_returns_compact_list() -> None:
@@ -121,6 +150,26 @@ def test_format_pipeline_counts_returns_compact_list() -> None:
 
 def test_format_pipeline_counts_returns_none_for_empty_dict() -> None:
     assert _format_pipeline_counts({}) == "none"
+
+
+def test_print_availability_shows_excluded_count_when_nonzero(capsys: pytest.CaptureFixture[str]) -> None:
+    from mixlab.models import Track
+
+    track = Track(track_id="1", artist="A", title="T", bpm=124.0, camelot_key="8A", genre="House")
+    _print_availability([track], [track], show_unplayed=True, excluded_count=3)
+
+    captured = capsys.readouterr()
+    assert "3 track(s) excluded (DO NOT RECOMMEND)" in captured.out
+
+
+def test_print_availability_omits_excluded_line_when_zero(capsys: pytest.CaptureFixture[str]) -> None:
+    from mixlab.models import Track
+
+    track = Track(track_id="1", artist="A", title="T", bpm=124.0, camelot_key="8A", genre="House")
+    _print_availability([track], [track], show_unplayed=True, excluded_count=0)
+
+    captured = capsys.readouterr()
+    assert "excluded" not in captured.out
 
 
 def test_print_pipeline_summary_outputs_compact_block(capsys: pytest.CaptureFixture[str]) -> None:

@@ -105,7 +105,7 @@ def _load_do_not_recommend_ids(xml_path: Path) -> set[str]:
     return denylist_ids
 
 
-def _apply_do_not_recommend_filter(tracks: list[Track], xml_path: Path) -> list[Track]:
+def _apply_do_not_recommend_filter(tracks: list[Track], xml_path: Path) -> tuple[list[Track], int]:
     denylist_ids = _load_do_not_recommend_ids(xml_path)
     filtered_tracks = [track for track in tracks if track.track_id not in denylist_ids]
     filtered_count = len(tracks) - len(filtered_tracks)
@@ -113,7 +113,7 @@ def _apply_do_not_recommend_filter(tracks: list[Track], xml_path: Path) -> list[
         f'DO NOT RECOMMEND filter: excluded {filtered_count} track(s) from playlist "{_DO_NOT_RECOMMEND_PLAYLIST}".',
         file=sys.stderr,
     )
-    return filtered_tracks
+    return filtered_tracks, filtered_count
 
 
 def _format_pipeline_counts(counts: dict[str, int]) -> str:
@@ -143,7 +143,10 @@ def _print_pipeline_summary(
 
 
 def _print_availability(
-    all_tracks: list[Track], unplayed: list[Track], show_unplayed: bool = True
+    all_tracks: list[Track],
+    unplayed: list[Track],
+    show_unplayed: bool = True,
+    excluded_count: int = 0,
 ) -> tuple[dict[str, tuple[int, int]], int, dict[str, tuple[int, int]]]:
     counts = count_available_by_genre(all_tracks, unplayed, GENRE_MAP)
     outlier_genres = count_outlier_genres(all_tracks, unplayed, GENRE_MAP, ignored=IGNORED_GENRES)
@@ -168,6 +171,8 @@ def _print_availability(
             print("\n  Unmapped Rekordbox genre tags (not in GENRE_MAP):")
             for tag, (total, _) in outlier_genres.items():
                 print(f"    {tag:<26} {total:<4}")
+    if excluded_count:
+        print(f"\n  {excluded_count} track(s) excluded (DO NOT RECOMMEND)")
     print()
     return counts, outlier_count, outlier_genres
 
@@ -201,7 +206,7 @@ async def run_playlist_mode(
     all_tracks: bool,
 ) -> None:
     tracks = parse_collection(_XML_PATH)
-    tracks = _apply_do_not_recommend_filter(tracks, _XML_PATH)
+    tracks, _ = _apply_do_not_recommend_filter(tracks, _XML_PATH)
     tracks = apply_bpm_corrections(tracks)
 
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
@@ -330,7 +335,7 @@ async def run(
 ) -> None:  # noqa: ARG001 — duration reserved
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
-    tracks = _apply_do_not_recommend_filter(tracks, _XML_PATH)
+    tracks, denylist_excluded = _apply_do_not_recommend_filter(tracks, _XML_PATH)
     tracks = apply_bpm_corrections(tracks)
 
     # 2. Fetch played tracks and filter (skipped when --all-tracks is set).
@@ -353,7 +358,9 @@ async def run(
         unplayed = list(tracks)
 
     # 3. Always print the availability table (deterministic, no LLM cost).
-    counts, outlier_count, outlier_genres = _print_availability(tracks, unplayed, show_unplayed=used_catalog_api)
+    counts, outlier_count, outlier_genres = _print_availability(
+        tracks, unplayed, show_unplayed=used_catalog_api, excluded_count=denylist_excluded
+    )
     save_genre_cache(counts, outlier_count, outlier_genres)
 
     # 4. If no genre specified, stop here — table is the output.
