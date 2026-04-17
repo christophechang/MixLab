@@ -382,11 +382,16 @@ async def run(
     export_dir: Path | None,
     stage2_provider: str | None = None,
     all_tracks: bool = False,
+    min_bpm: float | None = None,
+    max_bpm: float | None = None,
+    min_year: int | None = None,
+    max_year: int | None = None,
 ) -> None:  # noqa: ARG001 — duration reserved
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
     tracks, denylist_excluded = _apply_do_not_recommend_filter(tracks, _XML_PATH)
     tracks = apply_bpm_corrections(tracks)
+    tracks = _apply_range_filters(tracks, min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year)
 
     # 2. Fetch played tracks and filter (skipped when --all-tracks is set).
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
