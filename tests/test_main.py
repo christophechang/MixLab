@@ -8,6 +8,7 @@ import pytest
 from mixlab.__main__ import (
     _apply_do_not_recommend_filter,
     _apply_range_filters,
+    _build_filter_desc,
     _format_pipeline_counts,
     _format_report_context,
     _print_availability,
@@ -348,3 +349,32 @@ def test_main_rejects_inverted_year_range(capsys: pytest.CaptureFixture[str]) ->
 def test_validate_range_args_passes_when_valid() -> None:
     _validate_range_args(min_bpm=130.0, max_bpm=140.0, min_year=2019, max_year=2024)
     _validate_range_args(min_bpm=None, max_bpm=None, min_year=None, max_year=None)
+
+
+# ---------------------------------------------------------------------------
+# _build_filter_desc
+# ---------------------------------------------------------------------------
+
+
+def test_build_filter_desc_both_bpm_and_year() -> None:
+    assert _build_filter_desc(min_bpm=126.0, max_bpm=130.0, min_year=2001, max_year=None) == "BPM 126–130, year ≥ 2001"
+
+
+def test_build_filter_desc_bpm_only_range() -> None:
+    assert _build_filter_desc(min_bpm=126.0, max_bpm=130.0, min_year=None, max_year=None) == "BPM 126–130"
+
+
+def test_build_filter_desc_bpm_min_only() -> None:
+    assert _build_filter_desc(min_bpm=126.0, max_bpm=None, min_year=None, max_year=None) == "BPM ≥ 126"
+
+
+def test_build_filter_desc_bpm_max_only() -> None:
+    assert _build_filter_desc(min_bpm=None, max_bpm=130.0, min_year=None, max_year=None) == "BPM ≤ 130"
+
+
+def test_build_filter_desc_year_range() -> None:
+    assert _build_filter_desc(min_bpm=None, max_bpm=None, min_year=2001, max_year=2019) == "year 2001–2019"
+
+
+def test_build_filter_desc_none_when_no_filters() -> None:
+    assert _build_filter_desc(min_bpm=None, max_bpm=None, min_year=None, max_year=None) is None

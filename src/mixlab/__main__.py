@@ -380,6 +380,7 @@ async def run_playlist_mode(
         attachments=xml_attachments,
         show_unplayed=False,
         report_context=report_context,
+        filter_desc=_build_filter_desc(min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year),
     )
 
 
@@ -594,7 +595,33 @@ async def run(
         show_unplayed=used_catalog_api,
         report_context=report_context,
         excluded_count=denylist_excluded,
+        filter_desc=_build_filter_desc(min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year),
     )
+
+
+def _build_filter_desc(
+    *,
+    min_bpm: float | None,
+    max_bpm: float | None,
+    min_year: int | None,
+    max_year: int | None,
+) -> str | None:
+    parts: list[str] = []
+    if min_bpm is not None or max_bpm is not None:
+        if min_bpm is not None and max_bpm is not None:
+            parts.append(f"BPM {min_bpm:g}–{max_bpm:g}")
+        elif min_bpm is not None:
+            parts.append(f"BPM ≥ {min_bpm:g}")
+        else:
+            parts.append(f"BPM ≤ {max_bpm:g}")
+    if min_year is not None or max_year is not None:
+        if min_year is not None and max_year is not None:
+            parts.append(f"year {min_year}–{max_year}")
+        elif min_year is not None:
+            parts.append(f"year ≥ {min_year}")
+        else:
+            parts.append(f"year ≤ {max_year}")
+    return ", ".join(parts) if parts else None
 
 
 def _validate_range_args(

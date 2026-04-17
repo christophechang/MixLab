@@ -25,6 +25,11 @@ def test_format_report_snapshot_unplayed_mode() -> None:
 def test_format_report_snapshot_full_catalogue_mode() -> None:
     result = format_report("", [], {}, [], counts=_COUNTS, show_unplayed=False)
     assert "**Full Catalogue Snapshot**" in result
+
+
+def test_format_report_snapshot_full_catalogue_with_filter_desc() -> None:
+    result = format_report("", [], {}, [], counts=_COUNTS, show_unplayed=False, filter_desc="BPM 126–130, year ≥ 2001")
+    assert "**Full Catalogue Snapshot (BPM 126–130, year ≥ 2001)**" in result
     assert "200" in result
     assert "150" in result
     # Should NOT show ratio format

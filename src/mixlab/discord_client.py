@@ -35,6 +35,7 @@ def format_report(
     show_unplayed: bool = True,
     report_context: str | None = None,
     excluded_count: int = 0,
+    filter_desc: str | None = None,
 ) -> str:
     lines: list[str] = []
 
@@ -52,7 +53,10 @@ def format_report(
                 bar = "█" * filled + "░" * (20 - filled)
                 lines.append(f"  {label:<20} {available:>4} / {total:<4}  {bar}  {pct:.0%}")
         else:
-            lines.append("**Full Catalogue Snapshot**")
+            snapshot_label = (
+                f"**Full Catalogue Snapshot ({filter_desc})**" if filter_desc else "**Full Catalogue Snapshot**"
+            )
+            lines.append(snapshot_label)
             lines.append("```")
             max_total = max(t for t, _ in counts.values()) if counts else 1
             bar_width = 20
@@ -220,6 +224,7 @@ async def send_report(
     show_unplayed: bool = True,
     report_context: str | None = None,
     excluded_count: int = 0,
+    filter_desc: str | None = None,
 ) -> bool:
     client = make_discord_client()
     if client is None:
@@ -229,6 +234,15 @@ async def send_report(
         tracks_by_id = {}
 
     full_text = format_report(
-        report, concepts, tracks_by_id, outliers, skipped, counts, show_unplayed, report_context, excluded_count
+        report,
+        concepts,
+        tracks_by_id,
+        outliers,
+        skipped,
+        counts,
+        show_unplayed,
+        report_context,
+        excluded_count,
+        filter_desc,
     )
     return await client.post(full_text, attachments)
