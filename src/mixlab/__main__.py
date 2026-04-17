@@ -11,7 +11,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from mixlab.cache import load_genre_cache, save_genre_cache
-from mixlab.client import fetch_played_tracks
+from mixlab.client import fetch_mix_names, fetch_played_tracks
 from mixlab.clustering import (
     build_custom_genre_pool,
     count_available_by_genre,
@@ -266,11 +266,15 @@ async def run_playlist_mode(
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
     catalog_url = os.environ.get("CATALOG_API_URL", "")
     unplayed_ids: set[str] | None = None
+    mix_names: list[str] = []
     if all_tracks:
         print("--all-tracks set — skipping played-track weighting in playlist mode.")
     elif catalog_url:
         try:
-            played = await fetch_played_tracks(api_key, catalog_url)
+            played, mix_names = await asyncio.gather(
+                fetch_played_tracks(api_key, catalog_url),
+                fetch_mix_names(api_key, catalog_url),
+            )
         except Exception as exc:
             print(f"ERROR: Could not fetch played tracks — aborting: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -341,6 +345,7 @@ async def run_playlist_mode(
         seed_track_ids=[track_id for track_id in raw_seed_ids if track_id in tracks_by_id],
         unplayed_ids=unplayed_ids,
         intent_brief=intent_brief,
+        used_mix_names=mix_names or None,
     )
     if not all_concepts:
         print(report, file=sys.stderr)
@@ -405,12 +410,16 @@ async def run(
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
     catalog_url = os.environ.get("CATALOG_API_URL", "")
     used_catalog_api = False
+    mix_names: list[str] = []
     if all_tracks:
         print("--all-tracks set — skipping played-track filter, using full collection.")
         unplayed = list(tracks)
     elif catalog_url:
         try:
-            played = await fetch_played_tracks(api_key, catalog_url)
+            played, mix_names = await asyncio.gather(
+                fetch_played_tracks(api_key, catalog_url),
+                fetch_mix_names(api_key, catalog_url),
+            )
         except Exception as exc:
             print(f"ERROR: Could not fetch played tracks — aborting: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -543,6 +552,7 @@ async def run(
         stage2_provider,
         custom_genre_label=genre if is_custom else None,
         custom_genre_sub_genres=custom_genre_sub_genres,
+        used_mix_names=mix_names or None,
     )
     if not all_concepts:
         print(report, file=sys.stderr)

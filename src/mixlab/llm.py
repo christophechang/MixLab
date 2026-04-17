@@ -1218,6 +1218,7 @@ async def stage2_curate_and_report(
     seed_track_ids: list[str] | None = None,
     unplayed_ids: set[str] | None = None,
     intent_brief: IntentBrief | None = None,
+    used_mix_names: list[str] | None = None,
 ) -> tuple[list[MixConcept], str]:
     provider = (stage2_provider or os.environ.get("STAGE2_PROVIDER", "anthropic")).lower()
     use_minimax = provider == "minimax"
@@ -1346,6 +1347,13 @@ async def stage2_curate_and_report(
         )
 
     stage2_system = _STAGE2_SYSTEM_PLAYLIST if playlist_name is not None else _STAGE2_SYSTEM
+    if used_mix_names:
+        names_str = ", ".join(used_mix_names)
+        stage2_system = stage2_system.replace(
+            "Give each concept a compelling creative name — not the pool name from Stage 1.",
+            "Give each concept a compelling creative name — not the pool name from Stage 1. "
+            f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}.",
+        )
     raw, stage2_model_display = await _call_stage2_raw(
         prompt, stage2_system, stage2_key, use_minimax, stage2_model_display
     )
@@ -1401,7 +1409,8 @@ async def stage2_curate_and_report(
             variants = []  # suppress rejected_summary on retry path
 
         ordered_variants = (
-            [best] + sorted(
+            [best]
+            + sorted(
                 [v for v in variants if v.concept is not concept],
                 key=lambda v: _STRATEGY_PRIORITY.get(v.strategy, 99),
             )

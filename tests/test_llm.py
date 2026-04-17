@@ -83,7 +83,9 @@ async def test_stage1_skips_provider_if_key_missing(monkeypatch: pytest.MonkeyPa
 
 
 @respx.mock
-async def test_stage1_logs_provider_summary(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+async def test_stage1_logs_provider_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     from mixlab.llm import make_cascade_state, stage1_concepts
 
     monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
@@ -96,7 +98,10 @@ async def test_stage1_logs_provider_summary(monkeypatch: pytest.MonkeyPatch, cap
 
     captured = capsys.readouterr()
     assert "Stage 1 trying provider: _try_groq | genre=Drum & Bass | input=20 tracks" in captured.out
-    assert "Stage 1 provider: _try_groq | genre=Drum & Bass | input=20 tracks | parsed=2 | cleaned=2 | kept=2" in captured.out
+    assert (
+        "Stage 1 provider: _try_groq | genre=Drum & Bass | input=20 tracks | parsed=2 | cleaned=2 | kept=2"
+        in captured.out
+    )
     assert "Deep 122 BPM / 4A–7A Pool | raw=9 | kept=9 | kept" in captured.out
     assert "Liquid 124 BPM / 8A–11A Pool | raw=8 | kept=8 | kept" in captured.out
 
@@ -172,7 +177,10 @@ async def test_stage1_logs_when_all_shortlists_are_dropped(
 
     assert shortlists == []
     captured = capsys.readouterr()
-    assert "Stage 1 provider: _try_groq | genre=Drum & Bass | input=10 tracks | parsed=1 | cleaned=1 | kept=0" in captured.out
+    assert (
+        "Stage 1 provider: _try_groq | genre=Drum & Bass | input=10 tracks | parsed=1 | cleaned=1 | kept=0"
+        in captured.out
+    )
     assert "Tiny | raw=3 | kept=3 | dropped (<8)" in captured.out
 
 

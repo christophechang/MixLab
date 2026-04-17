@@ -358,6 +358,7 @@ def test_run_playlist_mode_happy_path(
         seed_track_ids: list[str] | None = None,
         unplayed_ids: set[str] | None = None,
         intent_brief: IntentBrief | None = None,
+        used_mix_names: list[str] | None = None,
     ) -> tuple[list[MixConcept], str]:
         assert playlist_name == "Monday Night"
         assert seed_ids == frozenset({"1", "2", "3", "4"})
@@ -365,6 +366,7 @@ def test_run_playlist_mode_happy_path(
         assert unplayed_ids is None
         # shortlists come from build_zone_shortlists — at least one zone
         assert len(shortlists) >= 1
+        del used_mix_names
         return ([MixConcept(title="Completed Set", mood="warm", track_ids=["1", "2", "3", "4"])], "Playlist report")
 
     async def fake_send_report(*args: object, **kwargs: object) -> bool:
@@ -444,9 +446,10 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
         seed_track_ids: list[str] | None = None,
         unplayed_ids: set[str] | None = None,
         intent_brief: IntentBrief | None = None,
+        used_mix_names: list[str] | None = None,
     ) -> tuple[list[MixConcept], str]:
         del shortlists, tracks_by_id, stage2_provider, custom_genre_label, custom_genre_sub_genres
-        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief
+        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief, used_mix_names
         return ([MixConcept(title="Completed Set", mood="warm", track_ids=["1", "2", "3", "4"])], "Playlist report")
 
     async def fake_send_report(*args: object, **kwargs: object) -> bool:
@@ -481,9 +484,10 @@ def test_run_playlist_mode_exports_all_ranked_variants(monkeypatch: pytest.Monke
         seed_track_ids: list[str] | None = None,
         unplayed_ids: set[str] | None = None,
         intent_brief: IntentBrief | None = None,
+        used_mix_names: list[str] | None = None,
     ) -> tuple[list[MixConcept], str]:
         del shortlists, tracks_by_id, stage2_provider, custom_genre_label, custom_genre_sub_genres
-        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief
+        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief, used_mix_names
         return (
             [
                 MixConcept(title="WINNER - PRACTICAL - Gravity Well", mood="practical", track_ids=["1", "2", "3", "4"]),
@@ -699,12 +703,8 @@ def test_score_candidate_opener_bonus_prefers_same_genre_and_zone_fit() -> None:
         energy=3,
     )
 
-    score_same = _score_candidate(
-        same_genre_opener, zone_seeds, 124.5, missing_roles=["opener"], is_unplayed=False
-    )
-    score_off = _score_candidate(
-        off_profile_opener, zone_seeds, 124.5, missing_roles=["opener"], is_unplayed=False
-    )
+    score_same = _score_candidate(same_genre_opener, zone_seeds, 124.5, missing_roles=["opener"], is_unplayed=False)
+    score_off = _score_candidate(off_profile_opener, zone_seeds, 124.5, missing_roles=["opener"], is_unplayed=False)
     assert score_same > score_off
 
 
