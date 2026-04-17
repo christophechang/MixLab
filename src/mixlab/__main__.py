@@ -278,6 +278,8 @@ async def run_playlist_mode(
         except Exception as exc:
             print(f"ERROR: Could not fetch played tracks — aborting: {exc}", file=sys.stderr)
             sys.exit(1)
+        if mix_names:
+            print(f"Fetched {len(mix_names)} catalogue mix name(s) — injecting into Stage 2 prompt.", flush=True)
         unplayed_ids = {track.track_id for track in filter_unplayed(tracks, played)}
 
     playlists = parse_playlists(_XML_PATH)
@@ -423,6 +425,8 @@ async def run(
         except Exception as exc:
             print(f"ERROR: Could not fetch played tracks — aborting: {exc}", file=sys.stderr)
             sys.exit(1)
+        if mix_names:
+            print(f"Fetched {len(mix_names)} catalogue mix name(s) — injecting into Stage 2 prompt.", flush=True)
         unplayed = filter_unplayed(tracks, played)
         used_catalog_api = True
     else:
