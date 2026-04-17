@@ -729,9 +729,9 @@ risk_type: one of "chapter_pivot" | "peak_impact" | "deliberate_reset" | "closer
 "cut_only" means: risky, with no mechanism that earns it — just a hard cut.
 
 Give each concept a compelling creative name — not the pool name from Stage 1. \
-Add a "name_reason" field: one short sentence (max 15 words) grounding the name in the actual tracks — \
-what specific quality of this selection (an artist, a shared sonic character, a harmonic thread, an era) \
-the name is reaching for.
+Add a "name_reason" field: one short sentence (max 15 words) stating the emotional or sonic thesis \
+of the set — what this selection is doing as a whole that the name captures. Must be verifiable \
+from the track list; do not invent.
 The track_ids must be the final selected tracks in play order.
 The "report" value must be a single string (with \\n for line breaks) in this exact format:
 
