@@ -927,13 +927,16 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
                         risk_type=str(tr.get("risk_type", "")),
                     )
                 )
+        name_reason = str(item.get("name_reason", ""))
+        if not name_reason:
+            print(f"  [debug] name_reason missing for concept '{item.get('title', '?')}'", flush=True)
         curated.append(
             MixConcept(
                 title=str(item.get("title", "")),
                 mood=str(item.get("mood", "")),
                 track_ids=track_ids,
                 transitions=transitions,
-                name_reason=str(item.get("name_reason", "")),
+                name_reason=name_reason,
             )
         )
         report_parts.append(str(item.get("report", "")))
@@ -1357,7 +1360,8 @@ async def stage2_curate_and_report(
         stage2_system = stage2_system.replace(
             "Give each concept a compelling creative name — not the pool name from Stage 1. \\",
             "Give each concept a compelling creative name — not the pool name from Stage 1. "
-            f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. \\",
+            f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. "
+            "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier (e.g. if 'Slow Burn' exists, 'Slow Burn Gospel' is forbidden). \\",
         )
     raw, stage2_model_display = await _call_stage2_raw(
         prompt, stage2_system, stage2_key, use_minimax, stage2_model_display
