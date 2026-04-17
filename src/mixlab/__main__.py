@@ -254,6 +254,10 @@ async def run_playlist_mode(
     export_dir: Path | None,
     stage2_provider: str | None,
     all_tracks: bool,
+    min_bpm: float | None = None,
+    max_bpm: float | None = None,
+    min_year: int | None = None,
+    max_year: int | None = None,
 ) -> None:
     tracks = parse_collection(_XML_PATH)
     tracks, _ = _apply_do_not_recommend_filter(tracks, _XML_PATH)
@@ -312,6 +316,9 @@ async def run_playlist_mode(
         print(f"Playlist mode genre filter '{genre}': {len(library_source)} tracks in scope.")
 
     library_tracks = [t for t in library_source if t.track_id not in seed_ids]
+    library_tracks = _apply_range_filters(
+        library_tracks, min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year
+    )
 
     try:
         shortlists = build_zone_shortlists(seed_tracks, library_tracks, unplayed_ids, all_tracks, intent_brief)
