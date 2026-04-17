@@ -712,6 +712,7 @@ useful information, not a failure.
 Your output must be a JSON array where each element has exactly this schema:
 {
   "title": "...",
+  "name_reason": "...",
   "mood": "...",
   "track_ids": ["id1", "id2", ...],
   "transitions": [
@@ -727,7 +728,10 @@ risk_type: one of "chapter_pivot" | "peak_impact" | "deliberate_reset" | "closer
            | "cut_only" | "low_tonal_risk" | "" (empty string when is_risky=false).
 "cut_only" means: risky, with no mechanism that earns it — just a hard cut.
 
-Give each concept a compelling creative name — not the pool name from Stage 1.
+Give each concept a compelling creative name — not the pool name from Stage 1. \
+Add a "name_reason" field: one short sentence (max 15 words) grounding the name in the actual tracks — \
+what specific quality of this selection (an artist, a shared sonic character, a harmonic thread, an era) \
+the name is reaching for.
 The track_ids must be the final selected tracks in play order.
 The "report" value must be a single string (with \\n for line breaks) in this exact format:
 
@@ -929,6 +933,7 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
                 mood=str(item.get("mood", "")),
                 track_ids=track_ids,
                 transitions=transitions,
+                name_reason=str(item.get("name_reason", "")),
             )
         )
         report_parts.append(str(item.get("report", "")))
@@ -1350,9 +1355,9 @@ async def stage2_curate_and_report(
     if used_mix_names:
         names_str = ", ".join(used_mix_names)
         stage2_system = stage2_system.replace(
-            "Give each concept a compelling creative name — not the pool name from Stage 1.",
+            "Give each concept a compelling creative name — not the pool name from Stage 1. \\",
             "Give each concept a compelling creative name — not the pool name from Stage 1. "
-            f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}.",
+            f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. \\",
         )
     raw, stage2_model_display = await _call_stage2_raw(
         prompt, stage2_system, stage2_key, use_minimax, stage2_model_display

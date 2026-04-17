@@ -42,6 +42,7 @@ class MixConcept(BaseModel):
     mood: str
     track_ids: list[str]
     transitions: list[Transition] = Field(default_factory=list)
+    name_reason: str = ""
 
 
 SeedTier = Literal["anchor", "supporting", "optional"]

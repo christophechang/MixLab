@@ -76,6 +76,8 @@ def format_report(
         genre = first_track.genre if first_track else "_default"
 
         lines.append(f"🎵 **{genre} · {concept.title}**")
+        if concept.name_reason:
+            lines.append(f"_{concept.name_reason}_")
         lines.append(f"_{concept.mood}_")
 
         if not report:
