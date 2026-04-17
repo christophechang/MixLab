@@ -84,6 +84,24 @@ _NO_DENYLIST_XML = textwrap.dedent("""\
     </DJ_PLAYLISTS>
 """)
 
+# PLAYLISTS section present but with a differently-named playlist — no DO NOT RECOMMEND.
+_WRONG_NAME_DENYLIST_XML = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <DJ_PLAYLISTS Version="1.0.0">
+      <COLLECTION Entries="2">
+        <TRACK TrackID="1" Name="Allowed" Artist="Artist A" AverageBpm="124.00" Tonality="8A" Genre="House"/>
+        <TRACK TrackID="2" Name="Blocked" Artist="Artist B" AverageBpm="125.00" Tonality="9A" Genre="House"/>
+      </COLLECTION>
+      <PLAYLISTS>
+        <NODE Type="0" Name="ROOT" Count="1">
+          <NODE Type="1" Name="My Favourites" KeyType="0" Entries="1">
+            <TRACK Key="2"/>
+          </NODE>
+        </NODE>
+      </PLAYLISTS>
+    </DJ_PLAYLISTS>
+""")
+
 
 def _write_xml(tmp_path: Path, content: str) -> Path:
     xml_path = tmp_path / "rekordbox.xml"
@@ -102,10 +120,10 @@ def test_apply_do_not_recommend_filter_excludes_matching_playlist_tracks(
     assert [track.track_id for track in filtered_tracks] == ["1", "4"]
     assert excluded_count == 2
     captured = capsys.readouterr()
-    assert 'DO NOT RECOMMEND filter: excluded 2 track(s) from playlist "DO NOT RECOMMEND".' in captured.err
+    assert "DO NOT RECOMMEND filter: 3 IDs in playlist, excluded 2 track(s) from collection." in captured.err
 
 
-def test_apply_do_not_recommend_filter_logs_zero_when_playlist_missing(
+def test_apply_do_not_recommend_filter_warns_when_no_playlists_section(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     xml_path = _write_xml(tmp_path, _NO_DENYLIST_XML)
@@ -116,7 +134,23 @@ def test_apply_do_not_recommend_filter_logs_zero_when_playlist_missing(
     assert [track.track_id for track in filtered_tracks] == ["1", "2"]
     assert excluded_count == 0
     captured = capsys.readouterr()
-    assert 'DO NOT RECOMMEND filter: excluded 0 track(s) from playlist "DO NOT RECOMMEND".' in captured.err
+    assert 'WARNING: "DO NOT RECOMMEND" playlist not found in XML' in captured.err
+
+
+def test_apply_do_not_recommend_filter_warns_when_playlist_absent_from_playlists_section(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Tracks must not be silently passed through when PLAYLISTS exists but DO NOT RECOMMEND is absent."""
+    xml_path = _write_xml(tmp_path, _WRONG_NAME_DENYLIST_XML)
+    tracks = parse_collection(xml_path)
+
+    filtered_tracks, excluded_count = _apply_do_not_recommend_filter(tracks, xml_path)
+
+    # Both tracks returned unchanged — no filter applied, but warning is emitted.
+    assert [track.track_id for track in filtered_tracks] == ["1", "2"]
+    assert excluded_count == 0
+    captured = capsys.readouterr()
+    assert 'WARNING: "DO NOT RECOMMEND" playlist not found in XML' in captured.err
 
 
 def test_do_not_recommend_tracks_absent_from_all_unplayed_tunes_playlist(

@@ -92,25 +92,36 @@ def _format_report_context(
     return f"Report context: {base_label} ({', '.join(details)})"
 
 
-def _load_do_not_recommend_ids(xml_path: Path) -> set[str]:
+def _load_do_not_recommend_ids(xml_path: Path) -> tuple[set[str], bool]:
+    """Return (denylist_ids, playlist_found) for the DO NOT RECOMMEND playlist."""
     playlists = parse_playlists(xml_path)
     denylist_ids: set[str] = set()
     target = _DO_NOT_RECOMMEND_PLAYLIST.casefold()
+    playlist_found = False
 
     for playlist_path, track_ids in playlists.items():
         playlist_name = playlist_path.rsplit("/", 1)[-1]
         if playlist_path.casefold() == target or playlist_name.casefold() == target:
+            playlist_found = True
             denylist_ids.update(track_id for track_id in track_ids if track_id)
 
-    return denylist_ids
+    return denylist_ids, playlist_found
 
 
 def _apply_do_not_recommend_filter(tracks: list[Track], xml_path: Path) -> tuple[list[Track], int]:
-    denylist_ids = _load_do_not_recommend_ids(xml_path)
+    denylist_ids, playlist_found = _load_do_not_recommend_ids(xml_path)
+    if not playlist_found:
+        print(
+            f'WARNING: "{_DO_NOT_RECOMMEND_PLAYLIST}" playlist not found in XML — no tracks excluded. '
+            "Create a Rekordbox playlist with this exact name to enable the denylist.",
+            file=sys.stderr,
+        )
+        return tracks, 0
     filtered_tracks = [track for track in tracks if track.track_id not in denylist_ids]
     filtered_count = len(tracks) - len(filtered_tracks)
     print(
-        f'DO NOT RECOMMEND filter: excluded {filtered_count} track(s) from playlist "{_DO_NOT_RECOMMEND_PLAYLIST}".',
+        f'DO NOT RECOMMEND filter: {len(denylist_ids)} IDs in playlist, '
+        f'excluded {filtered_count} track(s) from collection.',
         file=sys.stderr,
     )
     return filtered_tracks, filtered_count
