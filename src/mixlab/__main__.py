@@ -120,8 +120,8 @@ def _apply_do_not_recommend_filter(tracks: list[Track], xml_path: Path) -> tuple
     filtered_tracks = [track for track in tracks if track.track_id not in denylist_ids]
     filtered_count = len(tracks) - len(filtered_tracks)
     print(
-        f'DO NOT RECOMMEND filter: {len(denylist_ids)} IDs in playlist, '
-        f'excluded {filtered_count} track(s) from collection.',
+        f"DO NOT RECOMMEND filter: {len(denylist_ids)} IDs in playlist, "
+        f"excluded {filtered_count} track(s) from collection.",
         file=sys.stderr,
     )
     return filtered_tracks, filtered_count
@@ -597,6 +597,21 @@ async def run(
     )
 
 
+def _validate_range_args(
+    *,
+    min_bpm: float | None,
+    max_bpm: float | None,
+    min_year: int | None,
+    max_year: int | None,
+) -> None:
+    if min_bpm is not None and max_bpm is not None and min_bpm > max_bpm:
+        print(f"ERROR: --min-bpm ({min_bpm}) must not exceed --max-bpm ({max_bpm}).", file=sys.stderr)
+        sys.exit(1)
+    if min_year is not None and max_year is not None and min_year > max_year:
+        print(f"ERROR: --min-year ({min_year}) must not exceed --max-year ({max_year}).", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
     load_dotenv()
     parser = argparse.ArgumentParser(
@@ -669,7 +684,41 @@ examples:
         action="store_true",
         help="Use the full collection, ignoring played-track history (overrides CATALOG_API_URL)",
     )
+    parser.add_argument(
+        "--min-bpm",
+        type=float,
+        default=None,
+        metavar="BPM",
+        help="Minimum BPM (inclusive). Tracks below this value are excluded after ingestion.",
+    )
+    parser.add_argument(
+        "--max-bpm",
+        type=float,
+        default=None,
+        metavar="BPM",
+        help="Maximum BPM (inclusive). Tracks above this value are excluded after ingestion.",
+    )
+    parser.add_argument(
+        "--min-year",
+        type=int,
+        default=None,
+        metavar="YEAR",
+        help="Minimum release year (inclusive). Tracks with no year are excluded when this is set.",
+    )
+    parser.add_argument(
+        "--max-year",
+        type=int,
+        default=None,
+        metavar="YEAR",
+        help="Maximum release year (inclusive). Tracks with no year are excluded when this is set.",
+    )
     args = parser.parse_args()
+    _validate_range_args(
+        min_bpm=args.min_bpm,
+        max_bpm=args.max_bpm,
+        min_year=args.min_year,
+        max_year=args.max_year,
+    )
     if args.genres:
         _show_cached_genres()
         return
@@ -681,10 +730,34 @@ examples:
         export_dir = Path("output/playlists")
 
     if args.playlist:
-        asyncio.run(run_playlist_mode(args.playlist, args.genre, export_dir, args.stage2_provider, args.all_tracks))
+        asyncio.run(
+            run_playlist_mode(
+                args.playlist,
+                args.genre,
+                export_dir,
+                args.stage2_provider,
+                args.all_tracks,
+                min_bpm=args.min_bpm,
+                max_bpm=args.max_bpm,
+                min_year=args.min_year,
+                max_year=args.max_year,
+            )
+        )
         return
 
-    asyncio.run(run(args.genre, args.duration, export_dir, args.stage2_provider, args.all_tracks))
+    asyncio.run(
+        run(
+            args.genre,
+            args.duration,
+            export_dir,
+            args.stage2_provider,
+            args.all_tracks,
+            min_bpm=args.min_bpm,
+            max_bpm=args.max_bpm,
+            min_year=args.min_year,
+            max_year=args.max_year,
+        )
+    )
 
 
 if __name__ == "__main__":

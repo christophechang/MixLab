@@ -12,6 +12,7 @@ from mixlab.__main__ import (
     _format_report_context,
     _print_availability,
     _print_pipeline_summary,
+    _validate_range_args,
 )
 from mixlab.models import Track
 from mixlab.playlist_exporter import build_merged_xml, parse_raw_tracks
@@ -323,3 +324,27 @@ def test_print_pipeline_summary_outputs_compact_block(capsys: pytest.CaptureFixt
         "- Stage 1 shortlists: 2\n"
         "- Stage 2 shortlists sent: 2\n\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# _validate_range_args
+# ---------------------------------------------------------------------------
+
+
+def test_main_rejects_inverted_bpm_range(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        _validate_range_args(min_bpm=140.0, max_bpm=130.0, min_year=None, max_year=None)
+    assert exc_info.value.code == 1
+    assert "--min-bpm" in capsys.readouterr().err
+
+
+def test_main_rejects_inverted_year_range(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        _validate_range_args(min_bpm=None, max_bpm=None, min_year=2024, max_year=2020)
+    assert exc_info.value.code == 1
+    assert "--min-year" in capsys.readouterr().err
+
+
+def test_validate_range_args_passes_when_valid() -> None:
+    _validate_range_args(min_bpm=130.0, max_bpm=140.0, min_year=2019, max_year=2024)
+    _validate_range_args(min_bpm=None, max_bpm=None, min_year=None, max_year=None)
