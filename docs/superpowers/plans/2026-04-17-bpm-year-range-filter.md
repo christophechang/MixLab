@@ -15,7 +15,7 @@
 | File | Change |
 |------|--------|
 | `src/mixlab/__main__.py` | Add `_apply_range_filters()`, update `run()` and `run_playlist_mode()` signatures, call filter at correct sites, add 4 argparse args + validation to `main()` |
-| `tests/test_main.py` | Add 9 new tests covering the helper, validation, and playlist-mode integration |
+| `tests/test_main.py` | Add 11 new tests covering the helper, validation, and playlist-mode integration |
 
 ---
 
@@ -54,7 +54,7 @@ def test_apply_range_filters_bpm_inclusive(capsys: pytest.CaptureFixture[str]) -
     tracks = [_make_track("1", 130.0), _make_track("2", 135.0), _make_track("3", 140.0), _make_track("4", 145.0)]
     result = _apply_range_filters(tracks, min_bpm=135.0, max_bpm=140.0, min_year=None, max_year=None)
     assert [t.track_id for t in result] == ["2", "3"]
-    assert "BPM filter [135.0–140.0]" in capsys.readouterr().err
+    assert "BPM filter [135–140]" in capsys.readouterr().err
 
 
 def test_apply_range_filters_bpm_no_op_when_omitted(capsys: pytest.CaptureFixture[str]) -> None:
@@ -89,8 +89,22 @@ def test_apply_range_filters_logs_format_to_stderr(capsys: pytest.CaptureFixture
     tracks = [_make_track("1", 130.0, year=2018), _make_track("2", 135.0, year=2022)]
     _apply_range_filters(tracks, min_bpm=135.0, max_bpm=140.0, min_year=2020, max_year=None)
     err = capsys.readouterr().err
-    assert "BPM filter [135.0–140.0]: excluded 1 track(s), 1 remain." in err
+    assert "BPM filter [135–140]: excluded 1 track(s), 1 remain." in err
     assert "Year filter [2020–]: excluded 0 track(s), 1 remain." in err
+
+
+def test_apply_range_filters_bpm_max_only(capsys: pytest.CaptureFixture[str]) -> None:
+    tracks = [_make_track("1", 120.0), _make_track("2", 130.0), _make_track("3", 140.0)]
+    result = _apply_range_filters(tracks, min_bpm=None, max_bpm=130.0, min_year=None, max_year=None)
+    assert [t.track_id for t in result] == ["1", "2"]
+    assert "BPM filter [–130]" in capsys.readouterr().err
+
+
+def test_apply_range_filters_year_max_only(capsys: pytest.CaptureFixture[str]) -> None:
+    tracks = [_make_track("1", 130.0, year=2018), _make_track("2", 130.0, year=2022)]
+    result = _apply_range_filters(tracks, min_bpm=None, max_bpm=None, min_year=None, max_year=2019)
+    assert [t.track_id for t in result] == ["1"]
+    assert "Year filter [–2019]" in capsys.readouterr().err
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -120,8 +134,8 @@ def _apply_range_filters(
         lo: float = min_bpm if min_bpm is not None else float("-inf")
         hi: float = max_bpm if max_bpm is not None else float("inf")
         result = [t for t in result if lo <= t.bpm <= hi]
-        lo_str = str(min_bpm) if min_bpm is not None else ""
-        hi_str = str(max_bpm) if max_bpm is not None else ""
+        lo_str = f"{min_bpm:g}" if min_bpm is not None else ""
+        hi_str = f"{max_bpm:g}" if max_bpm is not None else ""
         print(
             f"BPM filter [{lo_str}–{hi_str}]: excluded {before - len(result)} track(s), {len(result)} remain.",
             file=sys.stderr,
@@ -151,7 +165,7 @@ def _apply_range_filters(
 .venv/bin/python -m pytest tests/test_main.py -k "apply_range_filters" -v
 ```
 
-Expected: 6 PASSED.
+Expected: 8 PASSED.
 
 - [ ] **Step 5: Commit**
 
