@@ -7,11 +7,13 @@ import pytest
 
 from mixlab.__main__ import (
     _apply_do_not_recommend_filter,
+    _apply_range_filters,
     _format_pipeline_counts,
     _format_report_context,
     _print_availability,
     _print_pipeline_summary,
 )
+from mixlab.models import Track
 from mixlab.playlist_exporter import build_merged_xml, parse_raw_tracks
 from mixlab.reader import parse_collection
 
@@ -180,6 +182,99 @@ def test_do_not_recommend_tracks_absent_from_all_unplayed_tunes_playlist(
 
 def test_format_pipeline_counts_returns_compact_list() -> None:
     assert _format_pipeline_counts({"Electronica": 84, "Downtempo": 17}) == "Electronica=84, Downtempo=17"
+
+
+# ---------------------------------------------------------------------------
+# _apply_range_filters
+# ---------------------------------------------------------------------------
+
+
+def _make_track(
+    track_id: str,
+    bpm: float,
+    year: int | None = 2020,
+) -> Track:
+    return Track(
+        track_id=track_id,
+        artist="Artist",
+        title="Title",
+        bpm=bpm,
+        camelot_key="8A",
+        genre="House",
+        year=year,
+    )
+
+
+def test_apply_range_filters_bpm_inclusive(capsys: pytest.CaptureFixture[str]) -> None:
+    tracks = [_make_track("1", 130.0), _make_track("2", 135.0), _make_track("3", 140.0), _make_track("4", 145.0)]
+    result = _apply_range_filters(tracks, min_bpm=135.0, max_bpm=140.0, min_year=None, max_year=None)
+    assert [t.track_id for t in result] == ["2", "3"]
+    assert "BPM filter [135–140]" in capsys.readouterr().err
+
+
+def test_apply_range_filters_bpm_no_op_when_omitted(capsys: pytest.CaptureFixture[str]) -> None:
+    tracks = [_make_track("1", 120.0), _make_track("2", 200.0)]
+    result = _apply_range_filters(tracks, min_bpm=None, max_bpm=None, min_year=None, max_year=None)
+    assert [t.track_id for t in result] == ["1", "2"]
+    assert "BPM filter" not in capsys.readouterr().err
+
+
+def test_apply_range_filters_bpm_max_only(capsys: pytest.CaptureFixture[str]) -> None:
+    tracks = [_make_track("1", 120.0), _make_track("2", 130.0), _make_track("3", 140.0)]
+    result = _apply_range_filters(tracks, min_bpm=None, max_bpm=130.0, min_year=None, max_year=None)
+    assert [t.track_id for t in result] == ["1", "2"]
+    assert "BPM filter [–130]" in capsys.readouterr().err
+
+
+def test_apply_range_filters_year_excludes_none_year(capsys: pytest.CaptureFixture[str]) -> None:
+    tracks = [_make_track("1", 130.0, year=2021), _make_track("2", 130.0, year=None)]
+    result = _apply_range_filters(tracks, min_bpm=None, max_bpm=None, min_year=2020, max_year=None)
+    assert [t.track_id for t in result] == ["1"]
+    assert "Year filter" in capsys.readouterr().err
+
+
+def test_apply_range_filters_year_excludes_zero_year(capsys: pytest.CaptureFixture[str]) -> None:
+    tracks = [_make_track("1", 130.0, year=2021), _make_track("2", 130.0, year=0)]
+    result = _apply_range_filters(tracks, min_bpm=None, max_bpm=None, min_year=2020, max_year=None)
+    assert [t.track_id for t in result] == ["1"]
+    assert "Year filter" in capsys.readouterr().err
+
+
+def test_apply_range_filters_year_no_op_when_omitted(capsys: pytest.CaptureFixture[str]) -> None:
+    tracks = [_make_track("1", 130.0, year=None), _make_track("2", 130.0, year=0), _make_track("3", 130.0, year=2022)]
+    result = _apply_range_filters(tracks, min_bpm=None, max_bpm=None, min_year=None, max_year=None)
+    assert [t.track_id for t in result] == ["1", "2", "3"]
+    assert "Year filter" not in capsys.readouterr().err
+
+
+def test_apply_range_filters_year_max_only(capsys: pytest.CaptureFixture[str]) -> None:
+    tracks = [_make_track("1", 130.0, year=2018), _make_track("2", 130.0, year=2022)]
+    result = _apply_range_filters(tracks, min_bpm=None, max_bpm=None, min_year=None, max_year=2019)
+    assert [t.track_id for t in result] == ["1"]
+    assert "Year filter [–2019]" in capsys.readouterr().err
+
+
+def test_apply_range_filters_logs_format_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    tracks = [_make_track("1", 130.0, year=2018), _make_track("2", 135.0, year=2022)]
+    _apply_range_filters(tracks, min_bpm=135.0, max_bpm=140.0, min_year=2020, max_year=None)
+    err = capsys.readouterr().err
+    assert "BPM filter [135–140]: excluded 1 track(s), 1 remain." in err
+    assert "Year filter [2020–]: excluded 0 track(s), 1 remain." in err
+
+
+def test_range_filter_preserves_out_of_range_seeds_excludes_library() -> None:
+    seed_tracks = [_make_track("seed1", 120.0, year=2015)]
+    all_tracks = seed_tracks + [
+        _make_track("lib1", 135.0, year=2022),
+        _make_track("lib2", 150.0, year=2022),
+    ]
+    seed_ids = frozenset(t.track_id for t in seed_tracks)
+    library_tracks = [t for t in all_tracks if t.track_id not in seed_ids]
+
+    filtered_library = _apply_range_filters(library_tracks, min_bpm=130.0, max_bpm=140.0, min_year=None, max_year=None)
+
+    assert [t.track_id for t in seed_tracks] == ["seed1"]
+    assert [t.track_id for t in filtered_library] == ["lib1"]
 
 
 def test_format_pipeline_counts_returns_none_for_empty_dict() -> None:

@@ -127,6 +127,45 @@ def _apply_do_not_recommend_filter(tracks: list[Track], xml_path: Path) -> tuple
     return filtered_tracks, filtered_count
 
 
+def _apply_range_filters(
+    tracks: list[Track],
+    *,
+    min_bpm: float | None,
+    max_bpm: float | None,
+    min_year: int | None,
+    max_year: int | None,
+) -> list[Track]:
+    result = tracks
+    if min_bpm is not None or max_bpm is not None:
+        before = len(result)
+        lo: float = min_bpm if min_bpm is not None else float("-inf")
+        hi: float = max_bpm if max_bpm is not None else float("inf")
+        result = [t for t in result if lo <= t.bpm <= hi]
+        lo_str = f"{min_bpm:g}" if min_bpm is not None else ""
+        hi_str = f"{max_bpm:g}" if max_bpm is not None else ""
+        print(
+            f"BPM filter [{lo_str}–{hi_str}]: excluded {before - len(result)} track(s), {len(result)} remain.",
+            file=sys.stderr,
+        )
+    if min_year is not None or max_year is not None:
+        before = len(result)
+        result = [
+            t
+            for t in result
+            if t.year is not None
+            and t.year != 0
+            and (min_year is None or t.year >= min_year)
+            and (max_year is None or t.year <= max_year)
+        ]
+        lo_year = str(min_year) if min_year is not None else ""
+        hi_year = str(max_year) if max_year is not None else ""
+        print(
+            f"Year filter [{lo_year}–{hi_year}]: excluded {before - len(result)} track(s), {len(result)} remain.",
+            file=sys.stderr,
+        )
+    return result
+
+
 def _format_pipeline_counts(counts: dict[str, int]) -> str:
     return ", ".join(f"{label}={count}" for label, count in counts.items()) if counts else "none"
 
