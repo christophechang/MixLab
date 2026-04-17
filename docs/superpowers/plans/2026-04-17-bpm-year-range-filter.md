@@ -15,7 +15,7 @@
 | File | Change |
 |------|--------|
 | `src/mixlab/__main__.py` | Add `_apply_range_filters()`, update `run()` and `run_playlist_mode()` signatures, call filter at correct sites, add 4 argparse args + validation to `main()` |
-| `tests/test_main.py` | Add 8 new tests covering the helper, validation, and playlist-mode integration |
+| `tests/test_main.py` | Add 9 new tests covering the helper, validation, and playlist-mode integration |
 
 ---
 
@@ -71,10 +71,17 @@ def test_apply_range_filters_year_excludes_none_year(capsys: pytest.CaptureFixtu
     assert "Year filter" in capsys.readouterr().err
 
 
+def test_apply_range_filters_year_excludes_zero_year(capsys: pytest.CaptureFixture[str]) -> None:
+    tracks = [_make_track("1", 130.0, year=2021), _make_track("2", 130.0, year=0)]
+    result = _apply_range_filters(tracks, min_bpm=None, max_bpm=None, min_year=2020, max_year=None)
+    assert [t.track_id for t in result] == ["1"]
+    assert "Year filter" in capsys.readouterr().err
+
+
 def test_apply_range_filters_year_no_op_when_omitted(capsys: pytest.CaptureFixture[str]) -> None:
-    tracks = [_make_track("1", 130.0, year=None), _make_track("2", 130.0, year=2022)]
+    tracks = [_make_track("1", 130.0, year=None), _make_track("2", 130.0, year=0), _make_track("3", 130.0, year=2022)]
     result = _apply_range_filters(tracks, min_bpm=None, max_bpm=None, min_year=None, max_year=None)
-    assert [t.track_id for t in result] == ["1", "2"]
+    assert [t.track_id for t in result] == ["1", "2", "3"]
     assert "Year filter" not in capsys.readouterr().err
 
 
@@ -125,6 +132,7 @@ def _apply_range_filters(
             t
             for t in result
             if t.year is not None
+            and t.year != 0
             and (min_year is None or t.year >= min_year)
             and (max_year is None or t.year <= max_year)
         ]
@@ -143,7 +151,7 @@ def _apply_range_filters(
 .venv/bin/python -m pytest tests/test_main.py -k "apply_range_filters" -v
 ```
 
-Expected: 5 PASSED.
+Expected: 6 PASSED.
 
 - [ ] **Step 5: Commit**
 

@@ -23,7 +23,7 @@ All four flags are optional and independent. Any combination is valid.
 ## Filter Behaviour
 
 - **BPM:** inclusive on both ends. A track with `bpm=135` passes `--min-bpm 135 --max-bpm 140`.
-- **Year:** inclusive on both ends. Tracks with `year=None` are excluded when any year filter is active.
+- **Year:** inclusive on both ends. Tracks with `year=None` or `year=0` are treated as unknown year and excluded when any year filter is active. When no year filter is set these tracks pass through unchanged.
 - **No-op when omitted:** if neither min nor max is specified for an axis, no filtering is applied and no log line is emitted for that axis.
 - Filters are applied **after** `apply_bpm_corrections` so half-time DnB BPMs are corrected before the range check.
 
@@ -76,6 +76,7 @@ Values are passed down into `run()` and `run_playlist_mode()` as additional keyw
 - `test_apply_range_filters_bpm_inclusive` — edges included, out-of-range excluded.
 - `test_apply_range_filters_bpm_no_op_when_omitted` — all tracks pass when neither bound given.
 - `test_apply_range_filters_year_excludes_none_year` — `year=None` tracks excluded when year filter active.
+- `test_apply_range_filters_year_excludes_zero_year` — `year=0` tracks excluded when year filter active (treated as unknown).
 - `test_apply_range_filters_year_no_op_when_omitted` — `year=None` tracks pass when no year filter.
 - `test_apply_range_filters_logs_to_stderr` — stderr output matches expected format.
 
