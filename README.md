@@ -39,11 +39,20 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY + at least one Stage 1 key
 
 ---
 
+## What's new in v0.3.0
+
+- **Stage 1 track ID aliasing.** Stage 1 prompts now use short positional aliases (`T001`, `T002`, …) instead of raw track IDs. Hallucinated IDs are structurally impossible — the model can only return aliases that were handed to it — and the real IDs are remapped after parsing.
+- **DO NOT RECOMMEND playlist exclusion.** Tracks in a Rekordbox playlist named `DO NOT RECOMMEND` are silently excluded from every run. The crate snapshot shows how many were excluded, and a warning fires if the playlist is missing from the XML.
+- **BPM and year range filters.** Four new CLI flags — `--min-bpm`, `--max-bpm`, `--min-year`, `--max-year` — narrow the candidate pool before Stage 1. In playlist mode, filters apply only to library additions and never touch seed tracks. Active filters appear in the Discord crate snapshot label.
+- **Catalogue name deduplication.** Stage 2 now receives a list of existing mix names from the catalogue and avoids repeating words, tropes, or phrasing from them. Each concept also carries a `name_reason` field — a one-sentence justification tying the name to the set's thesis rather than individual tracks.
+
 ## What's new in v0.2.0
 
-- **BPM and year range filters.** Four new CLI flags — `--min-bpm`, `--max-bpm`, `--min-year`, `--max-year` — narrow the candidate pool before Stage 1. In playlist mode, filters apply only to library additions and never touch seed tracks. Active filters appear in the Discord crate snapshot label.
-- **DO NOT RECOMMEND playlist exclusion.** Tracks in a Rekordbox playlist named `DO NOT RECOMMEND` are silently excluded from every run. The crate snapshot shows how many tracks were excluded, and a warning fires if the playlist is missing from the XML.
-- **Catalogue name deduplication.** Stage 2 now receives a list of existing mix names from the catalogue and avoids repeating words, tropes, or phrasing from them. Each concept also carries a `name_reason` field — a one-sentence justification tying the name to the set's thesis rather than individual tracks.
+- **Playlist completion mode.** Pass `--playlist "My Playlist"` to use an existing Rekordbox playlist as the seed. MixLab infers the set's intent, clusters seed tracks into natural BPM zones, and completes the set rather than replacing it.
+- **Stage 0 intent analysis.** Before shortlisting, MixLab runs an intent-analysis pass over the seed playlist — extracting the overall vibe, energy shape, and anchor tracks using the same free-provider cascade as Stage 1 (with a deterministic fallback).
+- **Three completion variants.** Stage 2 generates `practical`, `balanced`, and `adventurous` variants and auto-selects the strongest based on a DJ practicality score. The report names the rejected alternatives and explains why.
+- **Anchor-aware seed retention.** Anchor tracks (the tracks that define the set's identity) are always kept. The retention floor is enforced: 75% of anchors and 40% of supporting tracks must survive into the final concept.
+- **Transition analysis.** Each track-to-track move is scored and flagged — risky transitions (chapter pivots, deliberate resets) are named and justified in the report.
 
 ---
 
