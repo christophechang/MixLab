@@ -393,7 +393,6 @@ async def run_playlist_mode(
 
 async def run(
     genre: str | None,
-    duration: int | None,
     export_dir: Path | None,
     stage2_provider: str | None = None,
     all_tracks: bool = False,
@@ -401,7 +400,7 @@ async def run(
     max_bpm: float | None = None,
     min_year: int | None = None,
     max_year: int | None = None,
-) -> None:  # noqa: ARG001 — duration reserved
+) -> None:
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
     tracks, denylist_excluded = _apply_do_not_recommend_filter(tracks, _XML_PATH)
@@ -679,6 +678,8 @@ examples:
   mixlab --playlist "Monday Night" --genre electronica  keep added tracks within electronica
   mixlab --playlist "Sets/Monday Night"  use full folder path if name is ambiguous
   mixlab --genre 4x4 --all-tracks     cross-genre 4x4 set from full collection
+  mixlab --genre house --min-bpm 122 --max-bpm 128  narrow pool by BPM range
+  mixlab --genre drum_and_bass --min-year 2020       tracks from 2020 onwards only
   mixlab --genres                     show cached counts from last run (no API)
 """,
     )
@@ -699,7 +700,6 @@ examples:
         metavar="NAME",
         help="Rekordbox playlist name (or folder/name path) to use as seed for a single playlist-completion concept.",
     )
-    parser.add_argument("--duration", type=int, default=None, help="Target set duration in minutes (reserved)")
     parser.add_argument("--genres", action="store_true", help="Show genre availability from last run (no API calls)")
     parser.add_argument(
         "--export",
@@ -789,7 +789,6 @@ examples:
     asyncio.run(
         run(
             args.genre,
-            args.duration,
             export_dir,
             args.stage2_provider,
             args.all_tracks,
