@@ -17,7 +17,7 @@ For background on why this was built and how it works in practice, read the [Mix
 ## Quickstart
 
 ```bash
-git clone <repo-url> && cd MixLab
+git clone https://github.com/christophechang/MixLab.git && cd MixLab
 ./setup.sh
 cp .env.example .env   # fill in ANTHROPIC_API_KEY + at least one Stage 1 key
 
@@ -46,6 +46,8 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY + at least one Stage 1 key
 - **BPM and year range filters.** Four new CLI flags — `--min-bpm`, `--max-bpm`, `--min-year`, `--max-year` — narrow the candidate pool before Stage 1. In playlist mode, filters apply only to library additions and never touch seed tracks. Active filters appear in the Discord crate snapshot label.
 - **Catalogue name deduplication.** Stage 2 now receives a list of existing mix names from the catalogue and avoids repeating words, tropes, or phrasing from them. Each concept also carries a `name_reason` field — a one-sentence justification tying the name to the set's thesis rather than individual tracks.
 
+---
+
 ## What's new in v0.2.0
 
 - **Playlist completion mode.** Pass `--playlist "My Playlist"` to use an existing Rekordbox playlist as the seed. MixLab infers the set's intent, clusters seed tracks into natural BPM zones, and completes the set rather than replacing it.
@@ -72,7 +74,7 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY + at least one Stage 1 key
 ### 1. Clone and run setup
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/christophechang/MixLab.git
 cd MixLab
 ./setup.sh
 ```
@@ -395,7 +397,7 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
   **Groq → Gemini → Mistral → MiniMax**
 - **Standard genres:** clusters larger than 40 tracks are chunked; each chunk is called independently and concepts merged
 - **Custom genres:** a random 120-track window is selected from the BPM-sorted pool each run (see [Why random selection?](#why-random-selection)); 60 tracks per call, 2 calls maximum; shortlist target is 20–25 tracks per concept (vs 15–25 for standard)
-- Concepts with fewer than 4 valid track IDs (after stripping hallucinated IDs) are discarded
+- Track IDs are aliased to short positional keys (`T001`, `T002`, …) in the prompt; hallucinated IDs are structurally impossible and concepts with fewer than 4 resolvable aliases are discarded
 - Up to 6 concepts are forwarded to Stage 2, randomly sampled from the top 12 by pool size to ensure variety across runs
 
 ### LLM Stage 2 — report generation
@@ -460,6 +462,7 @@ MixLab/
 │   ├── matcher.py         # Fuzzy played-track exclusion
 │   ├── clustering.py      # Genre grouping, BPM filtering, Camelot sort
 │   ├── llm.py             # Stage 1 provider cascade + Stage 2 Anthropic report
+│   ├── playlist_exporter.py # Rekordbox playlist XML export
 │   ├── discord_client.py  # Discord delivery and report formatting
 │   ├── cache.py           # Genre availability cache (.mixlab_genres.json)
 │   ├── config.py          # GENRE_MAP, IGNORED_GENRES, TRACK_COUNT_TARGETS
