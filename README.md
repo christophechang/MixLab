@@ -1,8 +1,29 @@
 # MixLab
 
+[![GitHub release](https://img.shields.io/github/v/release/christophechang/MixLab)](https://github.com/christophechang/MixLab/releases)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+> **Point it at your collection. Get a set worth playing.**
+
 AI-powered DJ crate assistant. Point it at your Rekordbox collection, pick a genre, and get a set of ready-to-use mix concepts with Camelot-ordered track listings — delivered to Discord.
 
+<!-- demo screenshot or terminal recording goes here -->
+
 For background on why this was built and how it works in practice, read the [MixLab case study](https://www.soltechconsulting.co.uk/case-studies/mixlab).
+
+---
+
+## Quickstart
+
+```bash
+git clone <repo-url> && cd MixLab
+./setup.sh
+cp .env.example .env   # fill in ANTHROPIC_API_KEY + at least one Stage 1 key
+
+./mixlab               # crate availability table — no LLM cost
+./mixlab --genre house # full mix report, delivered to Discord
+```
 
 ---
 
@@ -12,9 +33,17 @@ For background on why this was built and how it works in practice, read the [Mix
 2. If `CATALOG_API_URL` is set, fetches your play history and filters out already-played tracks; otherwise uses the full collection
 3. Prints a crate availability table (no LLM cost)
 4. If `--genre` is specified, scopes the collection to that genre (or custom cross-genre pool), runs Stage 1 shortlisting, then writes a full Stage 2 mix planning report
-5. If `--playlist` is specified, uses that Rekordbox playlist as the seed, infers the set's intent, builds natural BPM-zone shortlists around the seed tracks, generates conservative and bold completion variants, then writes the best playlist-completion report
+5. If `--playlist` is specified, uses that Rekordbox playlist as the seed, infers the set's intent, builds natural BPM-zone shortlists around the seed tracks, generates three completion variants, then writes the best playlist-completion report
 6. Optionally exports a Rekordbox-compatible merged XML file
 7. Sends the report and any XML attachment to a Discord channel
+
+---
+
+## What's new in v0.2.0
+
+- **BPM and year range filters.** Four new CLI flags — `--min-bpm`, `--max-bpm`, `--min-year`, `--max-year` — narrow the candidate pool before Stage 1. In playlist mode, filters apply only to library additions and never touch seed tracks. Active filters appear in the Discord crate snapshot label.
+- **DO NOT RECOMMEND playlist exclusion.** Tracks in a Rekordbox playlist named `DO NOT RECOMMEND` are silently excluded from every run. The crate snapshot shows how many tracks were excluded, and a warning fires if the playlist is missing from the XML.
+- **Catalogue name deduplication.** Stage 2 now receives a list of existing mix names from the catalogue and avoids repeating words, tropes, or phrasing from them. Each concept also carries a `name_reason` field — a one-sentence justification tying the name to the set's thesis rather than individual tracks.
 
 ---
 
@@ -208,7 +237,7 @@ Playlist mode is a different workflow from genre mode:
 - MixLab first runs an intent-analysis pass over the seed playlist to infer the overall vibe, energy shape, anchor tracks, and any missing set roles
 - Seed tracks are clustered into natural BPM zones
 - Each zone becomes a shortlist containing the seed tracks for that zone plus nearby library tracks
-- Stage 2 generates exactly two completion variants (`conservative` and `bold`) and MixLab auto-selects the stronger one
+- Stage 2 generates exactly three completion variants (`practical`, `balanced`, and `adventurous`) and MixLab auto-selects the strongest one
 - The final report explains which seed tracks were retained, which were dropped, which library tracks were added, and which alternative strategy was rejected
 
 Important playlist-mode rules:
@@ -242,6 +271,17 @@ To also write the XML to disk:
 ./mixlab --genre house --export /path/to/dir
 # writes to /path/to/dir/rekordbox_export.xml
 ```
+
+### Narrow the candidate pool by BPM or year
+
+```bash
+./mixlab --genre house --min-bpm 122 --max-bpm 128
+./mixlab --genre drum_and_bass --min-year 2020
+./mixlab --genre 4x4 --max-year 2019
+./mixlab --playlist "Monday Night" --min-bpm 130 --max-bpm 138
+```
+
+BPM and year filters apply after ingestion and BPM correction. In playlist mode they apply only to library additions — seed tracks are never filtered out. Tracks with no release year set are excluded when either year flag is active. Active filters appear in the Discord crate snapshot label.
 
 ### View cached genre counts from the last run (no API calls at all)
 
@@ -316,6 +356,7 @@ Run the same custom genre multiple times. Each run will focus on a different cor
 - Source: `import/rekordbox.xml` — read fresh on every run, never cached
 - Tracks missing BPM or Camelot key are excluded with a warning printed to stderr
 - SoundCloud tracks (Location starting with `file://localhostsoundcloud`) are excluded silently
+- Tracks in a Rekordbox playlist named `DO NOT RECOMMEND` are excluded from every run; the crate snapshot shows how many were excluded, and a warning fires if the playlist is missing from the XML
 - If `CATALOG_API_URL` is set, tracks in your catalog play history are excluded — fuzzy-matched on artist + title with unicode normalisation, dash normalisation, and feat. stripping; otherwise all tracks are treated as unplayed
 
 ### BPM correction
@@ -354,7 +395,8 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 - `--stage2-provider minimax` switches Stage 2 to MiniMax M2.7 explicitly
 - If the default Anthropic Stage 2 path fails mid-run, MixLab can fall back to MiniMax M2.7 when that key is available
 - Writes a peer-to-peer mix planning narrative with track listings in Camelot order and notes on transitions
-- Playlist mode writes a single playlist-completion report rather than multiple concepts
+- If the catalog API returns existing mix names, Stage 2 is instructed to avoid reusing any words, tropes, or phrasing from them; each concept also includes a `name_reason` tying the name to the set's thesis
+- Playlist mode generates three variants (`practical`, `balanced`, `adventurous`) and auto-selects the strongest; seed retention is enforced with a floor of 75% of anchor tracks and 40% of supporting tracks
 - Appends shortfall warnings for concepts significantly below the recommended track count for their genre
 - Appends the active report context and elapsed generation time to the final output
 
@@ -419,3 +461,9 @@ MixLab/
 ├── pyproject.toml
 └── .env.example
 ```
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
