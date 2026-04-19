@@ -411,6 +411,7 @@ async def _call_anthropic_http(
     headers = {
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
+        "anthropic-beta": "output-128k-2025-02-19",
         "Content-Type": "application/json",
     }
     payload = {
