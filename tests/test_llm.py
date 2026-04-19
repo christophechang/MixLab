@@ -1455,3 +1455,10 @@ def test_parse_curated_concepts_unmatched_transition_ids_stored_as_is() -> None:
     # stored verbatim — scorer ignores them when looking up consecutive pairs
     assert len(concepts[0].transitions) == 1
     assert concepts[0].transitions[0].from_id == "99"
+
+
+def test_stage2_playlist_system_caps_tracks_at_twelve() -> None:
+    from mixlab.llm import _STAGE2_SYSTEM_PLAYLIST
+
+    assert "12–18 tracks" not in _STAGE2_SYSTEM_PLAYLIST
+    assert "10–12 tracks" in _STAGE2_SYSTEM_PLAYLIST

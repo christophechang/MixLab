@@ -771,8 +771,13 @@ Weakness is practical: a track whose intro gives no workable mix point, a vocal 
 no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment \
 used so early it makes everything after feel like a comedown.""",
     """For playlist-completion runs:
-- RETAIN as many [seed] tracks as possible. The default is to keep a seed track unless it clearly breaks tempo flow, harmonic logic, blendability, or the set's narrative.
-- SELECT a coherent final tracklist from the pool. Prefer roughly 12–18 tracks when the material supports it, and allow a longer list when needed to preserve a strong seed-led arc. Exclude only tracks that genuinely weaken the journey. Weakness is practical: a track whose intro gives no workable mix point, a vocal that starts on bar one with no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment used so early it makes everything after feel like a comedown.""",
+- RETAIN as many [seed] tracks as possible. The default is to keep a seed track unless it clearly breaks tempo \
+flow, harmonic logic, blendability, or the set's narrative.
+- SELECT a coherent final tracklist from the pool. Prefer 10–12 tracks. Do not exceed 12 tracks unless dropping \
+a 13th would break an anchor adjacency pair — in that case, include it and note the exception. Exclude tracks \
+that genuinely weaken the journey. Weakness is practical: a track whose intro gives no workable mix point, a \
+vocal that starts on bar one with no room to bring it in, a bass-heavy record dropped after another with no \
+frequency relief, a big moment used so early it makes everything after feel like a comedown.""",
 ).replace(
     """Produce as many concepts as the pool genuinely supports — between 3 and 6. If the pool only yields 4 \
 strong concepts, produce 4. Do not pad with weak concepts to hit a number. If the pool is too thin to \
