@@ -39,6 +39,12 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY + at least one Stage 1 key
 
 ---
 
+## What's new in v0.3.1
+
+- **Export unplayed collection.** `--export-unplayed` compares your full Rekordbox collection against your play history and exports every unplayed track as a dated Rekordbox-compatible XML file, ready to import and browse in Rekordbox. Posts the XML attachment to Discord. No LLM calls.
+
+---
+
 ## What's new in v0.3.0
 
 - **Stage 1 track ID aliasing.** Stage 1 prompts now use short positional aliases (`T001`, `T002`, …) instead of raw track IDs. Hallucinated IDs are structurally impossible — the model can only return aliases that were handed to it — and the real IDs are remapped after parsing.
