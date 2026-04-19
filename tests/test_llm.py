@@ -34,14 +34,19 @@ def _shortlist_payload() -> str:
 
 
 def _curated_payload() -> str:
-    """Stage 2 response — curated concepts with embedded report."""
+    """Stage 2 selection-only response — no report field."""
     return json.dumps(
         [
             {
                 "title": "Dark Rollers",
+                "name_reason": "Relentless drive from open to close.",
                 "mood": "heavy and relentless",
                 "track_ids": ["1", "2", "3", "4"],
-                "report": "CONCEPT: Dark Rollers\n\nA relentless journey.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 174.0] | Role: opener | Why: sets dark tone | Risk: none",
+                "transitions": [
+                    {"from_id": "1", "to_id": "2", "is_risky": False, "risk_type": ""},
+                    {"from_id": "2", "to_id": "3", "is_risky": False, "risk_type": ""},
+                    {"from_id": "3", "to_id": "4", "is_risky": False, "risk_type": ""},
+                ],
             }
         ]
     )
@@ -51,8 +56,11 @@ def _chat_response() -> dict[str, object]:
     return {"choices": [{"message": {"content": _shortlist_payload()}}]}
 
 
+_REPORT_TEXT = "CONCEPT: Dark Rollers\n\nA relentless journey.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 174.0] | Role: opener | Why: sets dark tone | Risk: none"
+
+
 def _anthropic_response(content: str) -> dict[str, object]:
-    return {"content": [{"text": content}]}
+    return {"content": [{"text": content}], "stop_reason": "end_turn"}
 
 
 def _make_tracks(n: int, genre: str = "Drum & Bass") -> list[Track]:
@@ -212,7 +220,12 @@ async def test_stage2_returns_curated_concepts_and_report(monkeypatch: pytest.Mo
     from mixlab.llm import stage2_curate_and_report
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
 
     shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
     tracks_by_id = {
@@ -240,13 +253,19 @@ async def test_stage2_strips_hallucinated_ids(monkeypatch: pytest.MonkeyPatch) -
         [
             {
                 "title": "T",
+                "name_reason": "n/a",
                 "mood": "m",
                 "track_ids": ["1", "2", "3", "4", "999"],
-                "report": "CONCEPT: T\n\nBrief.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 120.0] | Role: opener | Why: sets tone | Risk: none",
+                "transitions": [],
             }
         ]
     )
-    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(payload)))
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(payload)),
+            Response(200, json=_anthropic_response("CONCEPT: T\n\nBrief.")),
+        ]
+    )
 
     shortlists = [MixConcept(title="Pool", mood="m", track_ids=["1", "2", "3", "4"])]
     tracks_by_id = {
@@ -273,32 +292,6 @@ async def test_stage2_raises_loudly_on_failure(monkeypatch: pytest.MonkeyPatch) 
         await stage2_curate_and_report(shortlists, tracks_by_id)
 
 
-@respx.mock
-async def test_stage2_falls_back_to_minimax_on_anthropic_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mixlab.llm import stage2_curate_and_report
-
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "bad-key")
-    monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-key")
-    respx.post(_ANTHROPIC_URL).mock(return_value=Response(402, json={"error": "credit_limit"}))
-    respx.post(_MINIMAX_URL).mock(
-        return_value=Response(200, json={"choices": [{"message": {"content": _curated_payload()}}]})
-    )
-
-    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
-    tracks_by_id = {
-        str(i): Track(
-            track_id=str(i), artist=f"Artist {i}", title=f"Title {i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass"
-        )
-        for i in range(1, 5)
-    }
-
-    concepts, report = await stage2_curate_and_report(shortlists, tracks_by_id)
-
-    assert len(concepts) == 1
-    assert concepts[0].title == "Dark Rollers"
-    assert "MiniMax M2.7 (Anthropic fallback)" in report
-
-
 async def test_stage2_raises_if_key_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     from mixlab.llm import stage2_curate_and_report
 
@@ -308,46 +301,6 @@ async def test_stage2_raises_if_key_missing(monkeypatch: pytest.MonkeyPatch) -> 
     tracks_by_id: dict[str, Track] = {}
 
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
-        await stage2_curate_and_report(shortlists, tracks_by_id)
-
-
-@respx.mock
-async def test_stage2_uses_minimax_when_stage2_provider_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mixlab.llm import stage2_curate_and_report
-
-    monkeypatch.setenv("STAGE2_PROVIDER", "minimax")
-    monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-key")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-
-    respx.post(_MINIMAX_URL).mock(
-        return_value=Response(200, json={"choices": [{"message": {"content": _curated_payload()}}]})
-    )
-
-    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
-    tracks_by_id = {
-        str(i): Track(
-            track_id=str(i), artist=f"Artist {i}", title=f"Title {i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass"
-        )
-        for i in range(1, 5)
-    }
-
-    concepts, report = await stage2_curate_and_report(shortlists, tracks_by_id)
-
-    assert len(concepts) == 1
-    assert concepts[0].title == "Dark Rollers"
-    assert "CONCEPT: Dark Rollers" in report
-    assert "MiniMax M2.7" in report
-
-
-async def test_stage2_raises_if_minimax_key_missing_when_provider_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mixlab.llm import stage2_curate_and_report
-
-    monkeypatch.setenv("STAGE2_PROVIDER", "minimax")
-    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
-    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1"])]
-    tracks_by_id: dict[str, Track] = {}
-
-    with pytest.raises(RuntimeError, match="MINIMAX_API_KEY"):
         await stage2_curate_and_report(shortlists, tracks_by_id)
 
 
@@ -1249,18 +1202,24 @@ async def test_stage2_playlist_mode_report_rewrites_seed_counts_deterministicall
                 "title": "Set",
                 "mood": "m",
                 "track_ids": ["1", "2", "3", "4", "5", "6", "7", "8"],
-                "report": (
-                    "CONCEPT: Set\n\nThesis.\n\n"
-                    "Source playlist: Monday Night\n"
-                    "Seed tracks retained: 1.\n"
-                    "Seed tracks dropped: 0.\n"
-                    "Library tracks added: 7.\n\n"
-                    "Track order:\nArtist 1 — Title 1 [8A · 120.0]"
-                ),
+                "transitions": [],
             }
         ]
     )
-    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(payload)))
+    prose_report = (
+        "CONCEPT: Set\n\nThesis.\n\n"
+        "Source playlist: Monday Night\n"
+        "Seed tracks retained: 1.\n"
+        "Seed tracks dropped: 0.\n"
+        "Library tracks added: 7.\n\n"
+        "Track order:\nArtist 1 — Title 1 [8A · 120.0] | Role: opener | Why: opens | Risk: none"
+    )
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(payload)),
+            Response(200, json=_anthropic_response(prose_report)),
+        ]
+    )
 
     shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=[str(i) for i in range(1, 9)])]
     tracks_by_id = {
@@ -1292,7 +1251,7 @@ async def test_stage2_playlist_mode_raises_when_retention_below_minimum(monkeypa
                 "title": "Set",
                 "mood": "m",
                 "track_ids": ["1", "2", "3", "4", "11", "12", "13", "14", "15", "16", "17", "18"],
-                "report": "CONCEPT: Set\n\nThesis.\n\nTrack order:\nArtist 1 — Title 1 [8A · 120.0]",
+                "transitions": [],
             }
         ]
     )
@@ -1327,23 +1286,35 @@ async def test_stage2_playlist_mode_returns_winner_first_with_labeled_titles(
                 "title": "Balanced Set",
                 "mood": "balanced",
                 "track_ids": ["1", "2", "3", "4"],
-                "report": "CONCEPT: Balanced Set\n\nThesis.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 120.0]",
+                "transitions": [],
             },
             {
                 "title": "Practical Set",
                 "mood": "practical",
                 "track_ids": ["1", "2", "3", "4"],
-                "report": "CONCEPT: Practical Set\n\nThesis.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 120.0]",
+                "transitions": [],
             },
             {
                 "title": "Adventurous Set",
                 "mood": "adventurous",
                 "track_ids": ["1", "2", "3", "4"],
-                "report": "CONCEPT: Adventurous Set\n\nThesis.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 120.0]",
+                "transitions": [],
             },
         ]
     )
-    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(payload)))
+
+    def make_report(title: str) -> str:
+        return f"CONCEPT: {title}\n\nThesis.\n\nTrack order:\n1. A1 — T1 [8A · 121.0] | Role: opener | Why: opens | Risk: none"
+
+    # ordered_variants = winner (Practical) + sorted remainder → Practical, Balanced, Adventurous
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(payload)),
+            Response(200, json=_anthropic_response(make_report("Practical Set"))),
+            Response(200, json=_anthropic_response(make_report("Balanced Set"))),
+            Response(200, json=_anthropic_response(make_report("Adventurous Set"))),
+        ]
+    )
 
     def fake_score_variant(
         concept: MixConcept,
@@ -1546,7 +1517,9 @@ async def test_call_stage2_reports_returns_one_report_per_concept(
         MixConcept(title="Set B", mood="light", track_ids=["1", "2", "3", "4"]),
     ]
     tracks_by_id = {
-        str(i): Track(track_id=str(i), artist=f"Artist {i}", title=f"Title {i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        str(i): Track(
+            track_id=str(i), artist=f"Artist {i}", title=f"Title {i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass"
+        )
         for i in range(1, 5)
     }
 

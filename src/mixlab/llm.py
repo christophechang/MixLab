@@ -1291,10 +1291,7 @@ async def _call_stage2_reports(
     """Generate prose reports for all concepts in parallel."""
     return list(
         await asyncio.gather(
-            *[
-                _call_stage2_report_single(c, tracks_by_id, seed_ids, unplayed_ids, stage2_key)
-                for c in concepts
-            ]
+            *[_call_stage2_report_single(c, tracks_by_id, seed_ids, unplayed_ids, stage2_key) for c in concepts]
         )
     )
 
@@ -1312,19 +1309,11 @@ async def stage2_curate_and_report(
     intent_brief: IntentBrief | None = None,
     used_mix_names: list[str] | None = None,
 ) -> tuple[list[MixConcept], str]:
-    provider = (stage2_provider or os.environ.get("STAGE2_PROVIDER", "anthropic")).lower()
-    use_minimax = provider == "minimax"
-
-    if use_minimax:
-        stage2_key = os.environ.get("MINIMAX_API_KEY")
-        if not stage2_key:
-            raise RuntimeError("STAGE2_PROVIDER=minimax but MINIMAX_API_KEY is not set.")
-        stage2_model_display = "MiniMax M2.7"
-    else:
-        stage2_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not stage2_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is not set — Stage 2 curation requires Anthropic.")
-        stage2_model_display = "Claude Sonnet 4.6"
+    del stage2_provider  # retained for API compatibility; MiniMax path removed
+    stage2_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not stage2_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set — Stage 2 curation requires Anthropic.")
+    stage2_model_display = "Claude Sonnet 4.6"
 
     sections: list[str] = []
     for shortlist in shortlists:
@@ -1416,13 +1405,11 @@ async def stage2_curate_and_report(
             f"3. Retain at least {minimum_seed_tracks} seed tracks total (anchors protected as per brief).\n"
             "4. When two otherwise equally suitable tracks compete, prefer the one marked unplayed.\n\n"
             "Produce EXACTLY THREE concepts as described in your instructions (practical / balanced / adventurous).\n\n"
-            f"In each concept's report, after the thesis paragraph, include:\nSource playlist: {playlist_name}\n"
-            "State: seeds retained / dropped / added. For any notable drop or addition, one sentence of reasoning.\n\n"
             + "\n\n".join(sections)
         )
     else:
         prompt = (
-            f"Curate and narrate a mix report from the following {n} candidate shortlists. "
+            f"Curate a set of mix concepts from the following {n} candidate shortlists. "
             f"Produce between 3 and 6 distinct concepts total. A rich shortlist may yield more than one concept; "
             f"a thin shortlist may yield none — but each concept must draw only from tracks within a single shortlist.\n\n"
             + "\n\n".join(sections)
@@ -1438,7 +1425,7 @@ async def stage2_curate_and_report(
             f"Do not avoid cross-genre moves — they are the point of this pool. But every such move must be defensible."
         )
 
-    stage2_system = _STAGE2_SYSTEM_PLAYLIST if playlist_name is not None else _STAGE2_SYSTEM
+    stage2_system = _STAGE2_SYSTEM_PLAYLIST_SELECTION if playlist_name is not None else _STAGE2_SYSTEM_SELECTION
     if used_mix_names:
         names_str = ", ".join(used_mix_names)
         stage2_system = stage2_system.replace(
@@ -1447,20 +1434,17 @@ async def stage2_curate_and_report(
             f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. "
             "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier (e.g. if 'Slow Burn' exists, 'Slow Burn Gospel' is forbidden). \\",
         )
-    raw, stage2_model_display = await _call_stage2_raw(
-        prompt, stage2_system, stage2_key, use_minimax, stage2_model_display
-    )
+    raw = await _call_stage2_raw(prompt, stage2_system, stage2_key, max_tokens=8192)
 
     valid_ids = set(tracks_by_id.keys())
-    curated, report = _parse_curated_concepts(raw, valid_ids)
+    curated, _ = _parse_curated_concepts(raw, valid_ids)
+    report = ""
+
+    if playlist_name is None:
+        reports = await _call_stage2_reports(curated, tracks_by_id, seed_ids, unplayed_ids, stage2_key)
+        report = "\n\n---\n\n".join(reports)
 
     if playlist_name is not None and seed_ids is not None and curated:
-        section_reports = report.split("\n\n---\n\n") if report else []
-        report_by_title = (
-            {concept.title: section for concept, section in zip(curated, section_reports, strict=False)}
-            if len(section_reports) == len(curated)
-            else {}
-        )
         playlist_seed_track_ids = seed_track_ids or sorted(seed_ids)
         minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids), intent_brief)
 
@@ -1482,13 +1466,10 @@ async def stage2_curate_and_report(
                 f"Your previous attempt retained only {len(retained_ids)} seed tracks "
                 f"(minimum required: {minimum_seed_tracks}).\n"
                 f"Dropped seeds: {dropped_labels}.\n"
-                "Retry with one concept only. Include as many dropped seeds as possible. "
-                "For each one still excluded, give one sentence of musical justification.\n\n"
+                "Retry with one concept only. Include as many dropped seeds as possible.\n\n"
             ) + prompt
-            raw, stage2_model_display = await _call_stage2_raw(
-                retry_prompt, stage2_system, stage2_key, use_minimax, stage2_model_display
-            )
-            curated, report = _parse_curated_concepts(raw, valid_ids)
+            raw = await _call_stage2_raw(retry_prompt, stage2_system, stage2_key, max_tokens=8192)
+            curated, _ = _parse_curated_concepts(raw, valid_ids)
             if curated:
                 concept = curated[0]
                 retained_ids, _, _ = _playlist_retention_stats(concept, playlist_seed_track_ids)
@@ -1501,19 +1482,13 @@ async def stage2_curate_and_report(
                 )
             variants = []  # suppress rejected_summary on retry path
 
-        ordered_variants = (
-            [best]
-            + sorted(
+        if variants:
+            ordered_variants = [best] + sorted(
                 [v for v in variants if v.concept is not concept],
                 key=lambda v: _STRATEGY_PRIORITY.get(v.strategy, 99),
             )
-            if variants
-            else []
-        )
 
-        # Summarise rejected variants in report
-        rejected_summary = ""
-        if ordered_variants:
+            rejected_summary = ""
             rejected = ordered_variants[1:]
             if rejected:
                 parts = [
@@ -1523,12 +1498,18 @@ async def stage2_curate_and_report(
                 ]
                 rejected_summary = "\nAlternative strategies considered: " + "; ".join(parts) + "."
 
-        if variants:
+            reports = await _call_stage2_reports(
+                [v.concept for v in ordered_variants],
+                tracks_by_id,
+                seed_ids,
+                unplayed_ids,
+                stage2_key,
+            )
+
             ordered_reports: list[str] = []
             ordered_concepts: list[MixConcept] = []
-            for variant in ordered_variants:
+            for variant, base_report in zip(ordered_variants, reports, strict=True):
                 is_winner = variant.concept is concept
-                base_report = report_by_title.get(variant.concept.title, "")
                 if is_winner:
                     base_report = _rewrite_playlist_report(
                         base_report,
@@ -1547,9 +1528,12 @@ async def stage2_curate_and_report(
             report = "\n\n---\n\n".join(ordered_reports)
             curated = ordered_concepts
         else:
+            rejected_summary = ""
+            retry_reports = await _call_stage2_reports([concept], tracks_by_id, seed_ids, unplayed_ids, stage2_key)
+            base_report = retry_reports[0] if retry_reports else ""
             report = _label_playlist_report_section(
                 _rewrite_playlist_report(
-                    report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id, rejected_summary
+                    base_report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id, rejected_summary
                 ),
                 concept.mood.lower(),
                 is_winner=True,
