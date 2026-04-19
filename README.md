@@ -39,6 +39,15 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY + at least one Stage 1 key
 
 ---
 
+## What's new in v0.4.0
+
+- **Stage 2 two-pass split.** Selection and report generation are now separate LLM calls. Pass 1 asks Claude Sonnet to pick and order tracks, returning compact JSON (≤8K tokens, well within the API timeout). Pass 2 fires one Anthropic call per curated concept in parallel to generate the prose mix report. Reports arrive faster and more reliably — the selection call no longer races the API timeout while also writing prose.
+- **Parallel report generation.** In non-playlist mode, all concept reports are generated concurrently via `asyncio.gather`. In playlist mode, reports for all variants (practical, balanced, adventurous) are generated in parallel before the winner is selected and the report is finalised.
+- **Playlist mode track count capped at 12.** Stage 2 now targets 10–12 tracks in playlist mode (was 12–18). A 13th track is allowed only when dropping it would break an anchor adjacency pair.
+- **MiniMax removed.** Stage 1 cascade is now Groq → Gemini → Mistral. Stage 2 is Anthropic-only. The `--stage2-provider` flag and `MINIMAX_API_KEY` / `STAGE2_PROVIDER` env vars are removed.
+
+---
+
 ## What's new in v0.3.1
 
 - **Export unplayed collection.** `--export-unplayed` compares your full Rekordbox collection against your play history and exports every unplayed track as a dated Rekordbox-compatible XML file, ready to import and browse in Rekordbox. Posts the XML attachment to Discord. No LLM calls.
@@ -69,7 +78,7 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY + at least one Stage 1 key
 - Python 3.12+
 - A Rekordbox XML export (see [Setup](#4-export-your-rekordbox-collection))
 - `ANTHROPIC_API_KEY` — required for default Stage 2 report generation
-- At least one Stage 1 LLM key (Groq, Gemini, Mistral, or MiniMax)
+- At least one Stage 1 LLM key (Groq, Gemini, or Mistral)
 - A catalog API URL + key (optional — for filtering already-played tracks)
 - A Discord bot token (optional — report prints to stdout without it)
 
@@ -103,14 +112,13 @@ cp .env.example .env
 | `GROQ_API_KEY` | No | Stage 1 provider (tried first) |
 | `GEMINI_API_KEY` | No | Stage 1 provider (fallback 1) |
 | `MISTRAL_API_KEY` | No | Stage 1 provider (fallback 2) |
-| `MINIMAX_API_KEY` | No | Stage 1 provider (last fallback) and optional Stage 2 provider via `--stage2-provider minimax` |
 | `OPENROUTER_API_KEY` | No | Reserved for future use |
 | `DISCORD_BOT_TOKEN` | No | Discord delivery |
 | `DISCORD_GUILD_ID` | No | Discord server ID |
 | `MIXLAB_DISCORD_CHANNEL_ID` | No | Target channel ID (preferred over name) |
 | `MIXLAB_DISCORD_CHANNEL` | No | Target channel name (default: `mix-lab`) |
 
-`ANTHROPIC_API_KEY` is required for the default Stage 2 path. `MINIMAX_API_KEY` is additionally required if you want to run `--stage2-provider minimax`. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only.
+`ANTHROPIC_API_KEY` is required for Stage 2 report generation. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only.
 
 #### Catalog API (optional)
 
