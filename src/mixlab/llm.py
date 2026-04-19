@@ -808,6 +808,50 @@ All three must meet the anchor protection rules and the seed retention floor.
 If the pool is too thin to produce even one strong set: [{"diagnostic": "..."}].""",
 )
 
+
+def _make_selection_system(base: str) -> str:
+    """Strip report schema field and format instructions from a Stage 2 system prompt.
+
+    The report is generated in a separate pass so the selection call stays under 8K
+    output tokens and completes reliably within the API timeout.
+    """
+    base = base.replace('\n  "report": "..."', "")
+    marker = 'The "report" value must be a single string'
+    idx = base.find(marker)
+    if idx != -1:
+        base = base[:idx].rstrip() + "\n\nRespond ONLY with the JSON array."
+    return base
+
+
+_STAGE2_SYSTEM_SELECTION: str = _make_selection_system(_STAGE2_SYSTEM)
+_STAGE2_SYSTEM_PLAYLIST_SELECTION: str = _make_selection_system(_STAGE2_SYSTEM_PLAYLIST)
+
+_STAGE2_REPORT_SYSTEM = """\
+You are a world-class DJ and mix curator with deep real-world club experience. The track selection \
+and play order for this concept have already been decided. Your job is to write the mix report only.
+
+Write the report in this exact format:
+
+CONCEPT: [concept_title]
+
+[1–2 sentences: thesis — what this set asks of the room.]
+
+Track order:
+[For each track in play order, one line:]
+N. Artist — Title [Key · BPM] | Role: [role] | Why: [one short phrase] | Risk: [one short phrase or "none"]
+
+Assumptions: [only if material — [unverified] tracks, vocal clash, tight blend window. One line each. \
+Omit section if nothing material.]
+
+Role options: opener, builder, pivot, peak, cleanser, closer, utility.
+Risk: describe the transition risk into this track (not out of it). "none" if clean.
+Why: why this track at this moment — one phrase, no full sentences needed.
+
+Be opinionated, musical, and honest. Peer-to-peer, no marketing language, no filler.
+
+Return ONLY the report text. No JSON, no markdown fences, no preamble.\
+"""
+
 _SHORTFALL_THRESHOLD = 4
 _PLAYLIST_MINIMUM_SEED_RATIO = 0.6
 

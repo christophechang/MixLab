@@ -1462,3 +1462,45 @@ def test_stage2_playlist_system_caps_tracks_at_twelve() -> None:
 
     assert "12–18 tracks" not in _STAGE2_SYSTEM_PLAYLIST
     assert "10–12 tracks" in _STAGE2_SYSTEM_PLAYLIST
+
+
+# ---------------------------------------------------------------------------
+# _make_selection_system and derived constants
+# ---------------------------------------------------------------------------
+
+
+def test_make_selection_system_removes_report_schema_field() -> None:
+    from mixlab.llm import _STAGE2_SYSTEM, _make_selection_system
+
+    result = _make_selection_system(_STAGE2_SYSTEM)
+    assert '"report":' not in result
+    assert '"track_ids":' in result
+    assert '"transitions":' in result
+    assert "Respond ONLY with the JSON array." in result
+
+
+def test_make_selection_system_removes_report_format_instructions() -> None:
+    from mixlab.llm import _STAGE2_SYSTEM, _make_selection_system
+
+    result = _make_selection_system(_STAGE2_SYSTEM)
+    assert 'The "report" value must be a single string' not in result
+    assert "Role options: opener" not in result  # part of the report-format section
+
+
+def test_make_selection_system_preserves_curation_instructions() -> None:
+    from mixlab.llm import _STAGE2_SYSTEM, _make_selection_system
+
+    result = _make_selection_system(_STAGE2_SYSTEM)
+    # Key curation guidance must survive
+    assert "peak weapons" in result
+    assert "name_reason" in result
+    assert "chapter_pivot" in result
+
+
+def test_selection_system_playlist_variant_has_practical_balanced_adventurous() -> None:
+    from mixlab.llm import _STAGE2_SYSTEM_PLAYLIST_SELECTION
+
+    assert '"practical"' in _STAGE2_SYSTEM_PLAYLIST_SELECTION
+    assert '"balanced"' in _STAGE2_SYSTEM_PLAYLIST_SELECTION
+    assert '"adventurous"' in _STAGE2_SYSTEM_PLAYLIST_SELECTION
+    assert '"report":' not in _STAGE2_SYSTEM_PLAYLIST_SELECTION
