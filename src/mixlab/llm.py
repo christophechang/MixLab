@@ -424,7 +424,15 @@ async def _call_anthropic_http(
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
         resp.raise_for_status()
-        return str(resp.json()["content"][0]["text"])
+        resp_json = resp.json()
+        stop_reason = resp_json.get("stop_reason", "unknown")
+        text = str(resp_json["content"][0]["text"])
+        print(
+            f"[Anthropic] model={model} stop_reason={stop_reason} max_tokens={max_tokens} chars={len(text)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return text
 
 
 async def _try_minimax(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
