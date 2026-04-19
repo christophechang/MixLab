@@ -745,11 +745,12 @@ Weakness is practical: a track whose intro gives no workable mix point, a vocal 
 no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment \
 used so early it makes everything after feel like a comedown.""",
     """For playlist-completion runs:
-- RETAIN as many [seed] tracks as possible. The default is to keep a seed track unless it clearly breaks tempo \
-flow, harmonic logic, blendability, or the set's narrative.
-- SELECT a coherent final tracklist from the pool. Prefer 10–12 tracks. Do not exceed 12 tracks unless dropping \
-a 13th would break an anchor adjacency pair — in that case, include it and note the exception. Exclude tracks \
-that genuinely weaken the journey. Weakness is practical: a track whose intro gives no workable mix point, a \
+- Prefer seed tracks over library tracks when both serve the arc equally — but arc quality and narrative \
+tightness take priority over seed count. Cut a seed that weakens the concept; keep a library track that \
+strengthens it. The Python layer enforces the minimum seed floor independently.
+- SELECT a coherent final tracklist from the pool. Target 10–14 tracks. Do not exceed 14. A great concept \
+is defined as much by what you cut as what you keep — every track must earn its place in the arc. Exclude \
+tracks that weaken the journey. Weakness is practical: a track whose intro gives no workable mix point, a \
 vocal that starts on bar one with no room to bring it in, a bass-heavy record dropped after another with no \
 frequency relief, a big moment used so early it makes everything after feel like a comedown.""",
 ).replace(
@@ -793,7 +794,11 @@ def _make_selection_system(base: str) -> str:
     marker = 'The "report" value must be a single string'
     idx = base.find(marker)
     if idx != -1:
-        base = base[:idx].rstrip() + "\n\nRespond ONLY with the JSON array."
+        base = (
+            base[:idx].rstrip()
+            + "\n\nRespond ONLY with the JSON array. "
+            "Output the opening [ immediately — no analysis, preamble, or explanation before it."
+        )
     return base
 
 
@@ -870,7 +875,8 @@ def _extract_complete_objects(raw: str) -> list[dict[str, object]]:
     array unclosed. Returns however many well-formed objects were found before the
     truncation point; raises ValueError if none, so the cascade can fall through.
     """
-    start = raw.find("[")
+    obj_array_match = re.search(r"\[\s*\{", raw)
+    start = obj_array_match.start() if obj_array_match else raw.find("[")
     if start == -1:
         raise ValueError("No JSON array start found in truncated response")
     objects: list[dict[str, object]] = []
@@ -923,7 +929,9 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
     if not raw:
         raise ValueError("Stage 2 returned empty content — Anthropic API may have truncated the response.")
     raw_for_recovery = raw
-    first_bracket = raw.find("[")
+    # Prefer [{ as array-of-objects start to skip prose containing [word] patterns.
+    obj_array_match = re.search(r"\[\s*\{", raw)
+    first_bracket = obj_array_match.start() if obj_array_match else raw.find("[")
     last_bracket = raw.rfind("]")
     if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
         raw = raw[first_bracket : last_bracket + 1]
@@ -1381,7 +1389,8 @@ async def stage2_curate_and_report(
             "2. You may drop outlier zones if they break set coherence.\n"
             f"3. Retain at least {minimum_seed_tracks} seed tracks total (anchors protected as per brief).\n"
             "4. When two otherwise equally suitable tracks compete, prefer the one marked unplayed.\n\n"
-            "Produce EXACTLY THREE concepts as described in your instructions (practical / balanced / adventurous).\n\n"
+            "Produce EXACTLY THREE concepts (one practical, one balanced, one adventurous) drawing from the combined "
+            "candidate pool below. All shortlists together form one pool — do not produce one concept per shortlist.\n\n"
             + "\n\n".join(sections)
         )
     else:
@@ -1415,6 +1424,11 @@ async def stage2_curate_and_report(
 
     valid_ids = set(tracks_by_id.keys())
     curated, _ = _parse_curated_concepts(raw, valid_ids)
+    print(
+        f"Stage 2 selection pass: {len(curated)} concept(s) returned "
+        f"(moods: {[c.mood for c in curated]})",
+        file=sys.stderr,
+    )
     report = ""
 
     if playlist_name is None:
@@ -1427,6 +1441,20 @@ async def stage2_curate_and_report(
 
         # Score all returned concepts
         variants = [_score_variant(c, playlist_seed_track_ids, intent_brief, tracks_by_id) for c in curated]
+
+        # Deduplicate: keep only the best-scoring variant per strategy.
+        # The LLM sometimes returns multiple concepts with the same mood label.
+        by_strategy: dict[str, CompletionVariant] = {}
+        for v in variants:
+            if v.strategy not in by_strategy or v.score > by_strategy[v.strategy].score:
+                by_strategy[v.strategy] = v
+        if len(by_strategy) < len(variants):
+            print(
+                f"Stage 2 dedup: {len(variants)} → {len(by_strategy)} variant(s) "
+                f"(LLM returned duplicate strategy concepts)",
+                file=sys.stderr,
+            )
+        variants = list(by_strategy.values())
 
         # Pre-filter: per-tier retention floor before selection
         passing = [v for v in variants if _passes_floor(v, intent_brief, playlist_seed_track_ids, minimum_seed_tracks)]

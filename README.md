@@ -39,11 +39,19 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY + at least one Stage 1 key
 
 ---
 
+## What's new in v0.4.1
+
+- **Playlist mode duplicate variants fixed.** The selection pass was generating one concept per shortlist instead of three total. Now explicitly tells the model to treat all shortlists as a single combined candidate pool.
+- **Playlist mode JSON parse robustness.** When the model added reasoning prose before the JSON (containing `[seed]` patterns), the bracket extractor grabbed the wrong array start and crashed. Selection system prompt now instructs the model to output the opening `[` immediately with no preamble; parser now searches for `[{` as the array-of-objects start to skip false positives in prose.
+- **Playlist mode track target raised to 14.** Cap raised from 12 to 14. The seed-retention instruction was rewritten to prioritise arc quality over seed count ("every track must earn its place in the arc") — the minimum seed floor is still enforced deterministically by the Python layer, not the LLM.
+- **Strategy dedup guard.** If the model returns duplicate strategy concepts despite instructions, the highest-scoring one per strategy is kept and a diagnostic is logged to stderr.
+
+---
+
 ## What's new in v0.4.0
 
 - **Stage 2 two-pass split.** Selection and report generation are now separate LLM calls. Pass 1 asks Claude Sonnet to pick and order tracks, returning compact JSON (≤8K tokens, well within the API timeout). Pass 2 fires one Anthropic call per curated concept in parallel to generate the prose mix report. Reports arrive faster and more reliably — the selection call no longer races the API timeout while also writing prose.
 - **Parallel report generation.** In non-playlist mode, all concept reports are generated concurrently via `asyncio.gather`. In playlist mode, reports for all variants (practical, balanced, adventurous) are generated in parallel before the winner is selected and the report is finalised.
-- **Playlist mode track count capped at 12.** Stage 2 now targets 10–12 tracks in playlist mode (was 12–18). A 13th track is allowed only when dropping it would break an anchor adjacency pair.
 - **MiniMax removed.** Stage 1 cascade is now Groq → Gemini → Mistral. Stage 2 is Anthropic-only. The `--stage2-provider` flag and `MINIMAX_API_KEY` / `STAGE2_PROVIDER` env vars are removed.
 
 ---
@@ -112,7 +120,6 @@ cp .env.example .env
 | `GROQ_API_KEY` | No | Stage 1 provider (tried first) |
 | `GEMINI_API_KEY` | No | Stage 1 provider (fallback 1) |
 | `MISTRAL_API_KEY` | No | Stage 1 provider (fallback 2) |
-| `OPENROUTER_API_KEY` | No | Reserved for future use |
 | `DISCORD_BOT_TOKEN` | No | Discord delivery |
 | `DISCORD_GUILD_ID` | No | Discord server ID |
 | `MIXLAB_DISCORD_CHANNEL_ID` | No | Target channel ID (preferred over name) |
@@ -230,7 +237,6 @@ Prints unplayed vs total counts per genre, sorted by availability. Only the cata
 
 ```bash
 ./mixlab --genre house
-./mixlab --genre house --stage2-provider minimax
 ./mixlab --genre 4x4 --all-tracks
 ```
 
@@ -240,7 +246,6 @@ The report starts with a context header so you can see exactly what kind of run 
 
 ```text
 Report context: House (unplayed tracks)
-Report context: House (unplayed tracks, stage 2: minimax)
 Report context: 140 (custom genre, All Tracks)
 ```
 
@@ -253,7 +258,6 @@ For standard and custom genre runs, a Rekordbox-compatible merged XML file can b
 ./mixlab --playlist "Monday Night" --genre electronica
 ./mixlab --playlist "Sets/Monday Night"
 ./mixlab --playlist "Monday Night" --all-tracks
-./mixlab --playlist "Monday Night" --stage2-provider minimax
 ```
 
 Playlist mode is a different workflow from genre mode:
@@ -422,7 +426,7 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 ### LLM Stage 1 — concept generation
 
 - Provider cascade tried in order, falling through on error or missing key:
-  **Groq → Gemini → Mistral → MiniMax**
+  **Groq → Gemini → Mistral**
 - **Standard genres:** clusters larger than 40 tracks are chunked; each chunk is called independently and concepts merged
 - **Custom genres:** a random 120-track window is selected from the BPM-sorted pool each run (see [Why random selection?](#why-random-selection)); 60 tracks per call, 2 calls maximum; shortlist target is 20–25 tracks per concept (vs 15–25 for standard)
 - Track IDs are aliased to short positional keys (`T001`, `T002`, …) in the prompt; hallucinated IDs are structurally impossible and concepts with fewer than 4 resolvable aliases are discarded
@@ -430,9 +434,7 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 
 ### LLM Stage 2 — report generation
 
-- Uses Claude Sonnet 4.6 by default
-- `--stage2-provider minimax` switches Stage 2 to MiniMax M2.7 explicitly
-- If the default Anthropic Stage 2 path fails mid-run, MixLab can fall back to MiniMax M2.7 when that key is available
+- Uses Claude Sonnet 4.6 (Anthropic-only, no fallback provider)
 - Writes a peer-to-peer mix planning narrative with track listings in Camelot order and notes on transitions
 - If the catalog API returns existing mix names, Stage 2 is instructed to avoid reusing any words, tropes, or phrasing from them; each concept also includes a `name_reason` tying the name to the set's thesis
 - Playlist mode generates three variants (`practical`, `balanced`, `adventurous`) and auto-selects the strongest; seed retention is enforced with a floor of 75% of anchor tracks and 40% of supporting tracks

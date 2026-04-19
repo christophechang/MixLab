@@ -1416,11 +1416,12 @@ def test_parse_curated_concepts_unmatched_transition_ids_stored_as_is() -> None:
     assert concepts[0].transitions[0].from_id == "99"
 
 
-def test_stage2_playlist_system_caps_tracks_at_twelve() -> None:
+def test_stage2_playlist_system_caps_tracks_at_fourteen() -> None:
     from mixlab.llm import _STAGE2_SYSTEM_PLAYLIST
 
-    assert "12–18 tracks" not in _STAGE2_SYSTEM_PLAYLIST
-    assert "10–12 tracks" in _STAGE2_SYSTEM_PLAYLIST
+    assert "10–12 tracks" not in _STAGE2_SYSTEM_PLAYLIST
+    assert "10–14 tracks" in _STAGE2_SYSTEM_PLAYLIST
+    assert "Do not exceed 14" in _STAGE2_SYSTEM_PLAYLIST
 
 
 # ---------------------------------------------------------------------------
