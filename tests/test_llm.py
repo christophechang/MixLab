@@ -1504,3 +1504,89 @@ def test_selection_system_playlist_variant_has_practical_balanced_adventurous() 
     assert '"balanced"' in _STAGE2_SYSTEM_PLAYLIST_SELECTION
     assert '"adventurous"' in _STAGE2_SYSTEM_PLAYLIST_SELECTION
     assert '"report":' not in _STAGE2_SYSTEM_PLAYLIST_SELECTION
+
+
+# ---------------------------------------------------------------------------
+# _call_stage2_reports — parallel report generation
+# ---------------------------------------------------------------------------
+
+
+def _selection_payload() -> str:
+    """Stage 2 selection-only response — no report field."""
+    return json.dumps(
+        [
+            {
+                "title": "Dark Rollers",
+                "name_reason": "Relentless drive from open to close.",
+                "mood": "heavy and relentless",
+                "track_ids": ["1", "2", "3", "4"],
+                "transitions": [
+                    {"from_id": "1", "to_id": "2", "is_risky": False, "risk_type": ""},
+                    {"from_id": "2", "to_id": "3", "is_risky": False, "risk_type": ""},
+                    {"from_id": "3", "to_id": "4", "is_risky": False, "risk_type": ""},
+                ],
+            }
+        ]
+    )
+
+
+_REPORT_TEXT = "CONCEPT: Dark Rollers\n\nA relentless journey.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 174.0] | Role: opener | Why: sets dark tone | Risk: none"
+
+
+@respx.mock
+async def test_call_stage2_reports_returns_one_report_per_concept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import _call_stage2_reports
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    concepts = [
+        MixConcept(title="Set A", mood="dark", track_ids=["1", "2", "3", "4"]),
+        MixConcept(title="Set B", mood="light", track_ids=["1", "2", "3", "4"]),
+    ]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"Artist {i}", title=f"Title {i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json={"content": [{"text": "CONCEPT: Set A\n\nReport A."}], "stop_reason": "end_turn"}),
+            Response(200, json={"content": [{"text": "CONCEPT: Set B\n\nReport B."}], "stop_reason": "end_turn"}),
+        ]
+    )
+
+    reports = await _call_stage2_reports(concepts, tracks_by_id, None, None, "test-key")
+
+    assert len(reports) == 2
+    assert "Report A" in reports[0]
+    assert "Report B" in reports[1]
+
+
+@respx.mock
+async def test_call_stage2_reports_fires_parallel_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import _call_stage2_reports
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    call_count = 0
+
+    def count_calls(request: object) -> Response:
+        nonlocal call_count
+        call_count += 1
+        return Response(200, json={"content": [{"text": f"Report {call_count}"}], "stop_reason": "end_turn"})
+
+    concepts = [MixConcept(title=f"Set {i}", mood="dark", track_ids=["1", "2", "3", "4"]) for i in range(3)]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist="A", title="T", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+
+    respx.post(_ANTHROPIC_URL).mock(side_effect=count_calls)
+
+    reports = await _call_stage2_reports(concepts, tracks_by_id, None, None, "test-key")
+
+    assert len(reports) == 3
+    assert call_count == 3

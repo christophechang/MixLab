@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
@@ -1271,6 +1272,79 @@ async def _call_stage2_raw(
                 f"Stage 2 curation failed (Anthropic and MiniMax both failed): {minimax_exc}"
             ) from minimax_exc
         return raw, "MiniMax M2.7 (Anthropic fallback)"
+
+
+async def _call_stage2_report_single(
+    concept: MixConcept,
+    tracks_by_id: dict[str, Track],
+    seed_ids: frozenset[str] | None,
+    unplayed_ids: set[str] | None,
+    stage2_key: str,
+) -> str:
+    """Generate a prose mix report for one curated concept via Anthropic."""
+    track_lines: list[str] = []
+    for i, tid in enumerate(concept.track_ids, 1):
+        t = tracks_by_id.get(tid)
+        if t is None:
+            continue
+        extras: list[str] = []
+        if t.year is not None:
+            extras.append(str(t.year))
+        if t.label:
+            extras.append(t.label)
+        if t.remixer:
+            extras.append(f"remix by {t.remixer}")
+        if t.mix:
+            extras.append(f"mix:{', '.join(t.mix)}")
+        if t.energy is not None:
+            extras.append(f"energy:{t.energy}/8")
+        if seed_ids is not None and tid in seed_ids:
+            extras.append("[seed]")
+        if unplayed_ids is not None:
+            if tid in unplayed_ids:
+                extras.append("unplayed")
+        elif t.play_count == 0:
+            extras.append("unplayed")
+        if t.tags:
+            extras.append(", ".join(t.tags))
+        if t.enrichment_confidence == "low":
+            extras.append("[unverified]")
+        extra_str = " | " + " | ".join(extras) if extras else ""
+        track_lines.append(
+            f"{i}. ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {t.genre}{extra_str}"
+        )
+
+    prompt = (
+        f"Concept title: {concept.title}\n"
+        f"Strategy/mood: {concept.mood}\n"
+        f"Thesis: {concept.name_reason}\n\n"
+        f"Tracks in play order:\n" + "\n".join(track_lines)
+    )
+
+    try:
+        return await _call_anthropic_http(
+            stage2_key, "claude-sonnet-4-6", _STAGE2_REPORT_SYSTEM, prompt, max_tokens=2048, timeout=120
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Stage 2 report generation failed: {exc}") from exc
+
+
+async def _call_stage2_reports(
+    concepts: list[MixConcept],
+    tracks_by_id: dict[str, Track],
+    seed_ids: frozenset[str] | None,
+    unplayed_ids: set[str] | None,
+    stage2_key: str,
+) -> list[str]:
+    """Generate prose reports for all concepts in parallel."""
+    return list(
+        await asyncio.gather(
+            *[
+                _call_stage2_report_single(c, tracks_by_id, seed_ids, unplayed_ids, stage2_key)
+                for c in concepts
+            ]
+        )
+    )
 
 
 async def stage2_curate_and_report(
