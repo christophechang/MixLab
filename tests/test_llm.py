@@ -1482,28 +1482,6 @@ def test_selection_system_playlist_variant_has_practical_balanced_adventurous() 
 # ---------------------------------------------------------------------------
 
 
-def _selection_payload() -> str:
-    """Stage 2 selection-only response — no report field."""
-    return json.dumps(
-        [
-            {
-                "title": "Dark Rollers",
-                "name_reason": "Relentless drive from open to close.",
-                "mood": "heavy and relentless",
-                "track_ids": ["1", "2", "3", "4"],
-                "transitions": [
-                    {"from_id": "1", "to_id": "2", "is_risky": False, "risk_type": ""},
-                    {"from_id": "2", "to_id": "3", "is_risky": False, "risk_type": ""},
-                    {"from_id": "3", "to_id": "4", "is_risky": False, "risk_type": ""},
-                ],
-            }
-        ]
-    )
-
-
-_REPORT_TEXT = "CONCEPT: Dark Rollers\n\nA relentless journey.\n\nTrack order:\n1. Artist 1 — Title 1 [8A · 174.0] | Role: opener | Why: sets dark tone | Risk: none"
-
-
 @respx.mock
 async def test_call_stage2_reports_returns_one_report_per_concept(
     monkeypatch: pytest.MonkeyPatch,
