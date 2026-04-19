@@ -63,7 +63,6 @@ def _format_report_context(
     genre: str | None,
     playlist_name: str | None,
     all_tracks: bool,
-    stage2_provider: str | None,
     export_dir: Path | None,
 ) -> str:
     base_label: str
@@ -84,8 +83,6 @@ def _format_report_context(
         base_label = "MixLab run"
 
     details.append("All Tracks" if all_tracks else "unplayed tracks")
-    if stage2_provider is not None:
-        details.append(f"stage 2: {stage2_provider}")
     if export_dir is not None:
         details.append("export enabled")
 
@@ -252,7 +249,6 @@ async def run_playlist_mode(
     playlist_name: str,
     genre: str | None,
     export_dir: Path | None,
-    stage2_provider: str | None,
     all_tracks: bool,
     min_bpm: float | None = None,
     max_bpm: float | None = None,
@@ -341,7 +337,6 @@ async def run_playlist_mode(
     all_concepts, report = await stage2_curate_and_report(
         shortlists,
         tracks_by_id,
-        stage2_provider,
         playlist_name=playlist_name,
         seed_ids=seed_ids,
         seed_track_ids=[track_id for track_id in raw_seed_ids if track_id in tracks_by_id],
@@ -360,7 +355,6 @@ async def run_playlist_mode(
         genre=genre,
         playlist_name=playlist_name,
         all_tracks=all_tracks,
-        stage2_provider=stage2_provider,
         export_dir=export_dir,
     )
     report += f'\n\n---\n\nPlaylist completion: "{playlist_name}"'
@@ -441,7 +435,6 @@ async def run_export_unplayed() -> None:
 async def run(
     genre: str | None,
     export_dir: Path | None,
-    stage2_provider: str | None = None,
     all_tracks: bool = False,
     min_bpm: float | None = None,
     max_bpm: float | None = None,
@@ -599,7 +592,6 @@ async def run(
     all_concepts, report = await stage2_curate_and_report(
         all_shortlists,
         tracks_by_id,
-        stage2_provider,
         custom_genre_label=genre if is_custom else None,
         custom_genre_sub_genres=custom_genre_sub_genres,
         used_mix_names=mix_names or None,
@@ -614,7 +606,6 @@ async def run(
         genre=genre,
         playlist_name=None,
         all_tracks=all_tracks,
-        stage2_provider=stage2_provider,
         export_dir=export_dir,
     )
     report += f"\n⏱ Generated in {elapsed_str}"
@@ -762,13 +753,6 @@ examples:
         help="Export merged Rekordbox XML to output/playlists/rekordbox_export.xml",
     )
     parser.add_argument(
-        "--stage2-provider",
-        type=str,
-        default=None,
-        metavar="PROVIDER",
-        help="Stage 2 LLM provider: anthropic (default) or minimax",
-    )
-    parser.add_argument(
         "--all-tracks",
         action="store_true",
         help="Use the full collection, ignoring played-track history (overrides CATALOG_API_URL)",
@@ -833,7 +817,6 @@ examples:
                 args.playlist,
                 args.genre,
                 export_dir,
-                args.stage2_provider,
                 args.all_tracks,
                 min_bpm=args.min_bpm,
                 max_bpm=args.max_bpm,
@@ -847,7 +830,6 @@ examples:
         run(
             args.genre,
             export_dir,
-            args.stage2_provider,
             args.all_tracks,
             min_bpm=args.min_bpm,
             max_bpm=args.max_bpm,

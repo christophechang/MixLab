@@ -27,7 +27,6 @@ def test_format_report_context_standard_genre_unplayed() -> None:
         genre="electronica",
         playlist_name=None,
         all_tracks=False,
-        stage2_provider=None,
         export_dir=None,
     )
     assert result == "Report context: Electronica (unplayed tracks)"
@@ -38,7 +37,6 @@ def test_format_report_context_custom_genre_all_tracks() -> None:
         genre="140",
         playlist_name=None,
         all_tracks=True,
-        stage2_provider=None,
         export_dir=None,
     )
     assert result == "Report context: 140 (custom genre, All Tracks)"
@@ -49,10 +47,9 @@ def test_format_report_context_playlist_includes_active_options() -> None:
         genre="electronica",
         playlist_name="Monday Night",
         all_tracks=True,
-        stage2_provider="minimax",
         export_dir=Path("output/playlists"),
     )
-    assert result == "Report context: Monday Night playlist (Electronica, All Tracks, stage 2: minimax, export enabled)"
+    assert result == "Report context: Monday Night playlist (Electronica, All Tracks, export enabled)"
 
 
 _DO_NOT_RECOMMEND_XML = textwrap.dedent("""\

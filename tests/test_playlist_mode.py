@@ -350,7 +350,6 @@ def test_run_playlist_mode_happy_path(
     async def fake_stage2(
         shortlists: list[MixConcept],
         tracks_by_id: dict[str, Track],
-        stage2_provider: str | None = None,
         custom_genre_label: str | None = None,
         custom_genre_sub_genres: list[str] | None = None,
         playlist_name: str | None = None,
@@ -375,7 +374,7 @@ def test_run_playlist_mode_happy_path(
     monkeypatch.setattr(main_mod, "stage2_curate_and_report", fake_stage2)
     monkeypatch.setattr(main_mod, "send_report", fake_send_report)
 
-    asyncio.run(main_mod.run_playlist_mode("Monday Night", None, None, None, False))
+    asyncio.run(main_mod.run_playlist_mode("Monday Night", None, None, False))
     captured = capsys.readouterr()
     assert "Playlist report" in captured.out
 
@@ -438,7 +437,6 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
     async def fake_stage2(
         shortlists: list[MixConcept],
         tracks_by_id: dict[str, Track],
-        stage2_provider: str | None = None,
         custom_genre_label: str | None = None,
         custom_genre_sub_genres: list[str] | None = None,
         playlist_name: str | None = None,
@@ -448,7 +446,7 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
         intent_brief: IntentBrief | None = None,
         used_mix_names: list[str] | None = None,
     ) -> tuple[list[MixConcept], str]:
-        del shortlists, tracks_by_id, stage2_provider, custom_genre_label, custom_genre_sub_genres
+        del shortlists, tracks_by_id, custom_genre_label, custom_genre_sub_genres
         del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief, used_mix_names
         return ([MixConcept(title="Completed Set", mood="warm", track_ids=["1", "2", "3", "4"])], "Playlist report")
 
@@ -459,7 +457,7 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
     monkeypatch.setattr(main_mod, "stage2_curate_and_report", fake_stage2)
     monkeypatch.setattr(main_mod, "send_report", fake_send_report)
 
-    asyncio.run(main_mod.run_playlist_mode("Monday Night", "electronica", None, None, False))
+    asyncio.run(main_mod.run_playlist_mode("Monday Night", "electronica", None, False))
     assert seen_library_genres == ["Electronica"]
 
 
@@ -476,7 +474,6 @@ def test_run_playlist_mode_exports_all_ranked_variants(monkeypatch: pytest.Monke
     async def fake_stage2(
         shortlists: list[MixConcept],
         tracks_by_id: dict[str, Track],
-        stage2_provider: str | None = None,
         custom_genre_label: str | None = None,
         custom_genre_sub_genres: list[str] | None = None,
         playlist_name: str | None = None,
@@ -486,7 +483,7 @@ def test_run_playlist_mode_exports_all_ranked_variants(monkeypatch: pytest.Monke
         intent_brief: IntentBrief | None = None,
         used_mix_names: list[str] | None = None,
     ) -> tuple[list[MixConcept], str]:
-        del shortlists, tracks_by_id, stage2_provider, custom_genre_label, custom_genre_sub_genres
+        del shortlists, tracks_by_id, custom_genre_label, custom_genre_sub_genres
         del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief, used_mix_names
         return (
             [
@@ -528,7 +525,7 @@ def test_run_playlist_mode_exports_all_ranked_variants(monkeypatch: pytest.Monke
     monkeypatch.setattr(main_mod, "export_merged_xml", fake_export_merged_xml)
     monkeypatch.setattr(main_mod, "send_report", fake_send_report)
 
-    asyncio.run(main_mod.run_playlist_mode("Monday Night", None, tmp_path, None, False))
+    asyncio.run(main_mod.run_playlist_mode("Monday Night", None, tmp_path, False))
 
     expected_titles = [
         "WINNER - PRACTICAL - Gravity Well",
@@ -547,7 +544,7 @@ def test_run_playlist_mode_playlist_not_found_exits(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(main_mod, "_XML_PATH", xml_path)
 
     with pytest.raises(SystemExit, match="1"):
-        asyncio.run(main_mod.run_playlist_mode("Missing", None, None, None, False))
+        asyncio.run(main_mod.run_playlist_mode("Missing", None, None, False))
 
 
 # ---------------------------------------------------------------------------

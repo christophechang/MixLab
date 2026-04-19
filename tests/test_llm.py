@@ -9,7 +9,6 @@ from httpx import Response
 from mixlab.models import CompletionVariant, DJPracticalityScore, MixConcept, Track
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-_MINIMAX_URL = "https://api.minimax.io/v1/text/chatcompletion_v2"
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 _MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
@@ -79,7 +78,6 @@ def _make_tracks(n: int, genre: str = "Drum & Bass") -> list[Track]:
 async def test_stage1_skips_provider_if_key_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     from mixlab.llm import make_cascade_state, stage1_concepts
 
-    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
@@ -96,7 +94,6 @@ async def test_stage1_logs_provider_summary(
 ) -> None:
     from mixlab.llm import make_cascade_state, stage1_concepts
 
-    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
@@ -118,12 +115,12 @@ async def test_stage1_logs_provider_summary(
 async def test_stage1_falls_through_cascade_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
     from mixlab.llm import make_cascade_state, stage1_concepts
 
-    monkeypatch.setenv("MINIMAX_API_KEY", "bad-key")
-    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "bad-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
 
-    respx.post(_MINIMAX_URL).mock(return_value=Response(500, text="error"))
-    respx.post(_GROQ_URL).mock(return_value=Response(200, json=_chat_response()))
+    respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
+    respx.post(_GEMINI_URL).mock(return_value=Response(200, json=_chat_response()))
 
     shortlists = await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())
     assert shortlists[0].title == "Deep 122 BPM / 4A–7A Pool"
@@ -133,7 +130,6 @@ async def test_stage1_falls_through_cascade_on_error(monkeypatch: pytest.MonkeyP
 async def test_stage1_chunks_large_clusters(monkeypatch: pytest.MonkeyPatch) -> None:
     from mixlab.llm import make_cascade_state, stage1_concepts
 
-    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
@@ -156,7 +152,6 @@ async def test_stage1_chunks_large_clusters(monkeypatch: pytest.MonkeyPatch) -> 
 async def test_stage1_filters_pools_below_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
     from mixlab.llm import make_cascade_state, stage1_concepts
 
-    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
@@ -174,7 +169,6 @@ async def test_stage1_logs_when_all_shortlists_are_dropped(
 ) -> None:
     from mixlab.llm import make_cascade_state, stage1_concepts
 
-    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
@@ -197,7 +191,6 @@ async def test_stage1_parses_response_with_trailing_prose(monkeypatch: pytest.Mo
     """Models that append explanatory text after the JSON array should still parse correctly."""
     from mixlab.llm import make_cascade_state, stage1_concepts
 
-    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
@@ -282,7 +275,6 @@ async def test_stage2_raises_loudly_on_failure(monkeypatch: pytest.MonkeyPatch) 
     from mixlab.llm import stage2_curate_and_report
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "bad-key")
-    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
     respx.post(_ANTHROPIC_URL).mock(return_value=Response(401, json={"error": "unauthorized"}))
 
     shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1"])]
@@ -296,7 +288,6 @@ async def test_stage2_raises_if_key_missing(monkeypatch: pytest.MonkeyPatch) -> 
     from mixlab.llm import stage2_curate_and_report
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("STAGE2_PROVIDER", raising=False)
     shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1"])]
     tracks_by_id: dict[str, Track] = {}
 
@@ -471,7 +462,7 @@ def test_shortfall_warning_not_triggered_at_minimum() -> None:
 async def test_stage1_raises_if_all_providers_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     from mixlab.llm import make_cascade_state, stage1_concepts
 
-    for key in ("MINIMAX_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"):
+    for key in ("GROQ_API_KEY", "GEMINI_API_KEY", "MISTRAL_API_KEY"):
         monkeypatch.delenv(key, raising=False)
 
     with pytest.raises(RuntimeError, match="All Stage 1 providers exhausted"):
@@ -536,7 +527,6 @@ async def test_stage1_skips_unconfigured_without_counting_failure(monkeypatch: p
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "key")
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
-    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
 
     respx.post(_GEMINI_URL).mock(return_value=Response(200, json=_chat_response()))
 
@@ -549,18 +539,16 @@ async def test_stage1_skips_unconfigured_without_counting_failure(monkeypatch: p
 
 @respx.mock
 async def test_stage1_raises_after_n_consecutive_failures(monkeypatch: pytest.MonkeyPatch) -> None:
-    """All four providers fail → RuntimeError after len(_CASCADE) consecutive failures."""
+    """All three providers fail → RuntimeError after len(_CASCADE) consecutive failures."""
     from mixlab.llm import make_cascade_state, stage1_concepts
 
     monkeypatch.setenv("GROQ_API_KEY", "key")
     monkeypatch.setenv("GEMINI_API_KEY", "key")
     monkeypatch.setenv("MISTRAL_API_KEY", "key")
-    monkeypatch.setenv("MINIMAX_API_KEY", "key")
 
     respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
     respx.post(_GEMINI_URL).mock(return_value=Response(500, text="error"))
     respx.post(_MISTRAL_URL).mock(return_value=Response(500, text="error"))
-    respx.post(_MINIMAX_URL).mock(return_value=Response(500, text="error"))
 
     with pytest.raises(RuntimeError, match="consecutive failures"):
         await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())

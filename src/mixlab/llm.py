@@ -37,11 +37,9 @@ _MIN_CONCEPT_TRACKS = 4  # Stage 2: minimum tracks in a final curated set
 _STAGE2_CAP = 6  # max shortlists sent to Stage 2
 _STAGE2_CANDIDATE_POOL = 12  # top N by size to sample from (ensures variety across runs)
 _STAGE1_TIMEOUT = 120  # seconds — default for openai-compat providers
-_MINIMAX_STAGE1_TIMEOUT = 360  # MiniMax is a thinking model; needs extra time
 _THINKING_MODEL_MAX_TOKENS = 16000  # thinking models spend tokens on reasoning before output
-_MINIMAX_STAGE2_MAX_TOKENS = 40000  # Stage 2 needs full output headroom; 40k is M2.7's practical ceiling
 
-# Strip inline thinking blocks emitted by reasoning models (e.g. MiniMax M2.7).
+# Strip inline thinking blocks emitted by reasoning models (e.g. Gemini 2.5 Flash).
 _THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
 
 
@@ -428,22 +426,6 @@ async def _call_anthropic_http(
         return str(resp.json()["content"][0]["text"])
 
 
-async def _try_minimax(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
-    key = os.environ.get("MINIMAX_API_KEY")
-    if not key:
-        return None
-    return await _call_openai_compat(
-        "https://api.minimax.io/v1",
-        key,
-        "MiniMax-M2.7",
-        prompt,
-        path="/text/chatcompletion_v2",
-        timeout=_MINIMAX_STAGE1_TIMEOUT,
-        system=system,
-        max_tokens=_THINKING_MODEL_MAX_TOKENS,
-    )
-
-
 async def _try_groq(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
     key = os.environ.get("GROQ_API_KEY")
     if not key:
@@ -482,10 +464,9 @@ async def _try_anthropic(prompt: str, system: str = _STAGE1_SYSTEM) -> str | Non
     return await _call_anthropic_http(key, "claude-sonnet-4-6", system, prompt)
 
 
-# Stage 1 free providers only — OpenRouter and Anthropic are Stage 2 / paid.
-# MiniMax is last: throttled to 50 TPS on entry plan, making it too slow to lead.
+# Stage 1 free providers only — Anthropic is Stage 2 / paid.
 _Stage1Provider = Callable[..., Coroutine[Any, Any, str | None]]
-_CASCADE: list[_Stage1Provider] = [_try_groq, _try_gemini, _try_mistral, _try_minimax]
+_CASCADE: list[_Stage1Provider] = [_try_groq, _try_gemini, _try_mistral]
 
 
 @dataclass
@@ -979,8 +960,6 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
                     )
                 )
         name_reason = str(item.get("name_reason", ""))
-        if not name_reason:
-            print(f"  [debug] name_reason missing for concept '{item.get('title', '?')}'", flush=True)
         curated.append(
             MixConcept(
                 title=str(item.get("title", "")),
@@ -1299,7 +1278,6 @@ async def _call_stage2_reports(
 async def stage2_curate_and_report(
     shortlists: list[MixConcept],
     tracks_by_id: dict[str, Track],
-    stage2_provider: str | None = None,
     custom_genre_label: str | None = None,
     custom_genre_sub_genres: list[str] | None = None,
     playlist_name: str | None = None,
@@ -1309,7 +1287,6 @@ async def stage2_curate_and_report(
     intent_brief: IntentBrief | None = None,
     used_mix_names: list[str] | None = None,
 ) -> tuple[list[MixConcept], str]:
-    del stage2_provider  # retained for API compatibility; MiniMax path removed
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
     if not stage2_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set — Stage 2 curation requires Anthropic.")
