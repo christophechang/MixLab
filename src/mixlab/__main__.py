@@ -391,6 +391,53 @@ async def run_playlist_mode(
     )
 
 
+async def run_export_unplayed() -> None:
+    tracks = parse_collection(_XML_PATH)
+    tracks, denylist_excluded = _apply_do_not_recommend_filter(tracks, _XML_PATH)
+    tracks = apply_bpm_corrections(tracks)
+
+    api_key = os.environ.get("CHANGSTA_API_KEY", "")
+    catalog_url = os.environ.get("CATALOG_API_URL", "")
+    if not catalog_url:
+        print("ERROR: CATALOG_API_URL not set — cannot determine unplayed tracks.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        played = await fetch_played_tracks(api_key, catalog_url)
+    except Exception as exc:
+        print(f"ERROR: Could not fetch played tracks — aborting: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    unplayed = filter_unplayed(tracks, played)
+    print(f"Unplayed: {len(unplayed)} / {len(tracks)} tracks.")
+
+    unplayed_ids = [t.track_id for t in unplayed]
+    raw_tracks_xml = parse_raw_tracks(_XML_PATH)
+    today = datetime.date.today().isoformat()
+    folder_name = f"Mix Lab - All Unplayed - {today}"
+
+    export_dir = Path("output/playlists")
+    out_path = export_merged_xml([], raw_tracks_xml, export_dir / "rekordbox_export.xml", folder_name, unplayed_ids)
+    if out_path is not None:
+        print(f"Exported: {out_path}")
+
+    report = f"All unplayed tracks — {len(unplayed)} tracks across full collection."
+    if denylist_excluded:
+        report += f" ({denylist_excluded} excluded via DO NOT RECOMMEND)"
+
+    merged_bytes = generate_merged_xml_bytes([], raw_tracks_xml, folder_name, unplayed_ids)
+    xml_attachments: list[tuple[str, bytes]] = [("rekordbox_export.xml", merged_bytes)] if merged_bytes else []
+
+    report_context = f"Report context: All Unplayed export ({len(unplayed)} tracks)"
+    await send_report(
+        report,
+        [],
+        [],
+        report_context=report_context,
+        attachments=xml_attachments,
+    )
+
+
 async def run(
     genre: str | None,
     export_dir: Path | None,
@@ -681,6 +728,7 @@ examples:
   mixlab --genre house --min-bpm 122 --max-bpm 128  narrow pool by BPM range
   mixlab --genre drum_and_bass --min-year 2020       tracks from 2020 onwards only
   mixlab --genres                     show cached counts from last run (no API)
+  mixlab --export-unplayed            export all unplayed tracks as Rekordbox XML + post to Discord
 """,
     )
     parser.add_argument(
@@ -726,6 +774,11 @@ examples:
         help="Use the full collection, ignoring played-track history (overrides CATALOG_API_URL)",
     )
     parser.add_argument(
+        "--export-unplayed",
+        action="store_true",
+        help="Export all unplayed tracks (rekordbox minus catalog) to output/playlists/ and post to Discord. No LLM.",
+    )
+    parser.add_argument(
         "--min-bpm",
         type=float,
         default=None,
@@ -762,6 +815,10 @@ examples:
     )
     if args.genres:
         _show_cached_genres()
+        return
+
+    if args.export_unplayed:
+        asyncio.run(run_export_unplayed())
         return
 
     export_dir: Path | None = None

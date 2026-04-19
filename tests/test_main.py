@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -14,8 +15,9 @@ from mixlab.__main__ import (
     _print_availability,
     _print_pipeline_summary,
     _validate_range_args,
+    run_export_unplayed,
 )
-from mixlab.models import Track
+from mixlab.models import PlayedTrack, Track
 from mixlab.playlist_exporter import build_merged_xml, parse_raw_tracks
 from mixlab.reader import parse_collection
 
@@ -378,3 +380,68 @@ def test_build_filter_desc_year_range() -> None:
 
 def test_build_filter_desc_none_when_no_filters() -> None:
     assert _build_filter_desc(min_bpm=None, max_bpm=None, min_year=None, max_year=None) is None
+
+
+# ---------------------------------------------------------------------------
+# run_export_unplayed
+# ---------------------------------------------------------------------------
+
+_EXPORT_UNPLAYED_XML = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <DJ_PLAYLISTS Version="1.0.0">
+      <COLLECTION Entries="3">
+        <TRACK TrackID="1" Name="Unplayed Track" Artist="Artist A" AverageBpm="124.00" Tonality="8A" Genre="House"
+               Location="file://localhost/music/a.mp3"/>
+        <TRACK TrackID="2" Name="Played Track" Artist="Artist B" AverageBpm="125.00" Tonality="9A" Genre="House"
+               Location="file://localhost/music/b.mp3"/>
+        <TRACK TrackID="3" Name="Also Unplayed" Artist="Artist C" AverageBpm="126.00" Tonality="10A" Genre="Techno"
+               Location="file://localhost/music/c.mp3"/>
+      </COLLECTION>
+      <PLAYLISTS>
+        <NODE Type="0" Name="ROOT" Count="1">
+          <NODE Type="1" Name="DO NOT RECOMMEND" KeyType="0" Entries="0"/>
+        </NODE>
+      </PLAYLISTS>
+    </DJ_PLAYLISTS>
+""")
+
+
+async def test_run_export_unplayed_exits_without_catalog_url(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    with pytest.raises(SystemExit) as exc_info:
+        await run_export_unplayed()
+    assert exc_info.value.code == 1
+    assert "CATALOG_API_URL" in capsys.readouterr().err
+
+
+async def test_run_export_unplayed_exports_only_unplayed_tracks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_EXPORT_UNPLAYED_XML)
+
+    played = [PlayedTrack(artist="Artist B", title="Played Track")]
+
+    monkeypatch.setenv("CATALOG_API_URL", "http://fake")
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+
+    with (
+        patch("mixlab.__main__.fetch_played_tracks", new=AsyncMock(return_value=played)),
+        patch("mixlab.__main__.export_merged_xml", return_value=tmp_path / "out.xml") as mock_export,
+        patch("mixlab.__main__.generate_merged_xml_bytes", return_value=b"<xml/>"),
+        patch("mixlab.__main__.send_report", new=AsyncMock()),
+    ):
+        await run_export_unplayed()
+
+    _, _, _, folder_name, exported_ids = mock_export.call_args.args
+    assert exported_ids is not None
+    assert "2" not in exported_ids
+    assert "1" in exported_ids
+    assert "3" in exported_ids
+    out = capsys.readouterr().out
+    assert "2 / 3" in out

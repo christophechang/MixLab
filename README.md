@@ -294,6 +294,20 @@ To also write the XML to disk:
 
 BPM and year filters apply after ingestion and BPM correction. In playlist mode they apply only to library additions — seed tracks are never filtered out. Tracks with no release year set are excluded when either year flag is active. Active filters appear in the Discord crate snapshot label.
 
+### Export all unplayed tracks to Rekordbox
+
+```bash
+./mixlab --export-unplayed
+```
+
+Compares your full Rekordbox collection against your play history and exports every track you haven't played yet as a Rekordbox-compatible merged XML file. Use this when you want a complete picture of what's in your crates that you haven't touched — import the file into Rekordbox to browse, filter, or prepare for a session.
+
+- Writes to `output/playlists/rekordbox_export.xml` with a dated folder name (`Mix Lab - All Unplayed - YYYY-MM-DD`)
+- Posts a summary and the XML attachment to Discord
+- Requires `CATALOG_API_URL` — without play history there is nothing to compare against
+- Respects the `DO NOT RECOMMEND` exclusion list
+- No LLM calls — fast and cheap
+
 ### View cached genre counts from the last run (no API calls at all)
 
 ```bash
