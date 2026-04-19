@@ -425,15 +425,7 @@ async def _call_anthropic_http(
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
         resp.raise_for_status()
-        resp_json = resp.json()
-        stop_reason = resp_json.get("stop_reason", "unknown")
-        text = str(resp_json["content"][0]["text"])
-        print(
-            f"[Anthropic] model={model} stop_reason={stop_reason} max_tokens={max_tokens} chars={len(text)}",
-            file=sys.stderr,
-            flush=True,
-        )
-        return text
+        return str(resp.json()["content"][0]["text"])
 
 
 async def _try_minimax(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
@@ -1223,55 +1215,15 @@ async def _call_stage2_raw(
     prompt: str,
     stage2_system: str,
     stage2_key: str,
-    use_minimax: bool,
-    model_display: str,
-) -> tuple[str, str]:
-    """Make the Stage 2 HTTP call. Returns (raw_text, model_display_name)."""
-    if use_minimax:
-        try:
-            raw = await _call_openai_compat(
-                "https://api.minimax.io/v1",
-                stage2_key,
-                "MiniMax-M2.7",
-                prompt,
-                path="/text/chatcompletion_v2",
-                timeout=300,
-                system=stage2_system,
-                max_tokens=_MINIMAX_STAGE2_MAX_TOKENS,
-            )
-        except Exception as exc:
-            raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc
-        return raw, model_display
-
+    max_tokens: int = 8192,
+) -> str:
+    """Make the Stage 2 selection HTTP call via Anthropic."""
     try:
-        raw = await _call_anthropic_http(
-            stage2_key, "claude-sonnet-4-6", stage2_system, prompt, max_tokens=32000, timeout=600
+        return await _call_anthropic_http(
+            stage2_key, "claude-sonnet-4-6", stage2_system, prompt, max_tokens=max_tokens, timeout=600
         )
-        return raw, model_display
-    except Exception as anthropic_exc:
-        print(
-            f"Stage 2 Anthropic failed ({type(anthropic_exc).__name__}: {anthropic_exc}), trying MiniMax M2.7 fallback...",
-            file=sys.stderr,
-        )
-        minimax_key = os.environ.get("MINIMAX_API_KEY")
-        if not minimax_key:
-            raise RuntimeError(f"Stage 2 curation failed: {anthropic_exc}") from anthropic_exc
-        try:
-            raw = await _call_openai_compat(
-                "https://api.minimax.io/v1",
-                minimax_key,
-                "MiniMax-M2.7",
-                prompt,
-                path="/text/chatcompletion_v2",
-                timeout=300,
-                system=stage2_system,
-                max_tokens=_MINIMAX_STAGE2_MAX_TOKENS,
-            )
-        except Exception as minimax_exc:
-            raise RuntimeError(
-                f"Stage 2 curation failed (Anthropic and MiniMax both failed): {minimax_exc}"
-            ) from minimax_exc
-        return raw, "MiniMax M2.7 (Anthropic fallback)"
+    except Exception as exc:
+        raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc
 
 
 async def _call_stage2_report_single(
