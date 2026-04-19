@@ -1194,7 +1194,7 @@ async def _call_stage2_raw(
     prompt: str,
     stage2_system: str,
     stage2_key: str,
-    max_tokens: int = 8192,
+    max_tokens: int = 32768,
 ) -> str:
     """Make the Stage 2 selection HTTP call via Anthropic."""
     try:
@@ -1411,7 +1411,7 @@ async def stage2_curate_and_report(
             f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. "
             "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier (e.g. if 'Slow Burn' exists, 'Slow Burn Gospel' is forbidden). \\",
         )
-    raw = await _call_stage2_raw(prompt, stage2_system, stage2_key, max_tokens=8192)
+    raw = await _call_stage2_raw(prompt, stage2_system, stage2_key, max_tokens=32768)
 
     valid_ids = set(tracks_by_id.keys())
     curated, _ = _parse_curated_concepts(raw, valid_ids)
@@ -1445,7 +1445,7 @@ async def stage2_curate_and_report(
                 f"Dropped seeds: {dropped_labels}.\n"
                 "Retry with one concept only. Include as many dropped seeds as possible.\n\n"
             ) + prompt
-            raw = await _call_stage2_raw(retry_prompt, stage2_system, stage2_key, max_tokens=8192)
+            raw = await _call_stage2_raw(retry_prompt, stage2_system, stage2_key, max_tokens=32768)
             curated, _ = _parse_curated_concepts(raw, valid_ids)
             if curated:
                 concept = curated[0]
