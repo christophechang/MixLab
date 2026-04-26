@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 from mixlab.llm import (
     _compute_practicality_score,  # noqa: PLC2701
     _minimum_playlist_seed_retention,
@@ -8,6 +10,8 @@ from mixlab.llm import (
     _passes_floor,  # noqa: PLC2701
     _score_variant,  # noqa: PLC2701
     _select_best_variant,
+    make_cascade_state,
+    stage0_intent_brief,
 )
 from mixlab.models import (
     AdjacencyFragment,
@@ -373,3 +377,70 @@ def test_score_variant_returns_completion_variant_with_practicality_score() -> N
     assert variant.strategy == "practical"
     assert isinstance(variant.practicality_score, DJPracticalityScore)
     assert 0.0 <= variant.score <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# stage0_intent_brief integration tests
+# ---------------------------------------------------------------------------
+
+_VALID_INTENT_RESPONSE = """{
+  "overall_vibe": "Deep hypnotic groove",
+  "is_coherent_set": true,
+  "risk_tolerance": "medium",
+  "missing_roles": ["closer"],
+  "seed_analyses": [
+    {"track_id": "1", "tier": "anchor", "inferred_role": "peak"},
+    {"track_id": "2", "tier": "supporting", "inferred_role": "builder"},
+    {"track_id": "3", "tier": "optional", "inferred_role": "opener"},
+    {"track_id": "4", "tier": "anchor", "inferred_role": "pivot"},
+    {"track_id": "5", "tier": "supporting", "inferred_role": "builder"},
+    {"track_id": "6", "tier": "optional", "inferred_role": "cleanser"}
+  ]
+}"""
+
+
+async def test_stage0_returns_deterministic_brief_for_short_seed() -> None:
+    """Seeds <=5 tracks skip LLM and return deterministic brief without calling any provider."""
+    seed_tracks = [_make_track(str(i)) for i in range(1, 4)]
+    seed_ids = [t.track_id for t in seed_tracks]
+    state = make_cascade_state()
+    # _CASCADE is built at module load time; replace it with a tracked mock to assert no call.
+    sentinel = AsyncMock(return_value=None)
+    sentinel.__name__ = "mock_provider"
+    with patch("mixlab.llm._CASCADE", [sentinel]):
+        brief = await stage0_intent_brief(seed_tracks, seed_ids, state, bpm_range=(124.0, 124.0))
+    sentinel.assert_not_called()
+    assert all(tid in brief.supporting_ids or tid in brief.anchor_ids for tid in seed_ids)
+
+
+async def test_stage0_merges_llm_tiers_with_deterministic_shape() -> None:
+    """LLM tiers are used; deterministic energy_shape, bpm_range, and adjacencies override."""
+    seed_tracks = [_make_track(str(i), bpm=124.0 + i * 0.5) for i in range(1, 7)]
+    seed_ids = [t.track_id for t in seed_tracks]
+    state = make_cascade_state()
+    # Patch _CASCADE so the first provider returns the desired response.
+    llm_provider = AsyncMock(return_value=_VALID_INTENT_RESPONSE)
+    llm_provider.__name__ = "mock_llm_provider"
+    with patch("mixlab.llm._CASCADE", [llm_provider]):
+        brief = await stage0_intent_brief(seed_tracks, seed_ids, state, bpm_range=(124.0, 126.5))
+    assert "1" in brief.anchor_ids
+    assert "2" in brief.supporting_ids
+    assert brief.overall_vibe == "Deep hypnotic groove"
+    assert brief.risk_tolerance == "medium"
+    assert brief.energy_shape in ("single_arc", "double_peak", "plateau", "flat", "unclear")
+    assert brief.bpm_range[0] <= brief.bpm_range[1]
+
+
+async def test_stage0_falls_back_to_deterministic_when_all_providers_fail() -> None:
+    """All cascade providers return None → deterministic fallback, no exception raised."""
+    seed_tracks = [_make_track(str(i)) for i in range(1, 7)]
+    seed_ids = [t.track_id for t in seed_tracks]
+    state = make_cascade_state()
+    # Three mock providers all returning None simulates every provider being unavailable.
+    none_providers = [AsyncMock(return_value=None) for _ in range(3)]
+    for p in none_providers:
+        p.__name__ = "mock_none_provider"
+    with patch("mixlab.llm._CASCADE", none_providers):
+        brief = await stage0_intent_brief(seed_tracks, seed_ids, state, bpm_range=(124.0, 124.0))
+    assert brief is not None
+    assert all(tid in brief.supporting_ids or tid in brief.anchor_ids for tid in seed_ids)
