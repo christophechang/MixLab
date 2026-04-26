@@ -406,6 +406,7 @@ async def _call_anthropic_http(
     prompt: str,
     max_tokens: int = 2048,
     timeout: int = 90,
+    temperature: float = 0.7,
 ) -> str:
     headers = {
         "x-api-key": api_key,
@@ -416,7 +417,7 @@ async def _call_anthropic_http(
     payload = {
         "model": model,
         "max_tokens": max_tokens,
-        "temperature": 0.7,
+        "temperature": temperature,
         "system": system,
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -1219,7 +1220,13 @@ async def _call_stage2_raw(
     """Make the Stage 2 selection HTTP call via Anthropic."""
     try:
         return await _call_anthropic_http(
-            stage2_key, "claude-sonnet-4-6", stage2_system, prompt, max_tokens=max_tokens, timeout=600
+            stage2_key,
+            "claude-sonnet-4-6",
+            stage2_system,
+            prompt,
+            max_tokens=max_tokens,
+            timeout=600,
+            temperature=0.3,
         )
     except Exception as exc:
         raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc
