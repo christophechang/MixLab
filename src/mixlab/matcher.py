@@ -24,10 +24,15 @@ def normalise(text: str) -> str:
     return text
 
 
+def _played_key(p: PlayedTrack) -> str:
+    return normalise(p.artist) + " " + normalise(p.title)
+
+
 def is_played(track: Track, played: list[PlayedTrack]) -> bool:
     needle = normalise(track.artist) + " " + normalise(track.title)
-    return any(normalise(p.artist) + " " + normalise(p.title) == needle for p in played)
+    return any(_played_key(p) == needle for p in played)
 
 
 def filter_unplayed(tracks: list[Track], played: list[PlayedTrack]) -> list[Track]:
-    return [t for t in tracks if not is_played(t, played)]
+    played_set = {_played_key(p) for p in played}
+    return [t for t in tracks if normalise(t.artist) + " " + normalise(t.title) not in played_set]
