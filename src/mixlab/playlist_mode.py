@@ -4,7 +4,7 @@ from difflib import get_close_matches
 from statistics import median
 
 from mixlab.clustering import (
-    _camelot_compatible,  # noqa: PLC2701
+    camelot_compatible,
     build_custom_genre_pool,
 )
 from mixlab.config import CustomGenre
@@ -49,7 +49,7 @@ def detect_adjacency_fragments(
         if a is None or b is None:
             continue
         bpm_close = abs(a.bpm - b.bpm) <= bpm_threshold
-        harmonically_ok = _camelot_compatible(a.camelot_key, b.camelot_key)
+        harmonically_ok = camelot_compatible(a.camelot_key, b.camelot_key)
         if bpm_close and harmonically_ok:
             fragments.append(
                 AdjacencyFragment(
@@ -352,7 +352,7 @@ def _score_candidate(
     bpm_dist = abs(track.bpm - zone_mid_bpm)
     bpm_score = max(0.0, 1.0 - bpm_dist / max(bpm_expansion, 1.0))
 
-    camelot_score = 1.0 if any(_camelot_compatible(track.camelot_key, s.camelot_key) for s in zone_seeds) else 0.0
+    camelot_score = 1.0 if any(camelot_compatible(track.camelot_key, s.camelot_key) for s in zone_seeds) else 0.0
 
     role_score = 0.0
     if track.energy is not None and missing_roles:

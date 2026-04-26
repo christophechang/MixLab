@@ -17,7 +17,7 @@ def _camelot_number(key: str) -> int:
     return int(m.group(1)) if m else 0
 
 
-def _camelot_compatible(a: str, b: str) -> bool:
+def camelot_compatible(a: str, b: str) -> bool:
     ma = _CAMELOT_RE.match(a)
     mb = _CAMELOT_RE.match(b)
     if not ma or not mb:
@@ -77,7 +77,7 @@ def sort_by_camelot(tracks: list[Track]) -> list[Track]:
     while remaining:
         last_key = sorted_tracks[-1].camelot_key
         # Find next compatible track; prefer lowest BPM among compatibles.
-        compatible = [t for t in remaining if _camelot_compatible(last_key, t.camelot_key)]
+        compatible = [t for t in remaining if camelot_compatible(last_key, t.camelot_key)]
         next_track = min(compatible, key=lambda t: t.bpm) if compatible else min(remaining, key=lambda t: t.bpm)
         sorted_tracks.append(next_track)
         remaining.remove(next_track)
