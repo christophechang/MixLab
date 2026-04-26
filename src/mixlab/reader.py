@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from typing import Literal
 
 from lxml import etree
 
@@ -10,7 +11,7 @@ from mixlab.models import Track
 
 _MIK_ENERGY_RE: re.Pattern[str] = re.compile(r"\bEnergy\s+(\d+)", re.IGNORECASE)
 
-_COLOUR_TO_CONFIDENCE: dict[str, str] = {
+_COLOUR_TO_CONFIDENCE: dict[str, Literal["high", "medium", "low"]] = {
     "#00ff00": "high",
     "0x00ff00": "high",
     "#ffa500": "medium",

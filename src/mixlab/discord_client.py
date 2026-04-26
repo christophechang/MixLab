@@ -6,7 +6,7 @@ import os
 
 import httpx
 
-from mixlab.config import TRACK_COUNT_TARGETS, shortfall_warning
+from mixlab.config import shortfall_warning
 from mixlab.models import MixConcept, Track
 
 _DISCORD_API = "https://discord.com/api/v10"

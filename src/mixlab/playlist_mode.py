@@ -4,8 +4,8 @@ from difflib import get_close_matches
 from statistics import median
 
 from mixlab.clustering import (
-    camelot_compatible,
     build_custom_genre_pool,
+    camelot_compatible,
 )
 from mixlab.config import CustomGenre
 from mixlab.models import (

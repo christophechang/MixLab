@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -125,7 +126,7 @@ def _make_track(
     album: str = "",
     remixer: str = "",
     mix: list[str] | None = None,
-    enrichment_confidence: str = "",
+    enrichment_confidence: Literal["high", "medium", "low", ""] = "",
 ) -> Track:
     return Track(
         track_id=track_id,

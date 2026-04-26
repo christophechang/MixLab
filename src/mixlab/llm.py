@@ -15,7 +15,7 @@ from typing import Any, Callable, Literal, cast
 import httpx
 
 from mixlab.clustering import camelot_distance
-from mixlab.config import TRACK_COUNT_TARGETS, shortfall_warning
+from mixlab.config import shortfall_warning
 from mixlab.models import (
     CompletionVariant,
     DJPracticalityScore,
@@ -802,7 +802,7 @@ superior for blendability and intent.
 All three must meet the anchor protection rules and the seed retention floor.
 If the pool is too thin to produce even one strong set: [{"diagnostic": "..."}].""",
 )
-assert _STAGE2_SYSTEM_PLAYLIST != _tmp, (
+assert _tmp != _STAGE2_SYSTEM_PLAYLIST, (
     "Stage 2 playlist prompt: produce section not found — _STAGE2_PRODUCE_STANDARD drifted from _STAGE2_SYSTEM"
 )
 
@@ -818,8 +818,7 @@ def _make_selection_system(base: str) -> str:
     idx = base.find(marker)
     if idx != -1:
         base = (
-            base[:idx].rstrip()
-            + "\n\nRespond ONLY with the JSON array. "
+            base[:idx].rstrip() + "\n\nRespond ONLY with the JSON array. "
             "Output the opening [ immediately — no analysis, preamble, or explanation before it."
         )
     return base
@@ -1434,9 +1433,8 @@ async def stage2_curate_and_report(
     if used_mix_names:
         names_str = ", ".join(used_mix_names)
         stage2_system = stage2_system.replace(
-            'The name should make someone curious, not nod in recognition. '
-            'Add a "name_reason" field',
-            'The name should make someone curious, not nod in recognition. '
+            'The name should make someone curious, not nod in recognition. Add a "name_reason" field',
+            "The name should make someone curious, not nod in recognition. "
             f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. "
             "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier "
             f"(e.g. if '{used_mix_names[0]}' is in the list, '{used_mix_names[0]} Vol. 2' and any variation is forbidden). "
@@ -1448,8 +1446,7 @@ async def stage2_curate_and_report(
     valid_ids = set(tracks_by_id.keys())
     curated, _ = _parse_curated_concepts(raw, valid_ids)
     print(
-        f"Stage 2 selection pass: {len(curated)} concept(s) returned "
-        f"(moods: {[c.mood for c in curated]})",
+        f"Stage 2 selection pass: {len(curated)} concept(s) returned (moods: {[c.mood for c in curated]})",
         file=sys.stderr,
     )
     report = ""
