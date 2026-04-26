@@ -31,8 +31,8 @@ from mixlab.models import (
 
 _MAX_TRACKS_PER_CALL = 40
 _MAX_TRACKS_PER_CALL_CUSTOM = 60  # larger chunks for custom multi-genre pools
-_MAX_STAGE1_POOL_CUSTOM = 120  # random window size for custom pools (2 chunks × 60 = 2 API calls)
-_MIN_SHORTLIST_TRACKS = 8  # Stage 1: minimum candidates per pool
+MAX_STAGE1_POOL_CUSTOM = 120  # random window size for custom pools (2 chunks × 60 = 2 API calls)
+MIN_SHORTLIST_TRACKS = 8  # Stage 1: minimum candidates per pool
 _MIN_CONCEPT_TRACKS = 4  # Stage 2: minimum tracks in a final curated set
 _STAGE2_CAP = 6  # max shortlists sent to Stage 2
 _STAGE2_CANDIDATE_POOL = 12  # top N by size to sample from (ensures variety across runs)
@@ -494,7 +494,7 @@ def _print_stage1_provider_summary(
         f"parsed={len(parsed)} | cleaned={len(cleaned)} | kept={len(kept)}"
     )
     for raw_concept, cleaned_concept in zip(parsed, cleaned, strict=False):
-        status = "kept" if len(cleaned_concept.track_ids) >= _MIN_SHORTLIST_TRACKS else "dropped (<8)"
+        status = "kept" if len(cleaned_concept.track_ids) >= MIN_SHORTLIST_TRACKS else "dropped (<8)"
         print(
             f"  - {cleaned_concept.title} | raw={len(raw_concept.track_ids)} | "
             f"kept={len(cleaned_concept.track_ids)} | {status}"
@@ -538,7 +538,7 @@ async def _call_stage1_once(
                 )
                 for c in concepts
             ]
-            kept = [c for c in cleaned if len(c.track_ids) >= _MIN_SHORTLIST_TRACKS]
+            kept = [c for c in cleaned if len(c.track_ids) >= MIN_SHORTLIST_TRACKS]
             _print_stage1_provider_summary(provider.__name__, genre, len(tracks), concepts, cleaned, kept)
             state.consecutive_failures = 0
             return kept

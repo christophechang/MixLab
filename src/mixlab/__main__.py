@@ -24,7 +24,8 @@ from mixlab.clustering import (
 from mixlab.config import CUSTOM_GENRES, GENRE_MAP, IGNORED_GENRES
 from mixlab.discord_client import send_report
 from mixlab.llm import (
-    _MIN_SHORTLIST_TRACKS,
+    MAX_STAGE1_POOL_CUSTOM,
+    MIN_SHORTLIST_TRACKS,
     make_cascade_state,
     select_shortlists_for_stage2,
     select_stage1_window,
@@ -497,8 +498,6 @@ async def run(
     same_genre_outlier_count = 0
 
     if is_custom:
-        from mixlab.llm import _MAX_STAGE1_POOL_CUSTOM
-
         pool = build_custom_genre_pool(genre, unplayed, CUSTOM_GENRES, GENRE_MAP)
         if not pool:
             print(f"No unplayed tracks found for custom genre '{genre}'.", file=sys.stderr)
@@ -507,7 +506,7 @@ async def run(
         # Sort by BPM for Stage 1 window selection — ensures each window is BPM-coherent.
         # (Camelot walk not used here: it can span large BPM gaps across sub-genres.)
         bpm_sorted_pool = sorted(pool, key=lambda t: t.bpm)
-        stage1_pool = select_stage1_window(bpm_sorted_pool, _MAX_STAGE1_POOL_CUSTOM)
+        stage1_pool = select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CUSTOM)
         if len(stage1_pool) < len(pool):
             print(f"  Selected {len(stage1_pool)}-track window from pool for Stage 1 (randomised per run).")
         cfg = CUSTOM_GENRES[genre]
@@ -532,10 +531,10 @@ async def run(
         for genre_label, cluster_tracks in clusters.items():
             bpm_filtered = filter_by_bpm(cluster_tracks)
             bpm_filtered_counts[genre_label] = len(bpm_filtered)
-            if len(bpm_filtered) < _MIN_SHORTLIST_TRACKS:
+            if len(bpm_filtered) < MIN_SHORTLIST_TRACKS:
                 print(
                     f"Stage 1: skipping {genre_label} — {len(bpm_filtered)} tracks after BPM filter "
-                    f"(minimum {_MIN_SHORTLIST_TRACKS})"
+                    f"(minimum {MIN_SHORTLIST_TRACKS})"
                 )
                 continue
             sorted_tracks = sort_by_camelot(bpm_filtered)
