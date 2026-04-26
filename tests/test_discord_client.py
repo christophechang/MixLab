@@ -82,6 +82,21 @@ def test_format_report_includes_concept_headers() -> None:
     assert "Dark Rollers" in result
 
 
+def test_format_report_shows_name_reason_with_label() -> None:
+    concept = MixConcept(title="Dark Rollers", mood="heavy", track_ids=["1"], name_reason="Relentless drive.")
+    tracks_by_id = {"1": _make_track(1)}
+    result = format_report("", [concept], tracks_by_id, [])
+    assert "**Name:**" in result
+    assert "Relentless drive." in result
+
+
+def test_format_report_omits_name_reason_when_empty() -> None:
+    concept = MixConcept(title="Dark Rollers", mood="heavy", track_ids=["1"], name_reason="")
+    tracks_by_id = {"1": _make_track(1)}
+    result = format_report("", [concept], tracks_by_id, [])
+    assert "**Name:**" not in result
+
+
 def test_format_report_excluded_count_appears_inside_snapshot_block() -> None:
     result = format_report("", [], {}, [], counts=_COUNTS, show_unplayed=True, excluded_count=42)
     # Must mention the count
