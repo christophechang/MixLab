@@ -429,28 +429,28 @@ def test_parse_concepts_recovers_from_truncated_json() -> None:
 
 
 def test_shortfall_warning_triggered_below_threshold() -> None:
-    from mixlab.llm import _shortfall_warning
+    from mixlab.config import shortfall_warning
 
     concept = MixConcept(title="Too Small", mood="dark", track_ids=["1", "2"])
-    warning = _shortfall_warning(concept, "Drum & Bass")
+    warning = shortfall_warning(concept, "Drum & Bass")
     assert warning is not None
     assert "2 tracks found" in warning
     assert "needs" in warning
 
 
 def test_shortfall_warning_not_triggered_near_minimum() -> None:
-    from mixlab.llm import _shortfall_warning
+    from mixlab.config import shortfall_warning
 
     concept = MixConcept(title="Nearly There", mood="dark", track_ids=[str(i) for i in range(8)])
-    warning = _shortfall_warning(concept, "Drum & Bass")
+    warning = shortfall_warning(concept, "Drum & Bass")
     assert warning is None
 
 
 def test_shortfall_warning_not_triggered_at_minimum() -> None:
-    from mixlab.llm import _shortfall_warning
+    from mixlab.config import shortfall_warning
 
     concept = MixConcept(title="Full Set", mood="dark", track_ids=[str(i) for i in range(10)])
-    warning = _shortfall_warning(concept, "Drum & Bass")
+    warning = shortfall_warning(concept, "Drum & Bass")
     assert warning is None
 
 

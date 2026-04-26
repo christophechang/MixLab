@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from mixlab.models import MixConcept
 
 
 class CustomGenre(TypedDict):
@@ -61,3 +64,14 @@ TRACK_COUNT_TARGETS: dict[str, tuple[int, int]] = {
     "Jungle": (12, 16),
     "_default": (8, 12),
 }
+
+_SHORTFALL_THRESHOLD = 4
+
+
+def shortfall_warning(concept: MixConcept, genre: str) -> str | None:
+    min_count, _ = TRACK_COUNT_TARGETS.get(genre, TRACK_COUNT_TARGETS["_default"])
+    n = len(concept.track_ids)
+    shortfall = min_count - n
+    if shortfall > _SHORTFALL_THRESHOLD:
+        return f"⚠️ {n} tracks found — needs {shortfall} more to fill a set. Crate dig to complete."
+    return None

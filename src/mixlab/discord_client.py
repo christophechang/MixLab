@@ -6,23 +6,13 @@ import os
 
 import httpx
 
-from mixlab.config import TRACK_COUNT_TARGETS
+from mixlab.config import TRACK_COUNT_TARGETS, shortfall_warning
 from mixlab.models import MixConcept, Track
 
 _DISCORD_API = "https://discord.com/api/v10"
 _CHUNK_SIZE = 2000
 _CHUNK_SLEEP = 0.5
 _RATE_LIMIT_BUFFER = 0.5
-_SHORTFALL_THRESHOLD = 4
-
-
-def _shortfall_warning(concept: MixConcept, genre: str) -> str | None:
-    min_count, _ = TRACK_COUNT_TARGETS.get(genre, TRACK_COUNT_TARGETS["_default"])
-    n = len(concept.track_ids)
-    shortfall = min_count - n
-    if shortfall > _SHORTFALL_THRESHOLD:
-        return f"⚠️ {n} tracks found — needs {shortfall} more to fill a set. Crate dig to complete."
-    return None
 
 
 def format_report(
@@ -87,7 +77,7 @@ def format_report(
                     t = tracks_by_id[tid]
                     lines.append(f"{idx}. {t.artist} — {t.title} [{t.camelot_key} · {t.bpm} BPM]")
 
-            warning = _shortfall_warning(concept, genre)
+            warning = shortfall_warning(concept, genre)
             if warning:
                 lines.append(f"\n{warning}")
 

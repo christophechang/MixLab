@@ -15,7 +15,7 @@ from typing import Any, Callable, Literal, cast
 import httpx
 
 from mixlab.clustering import camelot_distance
-from mixlab.config import TRACK_COUNT_TARGETS
+from mixlab.config import TRACK_COUNT_TARGETS, shortfall_warning
 from mixlab.models import (
     CompletionVariant,
     DJPracticalityScore,
@@ -838,17 +838,7 @@ Be opinionated, musical, and honest. Peer-to-peer, no marketing language, no fil
 Return ONLY the report text. No JSON, no markdown fences, no preamble.\
 """
 
-_SHORTFALL_THRESHOLD = 4
 _PLAYLIST_MINIMUM_SEED_RATIO = 0.6
-
-
-def _shortfall_warning(concept: MixConcept, genre: str) -> str | None:
-    min_count, _ = TRACK_COUNT_TARGETS.get(genre, TRACK_COUNT_TARGETS["_default"])
-    n = len(concept.track_ids)
-    shortfall = min_count - n
-    if shortfall > _SHORTFALL_THRESHOLD:
-        return f"⚠️ {n} tracks found — needs {shortfall} more to fill a set. Crate dig to complete."
-    return None
 
 
 def _fix_json_strings(raw: str) -> str:
@@ -1562,7 +1552,7 @@ async def stage2_curate_and_report(
             continue
         track = tracks_by_id.get(concept.track_ids[0])
         genre = track.genre if track else "_default"
-        warning = _shortfall_warning(concept, genre)
+        warning = shortfall_warning(concept, genre)
         if warning:
             warnings.append(f"⚠️ {concept.title}: {warning}")
 

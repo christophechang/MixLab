@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from mixlab.config import shortfall_warning
 from mixlab.discord_client import format_report
 from mixlab.models import MixConcept, Track
 
@@ -110,3 +111,16 @@ def test_format_report_excluded_count_appears_inside_snapshot_block() -> None:
 def test_format_report_excluded_count_zero_omits_line() -> None:
     result = format_report("", [], {}, [], counts=_COUNTS, show_unplayed=True, excluded_count=0)
     assert "excluded" not in result
+
+
+def test_shortfall_warning_returns_none_when_shortfall_small() -> None:
+    concept = MixConcept(title="T", mood="m", track_ids=[str(i) for i in range(20)])
+    assert shortfall_warning(concept, "house") is None
+
+
+def test_shortfall_warning_returns_message_when_shortfall_large() -> None:
+    concept = MixConcept(title="T", mood="m", track_ids=["1", "2"])
+    result = shortfall_warning(concept, "House")
+    assert result is not None
+    assert "2 tracks found" in result
+    assert "more to fill" in result
