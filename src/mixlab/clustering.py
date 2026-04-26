@@ -76,11 +76,12 @@ def sort_by_camelot(tracks: list[Track]) -> list[Track]:
 
     while remaining:
         last_key = sorted_tracks[-1].camelot_key
-        # Find next compatible track; prefer lowest BPM among compatibles.
-        compatible = [t for t in remaining if camelot_compatible(last_key, t.camelot_key)]
-        next_track = min(compatible, key=lambda t: t.bpm) if compatible else min(remaining, key=lambda t: t.bpm)
-        sorted_tracks.append(next_track)
-        remaining.remove(next_track)
+        compatible_idx = [i for i, t in enumerate(remaining) if camelot_compatible(last_key, t.camelot_key)]
+        if compatible_idx:
+            best_idx = min(compatible_idx, key=lambda i: remaining[i].bpm)
+        else:
+            best_idx = min(range(len(remaining)), key=lambda i: remaining[i].bpm)
+        sorted_tracks.append(remaining.pop(best_idx))
 
     return sorted_tracks
 
