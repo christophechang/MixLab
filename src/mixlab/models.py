@@ -21,7 +21,7 @@ class Track(BaseModel):
     album: str = ""
     remixer: str = ""
     mix: list[str] = Field(default_factory=list)
-    enrichment_confidence: str = ""  # "high" | "medium" | "low" | ""
+    enrichment_confidence: Literal["high", "medium", "low", ""] = ""
 
 
 class PlayedTrack(BaseModel):
