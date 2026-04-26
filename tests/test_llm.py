@@ -1466,6 +1466,43 @@ def test_selection_system_playlist_variant_has_practical_balanced_adventurous() 
     assert '"report":' not in _STAGE2_SYSTEM_PLAYLIST_SELECTION
 
 
+def test_used_mix_names_are_injected_into_standard_selection_system() -> None:
+    """Regression: the replace() search string previously had a spurious backslash that never matched."""
+    from mixlab.llm import _STAGE2_SYSTEM_SELECTION
+
+    names_str = "Slow Burn, Night Drive"
+    first_name = "Slow Burn"
+    system = _STAGE2_SYSTEM_SELECTION.replace(
+        'The name should make someone curious, not nod in recognition. '
+        'Add a "name_reason" field',
+        'The name should make someone curious, not nod in recognition. '
+        f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. "
+        "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier "
+        f"(e.g. if '{first_name}' is in the list, '{first_name} Vol. 2' and any variation is forbidden). "
+        'Add a "name_reason" field',
+    )
+    assert "Slow Burn" in system
+    assert "Night Drive" in system
+    assert "Slow Burn Vol. 2" in system  # the example in the injected warning
+
+
+def test_used_mix_names_are_injected_into_playlist_selection_system() -> None:
+    from mixlab.llm import _STAGE2_SYSTEM_PLAYLIST_SELECTION
+
+    names_str = "Slow Burn"
+    first_name = "Slow Burn"
+    system = _STAGE2_SYSTEM_PLAYLIST_SELECTION.replace(
+        'The name should make someone curious, not nod in recognition. '
+        'Add a "name_reason" field',
+        'The name should make someone curious, not nod in recognition. '
+        f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. "
+        "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier "
+        f"(e.g. if '{first_name}' is in the list, '{first_name} Vol. 2' and any variation is forbidden). "
+        'Add a "name_reason" field',
+    )
+    assert "Slow Burn" in system
+
+
 # ---------------------------------------------------------------------------
 # _call_stage2_reports — parallel report generation
 # ---------------------------------------------------------------------------

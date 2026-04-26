@@ -711,9 +711,16 @@ risk_type: one of "chapter_pivot" | "peak_impact" | "deliberate_reset" | "closer
            | "cut_only" | "low_tonal_risk" | "" (empty string when is_risky=false).
 "cut_only" means: risky, with no mechanism that earns it — just a hard cut.
 
-Give each concept a compelling creative name — not the pool name from Stage 1. \
-Add a "name_reason" field: one short sentence (max 15 words) stating the emotional or sonic thesis \
-of the set — what this selection is doing as a whole that the name captures. Must be verifiable \
+Give each concept a short, evocative name (2–4 words max) — not the pool name from Stage 1. \
+Avoid generic [Adjective][Noun] patterns (e.g. "Warm Gravity", "Committed Floor", "Orbital Descent" are bad). \
+Good names are oblique, specific, or surprising — they suggest a place, a feeling, a moment, or a cultural \
+reference rather than describing the music. Think how a DJ would title a mix: "Late Latitude", "Fever", \
+"Interzone", "Red Light", "The Slow Hours". The name should make someone curious, not nod in recognition. \
+Add a "name_reason" field: one short sentence (max 15 words) explaining WHY this specific title was \
+chosen — what literal or metaphorical quality in the track list earns the name. This must reference \
+the title explicitly and connect it to something audible (BPM arc, key centre, a specific track, \
+a mood shift). Do not repeat the mood description. Example: if title is "Slow Burn", write \
+"Ten tracks of locked 122–127 BPM tension with no release until the final two." Must be verifiable \
 from the track list; do not invent.
 The track_ids must be the final selected tracks in play order.
 The "report" value must be a single string (with \\n for line breaks) in this exact format:
@@ -1415,11 +1422,15 @@ async def stage2_curate_and_report(
     if used_mix_names:
         names_str = ", ".join(used_mix_names)
         stage2_system = stage2_system.replace(
-            "Give each concept a compelling creative name — not the pool name from Stage 1. \\",
-            "Give each concept a compelling creative name — not the pool name from Stage 1. "
+            'The name should make someone curious, not nod in recognition. '
+            'Add a "name_reason" field',
+            'The name should make someone curious, not nod in recognition. '
             f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. "
-            "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier (e.g. if 'Slow Burn' exists, 'Slow Burn Gospel' is forbidden). \\",
+            "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier "
+            f"(e.g. if '{used_mix_names[0]}' is in the list, '{used_mix_names[0]} Vol. 2' and any variation is forbidden). "
+            'Add a "name_reason" field',
         )
+
     raw = await _call_stage2_raw(prompt, stage2_system, stage2_key, max_tokens=32768)
 
     valid_ids = set(tracks_by_id.keys())
