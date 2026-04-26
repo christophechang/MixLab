@@ -745,12 +745,24 @@ between sounding clever and being right, be right.
 Respond ONLY with the JSON array.\
 """
 
-_STAGE2_SYSTEM_PLAYLIST = _STAGE2_SYSTEM.replace(
-    """For each shortlist or sub-pool you carve from it:
+# Named targets for the two sections that differ between standard and playlist prompts.
+# Defined as constants so that the .replace() calls below can be asserted against them —
+# if either drifts from _STAGE2_SYSTEM, the assert fires at import time instead of
+# silently producing a prompt with the old text.
+_STAGE2_SELECT_STANDARD = """For each shortlist or sub-pool you carve from it:
 - SELECT the best 8–12 tracks from the pool for a coherent DJ set. Exclude tracks that weaken the journey. \
 Weakness is practical: a track whose intro gives no workable mix point, a vocal that starts on bar one with \
 no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment \
-used so early it makes everything after feel like a comedown.""",
+used so early it makes everything after feel like a comedown."""
+
+_STAGE2_PRODUCE_STANDARD = """Produce as many concepts as the pool genuinely supports — between 3 and 6. If the pool only yields 4 \
+strong concepts, produce 4. Do not pad with weak concepts to hit a number. If the pool is too thin to \
+produce even 3 distinct, coherent sets, return a single-element array with a diagnostic object instead \
+of concept objects: [{"diagnostic": "...explanation of why the pool is insufficient..."}] — this is \
+useful information, not a failure."""
+
+_tmp = _STAGE2_SYSTEM.replace(
+    _STAGE2_SELECT_STANDARD,
     """For playlist-completion runs:
 - Prefer seed tracks over library tracks when both serve the arc equally — but arc quality and narrative \
 tightness take priority over seed count. Cut a seed that weakens the concept; keep a library track that \
@@ -760,12 +772,12 @@ is defined as much by what you cut as what you keep — every track must earn it
 tracks that weaken the journey. Weakness is practical: a track whose intro gives no workable mix point, a \
 vocal that starts on bar one with no room to bring it in, a bass-heavy record dropped after another with no \
 frequency relief, a big moment used so early it makes everything after feel like a comedown.""",
-).replace(
-    """Produce as many concepts as the pool genuinely supports — between 3 and 6. If the pool only yields 4 \
-strong concepts, produce 4. Do not pad with weak concepts to hit a number. If the pool is too thin to \
-produce even 3 distinct, coherent sets, return a single-element array with a diagnostic object instead \
-of concept objects: [{"diagnostic": "...explanation of why the pool is insufficient..."}] — this is \
-useful information, not a failure.""",
+)
+assert _tmp != _STAGE2_SYSTEM, (
+    "Stage 2 playlist prompt: select section not found — _STAGE2_SELECT_STANDARD drifted from _STAGE2_SYSTEM"
+)
+_STAGE2_SYSTEM_PLAYLIST = _tmp.replace(
+    _STAGE2_PRODUCE_STANDARD,
     """Produce EXACTLY THREE concepts from the same pool using these strategies:
 
 1. "practical" (mood = "practical"): maximise harmonic continuity. Prefer adjacent Camelot keys \
@@ -788,6 +800,9 @@ adventurous may open stranger or more spacious. Reuse the same opener across all
 superior for blendability and intent.
 All three must meet the anchor protection rules and the seed retention floor.
 If the pool is too thin to produce even one strong set: [{"diagnostic": "..."}].""",
+)
+assert _STAGE2_SYSTEM_PLAYLIST != _tmp, (
+    "Stage 2 playlist prompt: produce section not found — _STAGE2_PRODUCE_STANDARD drifted from _STAGE2_SYSTEM"
 )
 
 
