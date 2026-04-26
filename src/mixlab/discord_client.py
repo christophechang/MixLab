@@ -13,6 +13,7 @@ _DISCORD_API = "https://discord.com/api/v10"
 _CHUNK_SIZE = 2000
 _CHUNK_SLEEP = 0.5
 _RATE_LIMIT_BUFFER = 0.5
+_MAX_RATE_LIMIT_RETRIES = 5
 
 
 def format_report(
@@ -142,7 +143,7 @@ class DiscordClient:
 
     async def _post_raw(self, client: httpx.AsyncClient, channel_id: str, content: str) -> None:
         url = f"{_DISCORD_API}/channels/{channel_id}/messages"
-        while True:
+        for _ in range(_MAX_RATE_LIMIT_RETRIES):
             resp = await client.post(url, headers=self._headers, json={"content": content})
             if resp.status_code == 429:
                 retry_after = float(resp.json().get("retry_after", 1.0))
@@ -150,6 +151,9 @@ class DiscordClient:
                 continue
             resp.raise_for_status()
             return
+        raise RuntimeError(
+            f"Discord rate limit: channel {channel_id} still 429 after {_MAX_RATE_LIMIT_RETRIES} retries"
+        )
 
     async def _post_with_files(
         self,
@@ -163,7 +167,7 @@ class DiscordClient:
         headers = {k: v for k, v in self._headers.items() if k.lower() != "content-type"}
         files = {f"files[{i}]": (name, data, "application/xml") for i, (name, data) in enumerate(attachments)}
         data = {"payload_json": json.dumps({"content": content})}
-        while True:
+        for _ in range(_MAX_RATE_LIMIT_RETRIES):
             resp = await client.post(url, headers=headers, data=data, files=files)
             if resp.status_code == 429:
                 retry_after = float(resp.json().get("retry_after", 1.0))
@@ -171,6 +175,9 @@ class DiscordClient:
                 continue
             resp.raise_for_status()
             return
+        raise RuntimeError(
+            f"Discord rate limit: channel {channel_id} still 429 after {_MAX_RATE_LIMIT_RETRIES} retries"
+        )
 
     async def post(self, message: str, attachments: list[tuple[str, bytes]] | None = None) -> bool:
         try:

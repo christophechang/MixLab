@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import httpx
+import pytest
+import respx
+
 from mixlab.config import shortfall_warning
-from mixlab.discord_client import format_report
+from mixlab.discord_client import DiscordClient, format_report
 from mixlab.models import MixConcept, Track
 
 
@@ -124,3 +128,16 @@ def test_shortfall_warning_returns_message_when_shortfall_large() -> None:
     assert result is not None
     assert "2 tracks found" in result
     assert "more to fill" in result
+
+
+async def test_post_raw_raises_after_max_retries_on_429() -> None:
+    client = DiscordClient(
+        bot_token="tok", guild_id="g", channel_id="c123", channel_name="mix-lab"
+    )
+    with respx.mock:
+        respx.post("https://discord.com/api/v10/channels/c123/messages").mock(
+            return_value=httpx.Response(429, json={"retry_after": 0.001})
+        )
+        async with httpx.AsyncClient(timeout=5) as http:
+            with pytest.raises(RuntimeError, match="rate limit"):
+                await client._post_raw(http, "c123", "hello")
