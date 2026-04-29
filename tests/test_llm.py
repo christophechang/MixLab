@@ -1473,9 +1473,8 @@ def test_used_mix_names_are_injected_into_standard_selection_system() -> None:
     names_str = "Slow Burn, Night Drive"
     first_name = "Slow Burn"
     system = _STAGE2_SYSTEM_SELECTION.replace(
-        'The name should make someone curious, not nod in recognition. '
-        'Add a "name_reason" field',
-        'The name should make someone curious, not nod in recognition. '
+        'The name should make someone curious, not nod in recognition. Add a "name_reason" field',
+        "The name should make someone curious, not nod in recognition. "
         f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. "
         "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier "
         f"(e.g. if '{first_name}' is in the list, '{first_name} Vol. 2' and any variation is forbidden). "
@@ -1492,9 +1491,8 @@ def test_used_mix_names_are_injected_into_playlist_selection_system() -> None:
     names_str = "Slow Burn"
     first_name = "Slow Burn"
     system = _STAGE2_SYSTEM_PLAYLIST_SELECTION.replace(
-        'The name should make someone curious, not nod in recognition. '
-        'Add a "name_reason" field',
-        'The name should make someone curious, not nod in recognition. '
+        'The name should make someone curious, not nod in recognition. Add a "name_reason" field',
+        "The name should make someone curious, not nod in recognition. "
         f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. "
         "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier "
         f"(e.g. if '{first_name}' is in the list, '{first_name} Vol. 2' and any variation is forbidden). "
