@@ -1523,10 +1523,14 @@ async def stage2_curate_and_report(
         )
 
     stage2_system = _STAGE2_SYSTEM_PLAYLIST_SELECTION if playlist_name is not None else _STAGE2_SYSTEM_SELECTION
+    _name_dedup_sentinel = 'The name should make someone curious, not nod in recognition. Add a "name_reason" field'
     if used_mix_names:
+        assert _name_dedup_sentinel in stage2_system, (
+            "Stage 2 name-dedup injection: sentinel not found — naming instruction drifted from expected text"
+        )
         names_str = ", ".join(used_mix_names)
         stage2_system = stage2_system.replace(
-            'The name should make someone curious, not nod in recognition. Add a "name_reason" field',
+            _name_dedup_sentinel,
             "The name should make someone curious, not nod in recognition. "
             f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. "
             "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier "
