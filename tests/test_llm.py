@@ -11,6 +11,7 @@ from mixlab.models import CompletionVariant, DJPracticalityScore, MixConcept, Tr
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 _MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
+_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 
@@ -539,16 +540,18 @@ async def test_stage1_skips_unconfigured_without_counting_failure(monkeypatch: p
 
 @respx.mock
 async def test_stage1_raises_after_n_consecutive_failures(monkeypatch: pytest.MonkeyPatch) -> None:
-    """All three providers fail → RuntimeError after len(_CASCADE) consecutive failures."""
+    """All five providers fail → RuntimeError after len(_CASCADE) consecutive failures."""
     from mixlab.llm import make_cascade_state, stage1_concepts
 
     monkeypatch.setenv("GROQ_API_KEY", "key")
     monkeypatch.setenv("GEMINI_API_KEY", "key")
     monkeypatch.setenv("MISTRAL_API_KEY", "key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "key")
 
     respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
     respx.post(_GEMINI_URL).mock(return_value=Response(500, text="error"))
     respx.post(_MISTRAL_URL).mock(return_value=Response(500, text="error"))
+    respx.post(_OPENROUTER_URL).mock(return_value=Response(500, text="error"))
 
     with pytest.raises(RuntimeError, match="consecutive failures"):
         await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())

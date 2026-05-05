@@ -14,6 +14,8 @@ AI-powered DJ crate assistant. Point it at your Rekordbox collection, pick a gen
 
 For background on why this was built and how it works in practice, read the [MixLab case study](https://www.soltechconsulting.co.uk/case-studies/mixlab).
 
+> This project explores AI-assisted development workflows. My focus here was system design and delivery rather than idiomatic Python, which is not my primary stack.
+
 ---
 
 ## Quickstart
