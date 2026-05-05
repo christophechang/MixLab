@@ -46,7 +46,28 @@ class MixConcept(BaseModel):
 
 
 SeedTier = Literal["anchor", "supporting", "optional"]
-SetRole = Literal["opener", "builder", "pivot", "peak", "cleanser", "closer", "utility", "unknown"]
+SetRole = Literal[
+    "opener",
+    "world_setter",
+    "groove_locker",
+    "early_hook",
+    "builder",
+    "connector",
+    "pivot",
+    "pressure",
+    "lift",
+    "vocal_moment",
+    "texture_change",
+    "cleanser",
+    "risk",
+    "weapon",
+    "peak",
+    "post_peak",
+    "resolution",
+    "closer",
+    "utility",
+    "unknown",
+]
 EnergyShape = Literal["single_arc", "double_peak", "plateau", "flat", "unclear"]
 RiskTolerance = Literal["low", "medium", "high"]
 
