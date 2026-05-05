@@ -465,9 +465,51 @@ async def _try_anthropic(prompt: str, system: str = _STAGE1_SYSTEM) -> str | Non
     return await _call_anthropic_http(key, "claude-sonnet-4-6", system, prompt)
 
 
+_OPENROUTER_BASE = "https://openrouter.ai/api"
+_OPENROUTER_REFERER = "https://openclaw.local"
+
+
+async def _call_openrouter(model: str, prompt: str, system: str) -> str | None:
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        return None
+    headers_extra = {"HTTP-Referer": _OPENROUTER_REFERER}
+    payload = {
+        "model": model,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+        "temperature": 0.7,
+        "max_tokens": 4096,
+    }
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        **headers_extra,
+    }
+    async with httpx.AsyncClient(timeout=_STAGE1_TIMEOUT) as client:
+        resp = await client.post(
+            f"{_OPENROUTER_BASE}/v1/chat/completions", headers=headers, json=payload
+        )
+        resp.raise_for_status()
+        return _strip_thinking(str(resp.json()["choices"][0]["message"]["content"]))
+
+
+async def _try_openrouter_free(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
+    return await _call_openrouter("openrouter/free", prompt, system)
+
+
+async def _try_openrouter_mistral_small(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
+    return await _call_openrouter("mistralai/mistral-small", prompt, system)
+
+
 # Stage 1 free providers only — Anthropic is Stage 2 / paid.
 _Stage1Provider = Callable[..., Coroutine[Any, Any, str | None]]
-_CASCADE: list[_Stage1Provider] = [_try_groq, _try_gemini, _try_mistral]
+_CASCADE: list[_Stage1Provider] = [
+    _try_groq,
+    _try_gemini,
+    _try_mistral,
+    _try_openrouter_free,
+    _try_openrouter_mistral_small,
+]
 
 
 @dataclass
