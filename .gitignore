@@ -209,6 +209,7 @@ __marimo__/
 # MixLab
 import/rekordbox.xml
 .mixlab_genres.json
+.mixlab/
 output/house_report.txt
 output/playlists/rekordbox_export.xml
 /plans/

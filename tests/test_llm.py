@@ -6,7 +6,16 @@ import pytest
 import respx
 from httpx import Response
 
-from mixlab.models import CompletionVariant, DJPracticalityScore, MixConcept, Track
+from mixlab.models import (
+    CanvasRoleCandidates,
+    CanvasScore,
+    CompletionVariant,
+    ContrastAssets,
+    DJPracticalityScore,
+    MixCanvas,
+    MixConcept,
+    Track,
+)
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
@@ -1568,3 +1577,165 @@ async def test_call_stage2_reports_fires_parallel_calls(
 
     assert len(reports) == 3
     assert call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# validate_stage2_output
+# ---------------------------------------------------------------------------
+
+
+def _make_canvas(core_ids: list[str], bridge_ids: list[str] | None = None) -> MixCanvas:
+    concept = MixConcept(title="T", mood="dark", track_ids=core_ids + (bridge_ids or []))
+    return MixCanvas(
+        canvas_id="test_canvas",
+        genre="Drum & Bass",
+        bpm_range=(168.0, 178.0),
+        dominant_bpm=172.0,
+        dominant_camelot="4A",
+        core_track_ids=core_ids,
+        bridge_track_ids=bridge_ids or [],
+        wildcard_track_ids=[],
+        roles=CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[]),
+        contrast=ContrastAssets(
+            vocal_moments=[],
+            texture_changes=[],
+            darker_turns=[],
+            brighter_lifts=[],
+            lower_pressure_resets=[],
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=concept,
+    )
+
+
+def _lib(ids: list[str], bpm: float = 174.0, key: str = "8A") -> dict[str, Track]:
+    return {
+        i: Track(track_id=i, artist=f"Artist_{i}", title=f"Title_{i}", bpm=bpm, camelot_key=key, genre="Drum & Bass")
+        for i in ids
+    }
+
+
+def test_validate_stage2_output_passes_clean_concept() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]  # 8 tracks — minimum
+    concept = MixConcept(title="Clean", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+    assert warnings == []
+
+
+def test_validate_stage2_output_missing_track_id() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids + ["MISSING"])
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+    assert any("MISSING" in w for w in warnings)
+
+
+def test_validate_stage2_output_denylist_track() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), denylist_ids={"1"})
+    assert any("denylisted" in w for w in warnings)
+
+
+def test_validate_stage2_output_played_track_flagged() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), played_ids={"3"}, denylist_ids=set())
+    assert any("played" in w for w in warnings)
+
+
+def test_validate_stage2_output_played_track_allowed_when_flag_set() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output(
+        [concept], [canvas], _lib(ids), played_ids={"3"}, denylist_ids=set(), allow_played=True
+    )
+    assert not any("played" in w for w in warnings)
+
+
+def test_validate_stage2_output_bpm_jump_warning() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=200.0, camelot_key="8A", genre="DnB"),  # jump=26
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("BPM jump" in w for w in warnings)
+
+
+def test_validate_stage2_output_camelot_jump_warning() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="1A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=174.0, camelot_key="8B", genre="DnB"),  # dist=6
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=174.0, camelot_key="1A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("Camelot jump" in w for w in warnings)
+
+
+def test_validate_stage2_output_artist_repeat_warning() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        str(i): Track(track_id=str(i), artist="Same Artist", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 9)
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("Same Artist" in w for w in warnings)
+
+
+@respx.mock
+async def test_stage2_prompt_includes_canvas_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Canvas metadata block appears in the prompt sent to Anthropic."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    ids = ["1", "2", "3", "4"]
+    concept = MixConcept(title="Pool", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    canvas.canvas_id = "dnb_174.0_8A"
+    canvas.score.novelty = 0.75
+    tracks_by_id = _lib(ids)
+
+    await stage2_curate_and_report(shortlists=[concept], tracks_by_id=tracks_by_id, canvases=[canvas])
+
+    body = route.calls[0].request.content.decode()
+    assert "[Canvas dnb_174.0_8A" in body
+    assert "novelty:" in body
+    assert "Core:" in body

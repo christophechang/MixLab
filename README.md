@@ -377,7 +377,7 @@ Drum & Bass tracks (genre tag `Drum & Bass` or `DnB`) with a recorded BPM below 
 
 ### BPM filtering (per cluster)
 
-- **Standard genres:** any track more than ±6 BPM from the cluster median is removed before Stage 1
+- **Standard genres:** tracks are partitioned into three pools relative to the cluster median — core (±6 BPM), bridge (±12 BPM), and wildcard (>12 BPM). Core tracks are sent to Stage 1; bridge and wildcard tracks are retained as canvas metadata and are available to Stage 2 for structural roles such as opener, closer, or pivot where BPM deviation is intentional.
 - **Custom genres with a defined BPM range** (`170`, `140`): a hard range filter is applied instead — tracks outside the defined range are excluded
 - **Custom genres without a BPM range** (`4x4`): no BPM filter is applied; Stage 1 finds BPM-coherent groupings within the pool itself
 
@@ -392,7 +392,7 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 - **Standard genres:** clusters larger than 40 tracks are chunked; each chunk is called independently and concepts merged
 - **Custom genres:** a random 120-track window is selected from the BPM-sorted pool each run (see [Why random selection?](#why-random-selection)); 60 tracks per call, 2 calls maximum; shortlist target is 20–25 tracks per concept (vs 15–25 for standard)
 - Track IDs are aliased to short positional keys (`T001`, `T002`, …) in the prompt; hallucinated IDs are structurally impossible and concepts with fewer than 4 resolvable aliases are discarded
-- Up to 6 concepts are forwarded to Stage 2, randomly sampled from the top 12 by pool size to ensure variety across runs
+- Stage 1 concepts are wrapped into **Mix Canvases** — structured objects that add role candidates (opener, groove-locker, builder, pivot, peak, closer), contrast assets (vocal moments, texture changes, darker/brighter turns), and deterministic risk notes (weak opener/closer pool, BPM spread, artist repetition). Up to 6 canvases are forwarded to Stage 2, selected by a weighted scoring model covering technical viability, role coverage, anchor strength, contrast potential, cross-canvas distinctiveness, and novelty against recent run history. Selection is deterministic given the same input — no random sampling.
 
 ### LLM Stage 2 — report generation
 
@@ -404,6 +404,8 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 - Playlist mode generates three variants (`practical`, `balanced`, `adventurous`) and auto-selects the strongest; seed retention is enforced with a floor of 75% of anchor tracks and 40% of supporting tracks
 - Appends shortfall warnings for concepts significantly below the recommended track count for their genre
 - Appends the active report context and elapsed generation time to the final output
+- After each successful run, concept history is written to `.mixlab/concept-history.json`. On subsequent runs, canvases whose track IDs heavily overlap recent selections receive a novelty penalty (Jaccard similarity over a 10-run recency window, decaying at 0.8^age per run). This compounds with Stage 1's random window sampling to push each run toward different corners of the collection.
+- Post-Stage-2 validation warns on: track IDs not found in the library, denylist or played-track violations, Camelot jumps greater than 4 between consecutive tracks, BPM jumps greater than 15, and artist repeats of 3 or more. Warnings appear in the Discord report under **⚠ Validation Notes** and never abort the run.
 
 ### Shortfall thresholds (tracks per set)
 
@@ -454,13 +456,14 @@ MixLab/
 │   ├── reader.py          # Rekordbox XML parsing and BPM correction
 │   ├── client.py          # Catalog API client (played track history, optional)
 │   ├── matcher.py         # Fuzzy played-track exclusion
-│   ├── clustering.py      # Genre grouping, BPM filtering, Camelot sort
-│   ├── llm.py             # Stage 1 provider cascade + Stage 2 Anthropic report
+│   ├── clustering.py      # Genre grouping, BPM pool partitioning, Mix Canvas builder and scoring
+│   ├── history.py         # Concept history read/write (.mixlab/concept-history.json)
+│   ├── llm.py             # Stage 1 provider cascade + Stage 2 Anthropic report + post-run validation
 │   ├── playlist_exporter.py # Rekordbox playlist XML export
 │   ├── discord_client.py  # Discord delivery and report formatting
 │   ├── cache.py           # Genre availability cache (.mixlab_genres.json)
 │   ├── config.py          # GENRE_MAP, IGNORED_GENRES, TRACK_COUNT_TARGETS
-│   └── models.py          # Pydantic models: Track, PlayedTrack, MixConcept
+│   └── models.py          # Pydantic models: Track, MixConcept, MixCanvas, BpmPools, CanvasScore
 ├── tests/                 # pytest suite mirroring src layout
 ├── import/
 │   └── rekordbox.xml      # Your Rekordbox export (gitignored)
