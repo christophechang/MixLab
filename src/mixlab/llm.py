@@ -15,11 +15,12 @@ from typing import Any, Callable, Literal, cast
 import httpx
 
 from mixlab.clustering import camelot_distance
-from mixlab.config import shortfall_warning
+from mixlab.config import TRACK_COUNT_TARGETS, shortfall_warning
 from mixlab.models import (
     CompletionVariant,
     DJPracticalityScore,
     IntentBrief,
+    MixCanvas,
     MixConcept,
     RiskTolerance,
     SeedAnalysis,
@@ -507,9 +508,7 @@ async def _call_openrouter(model: str, prompt: str, system: str) -> str | None:
         **headers_extra,
     }
     async with httpx.AsyncClient(timeout=_STAGE1_TIMEOUT) as client:
-        resp = await client.post(
-            f"{_OPENROUTER_BASE}/v1/chat/completions", headers=headers, json=payload
-        )
+        resp = await client.post(f"{_OPENROUTER_BASE}/v1/chat/completions", headers=headers, json=payload)
         resp.raise_for_status()
         return _strip_thinking(str(resp.json()["choices"][0]["message"]["content"]))
 
@@ -651,6 +650,100 @@ def select_stage1_window(tracks: list[Track], max_count: int) -> list[Track]:
     return tracks[start : start + max_count]
 
 
+def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) -> str:
+    """Build the compact canvas header block for the Stage 2 prompt."""
+
+    def ids_block(ids: list[str]) -> str:
+        return " ".join(f"ID:{i}" for i in ids) if ids else "none"
+
+    r = canvas.roles
+    c = canvas.contrast
+    lines = [
+        f"[Canvas {canvas.canvas_id} | novelty:{canvas.score.novelty:.2f}]",
+        f"Core: {ids_block(canvas.core_track_ids)}",
+    ]
+    bridge_str = ids_block(canvas.bridge_track_ids)
+    wild_str = ids_block(canvas.wildcard_track_ids)
+    if canvas.bridge_track_ids or canvas.wildcard_track_ids:
+        lines.append(f"Bridge: {bridge_str} | Wildcard: {wild_str}")
+
+    role_parts = []
+    if r.opener:
+        role_parts.append(f"Opener: {ids_block(r.opener)}")
+    if r.groove_locker:
+        role_parts.append(f"Groove-locker: {ids_block(r.groove_locker)}")
+    if r.builder:
+        role_parts.append(f"Builder: {ids_block(r.builder)}")
+    if r.peak:
+        role_parts.append(f"Peak: {ids_block(r.peak)}")
+    if r.pivot:
+        role_parts.append(f"Pivot: {ids_block(r.pivot)}")
+    if r.closer:
+        role_parts.append(f"Closer: {ids_block(r.closer)}")
+    if role_parts:
+        lines.append(" | ".join(role_parts))
+
+    contrast_parts = []
+    if c.vocal_moments:
+        contrast_parts.append(f"Vocal: {ids_block(c.vocal_moments)}")
+    if c.texture_changes:
+        contrast_parts.append(f"Texture: {ids_block(c.texture_changes)}")
+    if c.darker_turns:
+        contrast_parts.append(f"Darker: {ids_block(c.darker_turns)}")
+    if c.brighter_lifts:
+        contrast_parts.append(f"Brighter: {ids_block(c.brighter_lifts)}")
+    if contrast_parts:
+        lines.append(" | ".join(contrast_parts))
+
+    if canvas.risk_notes:
+        lines.append(f"Risks: {', '.join(canvas.risk_notes)}")
+
+    # Full track listing after header
+    track_lines: list[str] = []
+    for tid in canvas.source_concept.track_ids:
+        t = tracks_by_id.get(tid)
+        if t is None:
+            continue
+        pool_label = ""
+        if tid in canvas.bridge_track_ids:
+            pool_label = " [bridge]"
+        elif tid in canvas.wildcard_track_ids:
+            pool_label = " [wildcard]"
+        extras: list[str] = []
+        if t.year is not None:
+            extras.append(str(t.year))
+        if t.label:
+            extras.append(t.label)
+        if t.remixer:
+            extras.append(f"remix by {t.remixer}")
+        if t.energy is not None:
+            extras.append(f"energy:{t.energy}/8")
+        if t.tags:
+            extras.append(", ".join(t.tags))
+        if t.enrichment_confidence == "low":
+            extras.append("[unverified]")
+        extra_str = " | " + " | ".join(extras) if extras else ""
+        track_lines.append(
+            f"  ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {t.genre}{pool_label}{extra_str}"
+        )
+
+    header = "\n".join(lines)
+    candidates = "Candidates:\n" + "\n".join(track_lines) if track_lines else ""
+    return f"{header}\n{candidates}"
+
+
+_STAGE2_CANVAS_RULES = """\
+\nCANVAS USAGE RULES (for this run):\n\
+- Core tracks: use freely.\n\
+- Bridge tracks [bridge]: require role-aware justification — suitable for opener, pivot, reset, or closer where BPM deviation is intentional.\n\
+- Wildcard tracks [wildcard]: require explicit creative reason; use only if concept-defining.\n\
+- If a canvas shows risk notes, address the noted weakness in your selection or energy path.\n\
+- Not every mix needs every role.\n\
+- Harmonic and BPM compatibility are helpers, not constraints.\n\
+- For transitions involving bridge or wildcard tracks, state the specific mechanism that makes it survivable.\
+"""
+
+
 def select_shortlists_for_stage2(shortlists: list[MixConcept]) -> list[MixConcept]:
     """Select up to _STAGE2_CAP shortlists for Stage 2, sampling randomly from the top candidates by pool size.
 
@@ -673,6 +766,70 @@ def select_shortlists_for_playlist_stage2(
         reverse=True,
     )
     return ranked[:_STAGE2_CAP]
+
+
+def validate_stage2_output(
+    concepts: list[MixConcept],
+    canvases: list[MixCanvas],
+    tracks_by_id: dict[str, Track],
+    played_ids: set[str],
+    denylist_ids: set[str],
+    allow_played: bool = False,
+    genre: str = "_default",
+) -> list[str]:
+    """Warn-only post-Stage-2 validation. Returns a list of warning strings (never raises)."""
+    from collections import Counter
+
+    warnings: list[str] = []
+    bridge_ids: set[str] = {tid for c in canvases for tid in c.bridge_track_ids}
+    wildcard_ids: set[str] = {tid for c in canvases for tid in c.wildcard_track_ids}
+
+    min_count, max_count = TRACK_COUNT_TARGETS.get(genre, TRACK_COUNT_TARGETS["_default"])
+
+    for concept in concepts:
+        label = f"[{concept.title}]"
+        for tid in concept.track_ids:
+            if tid not in tracks_by_id:
+                warnings.append(f"{label} track ID {tid} not found in library")
+            if tid in denylist_ids:
+                warnings.append(f"{label} track ID {tid} is denylisted")
+            if not allow_played and tid in played_ids:
+                warnings.append(f"{label} track ID {tid} has been played")
+
+        n = len(concept.track_ids)
+        if n < min_count:
+            warnings.append(f"{label} only {n} tracks — minimum is {min_count} for this genre")
+        if n > max_count:
+            warnings.append(f"{label} {n} tracks — maximum is {max_count} for this genre")
+
+        seq = [tracks_by_id[tid] for tid in concept.track_ids if tid in tracks_by_id]
+        artist_counts = Counter(t.artist for t in seq)
+        for artist, count in artist_counts.items():
+            if count >= 3:
+                warnings.append(f"{label} artist '{artist}' appears {count} times")
+
+        for i in range(len(seq) - 1):
+            a, b = seq[i], seq[i + 1]
+            bpm_jump = abs(a.bpm - b.bpm)
+            if bpm_jump > 15:
+                warnings.append(
+                    f"{label} BPM jump {bpm_jump:.1f} between {a.artist} — {a.title} and {b.artist} — {b.title}"
+                )
+            cam_dist = camelot_distance(a.camelot_key, b.camelot_key)
+            if cam_dist > 4:
+                warnings.append(f"{label} Camelot jump {cam_dist} between {a.camelot_key} and {b.camelot_key}")
+
+        # Bridge/wildcard tracks used without is_risky flag
+        transition_map = {(t.from_id, t.to_id): t for t in concept.transitions}
+        for i in range(len(seq) - 1):
+            to_id = seq[i + 1].track_id
+            if to_id in bridge_ids or to_id in wildcard_ids:
+                tr = transition_map.get((seq[i].track_id, to_id))
+                pool = "bridge" if to_id in bridge_ids else "wildcard"
+                if tr is None or (not tr.is_risky and tr.risk_type == ""):
+                    warnings.append(f"{label} {pool} track ID {to_id} used without a justified transition")
+
+    return warnings
 
 
 # ---------------------------------------------------------------------------
@@ -1055,9 +1212,17 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
     curated: list[MixConcept] = []
     report_parts: list[str] = []
 
+    def _normalise_id(raw: object) -> str:
+        s = str(raw)
+        return s[3:] if s.startswith("ID:") else s
+
     for item in data:
         raw_ids = item.get("track_ids")
-        track_ids = [str(tid) for tid in (raw_ids if isinstance(raw_ids, list) else []) if str(tid) in valid_ids]
+        track_ids = [
+            nid
+            for tid in (raw_ids if isinstance(raw_ids, list) else [])
+            if (nid := _normalise_id(tid)) in valid_ids
+        ]
         if len(track_ids) < _MIN_CONCEPT_TRACKS:
             continue
         raw_transitions = item.get("transitions", [])
@@ -1066,8 +1231,8 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
             if isinstance(tr, dict):
                 transitions.append(
                     Transition(
-                        from_id=str(tr.get("from_id", "")),
-                        to_id=str(tr.get("to_id", "")),
+                        from_id=_normalise_id(tr.get("from_id", "")),
+                        to_id=_normalise_id(tr.get("to_id", "")),
                         is_risky=bool(tr.get("is_risky", False)),
                         risk_type=str(tr.get("risk_type", "")),
                     )
@@ -1405,6 +1570,7 @@ async def stage2_curate_and_report(
     unplayed_ids: set[str] | None = None,
     intent_brief: IntentBrief | None = None,
     used_mix_names: list[str] | None = None,
+    canvases: list[MixCanvas] | None = None,
 ) -> tuple[list[MixConcept], str]:
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
     if not stage2_key:
@@ -1412,42 +1578,49 @@ async def stage2_curate_and_report(
     stage2_model_display = "Claude Sonnet 4.6"
 
     sections: list[str] = []
-    for shortlist in shortlists:
-        track_lines = []
-        for tid in shortlist.track_ids:
-            t = tracks_by_id.get(tid)
-            if t is None:
-                continue
-            extras: list[str] = []
-            if t.year is not None:
-                extras.append(str(t.year))
-            if t.label:
-                extras.append(t.label)
-            if t.remixer:
-                extras.append(f"remix by {t.remixer}")
-            if t.mix:
-                extras.append(f"mix:{', '.join(t.mix)}")
-            if t.energy is not None:
-                extras.append(f"energy:{t.energy}/8")
-            if seed_ids is not None and tid in seed_ids:
-                extras.append("[seed]")
-            if unplayed_ids is not None:
-                if tid in unplayed_ids:
+    if canvases is not None:
+        # Canvas-aware path: build sections from MixCanvas objects
+        for canvas in canvases:
+            section = _format_canvas_section(canvas, tracks_by_id)
+            if section.strip():
+                sections.append(section)
+    else:
+        for shortlist in shortlists:
+            track_lines = []
+            for tid in shortlist.track_ids:
+                t = tracks_by_id.get(tid)
+                if t is None:
+                    continue
+                extras: list[str] = []
+                if t.year is not None:
+                    extras.append(str(t.year))
+                if t.label:
+                    extras.append(t.label)
+                if t.remixer:
+                    extras.append(f"remix by {t.remixer}")
+                if t.mix:
+                    extras.append(f"mix:{', '.join(t.mix)}")
+                if t.energy is not None:
+                    extras.append(f"energy:{t.energy}/8")
+                if seed_ids is not None and tid in seed_ids:
+                    extras.append("[seed]")
+                if unplayed_ids is not None:
+                    if tid in unplayed_ids:
+                        extras.append("unplayed")
+                elif t.play_count == 0:
                     extras.append("unplayed")
-            elif t.play_count == 0:
-                extras.append("unplayed")
-            if t.tags:
-                extras.append(", ".join(t.tags))
-            if t.enrichment_confidence == "low":
-                extras.append("[unverified]")
-            extra_str = " | " + " | ".join(extras) if extras else ""
-            track_lines.append(
-                f"  ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {t.genre}{extra_str}"
-            )
-        if track_lines:
-            sections.append(
-                f"Shortlist: {shortlist.title}\nCharacter: {shortlist.mood}\nCandidates:\n" + "\n".join(track_lines)
-            )
+                if t.tags:
+                    extras.append(", ".join(t.tags))
+                if t.enrichment_confidence == "low":
+                    extras.append("[unverified]")
+                extra_str = " | " + " | ".join(extras) if extras else ""
+                track_lines.append(
+                    f"  ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {t.genre}{extra_str}"
+                )
+            if track_lines:
+                sections.append(
+                    f"Shortlist: {shortlist.title}\nCharacter: {shortlist.mood}\nCandidates:\n" + "\n".join(track_lines)
+                )
 
     n = len(sections)
     if n == 0:
@@ -1505,12 +1678,19 @@ async def stage2_curate_and_report(
             + "\n\n".join(sections)
         )
     else:
-        prompt = (
-            f"Curate a set of mix concepts from the following {n} candidate shortlists. "
-            f"Produce between 3 and 6 distinct concepts total. A rich shortlist may yield more than one concept; "
-            f"a thin shortlist may yield none — but each concept must draw only from tracks within a single shortlist.\n\n"
-            + "\n\n".join(sections)
-        )
+        if canvases is not None:
+            prompt = (
+                f"Curate a set of mix concepts from the following {n} candidate canvases. "
+                f"Produce between 3 and 6 distinct concepts total. Each concept must draw only from tracks within a single canvas.\n\n"
+                + "\n\n".join(sections)
+            )
+        else:
+            prompt = (
+                f"Curate a set of mix concepts from the following {n} candidate shortlists. "
+                f"Produce between 3 and 6 distinct concepts total. A rich shortlist may yield more than one concept; "
+                f"a thin shortlist may yield none — but each concept must draw only from tracks within a single shortlist.\n\n"
+                + "\n\n".join(sections)
+            )
 
     if custom_genre_label and custom_genre_sub_genres:
         sub_genre_str = ", ".join(custom_genre_sub_genres)
@@ -1523,6 +1703,8 @@ async def stage2_curate_and_report(
         )
 
     stage2_system = _STAGE2_SYSTEM_PLAYLIST_SELECTION if playlist_name is not None else _STAGE2_SYSTEM_SELECTION
+    if canvases is not None and playlist_name is None:
+        stage2_system = stage2_system + _STAGE2_CANVAS_RULES
     _name_dedup_sentinel = 'The name should make someone curious, not nod in recognition. Add a "name_reason" field'
     if used_mix_names:
         assert _name_dedup_sentinel in stage2_system, (
@@ -1539,6 +1721,9 @@ async def stage2_curate_and_report(
         )
 
     raw = await _call_stage2_raw(prompt, stage2_system, stage2_key, max_tokens=32768)
+
+    if os.environ.get("MIXLAB_DEBUG_STAGE2"):
+        print(f"[DEBUG] Stage 2 raw response (first 2000 chars):\n{raw[:2000]}", file=sys.stderr)
 
     valid_ids = set(tracks_by_id.keys())
     curated, _ = _parse_curated_concepts(raw, valid_ids)

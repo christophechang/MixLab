@@ -14,27 +14,30 @@ from mixlab.cache import load_genre_cache, save_genre_cache
 from mixlab.client import fetch_mix_names, fetch_played_tracks
 from mixlab.clustering import (
     build_custom_genre_pool,
+    build_mix_canvas,
     count_available_by_genre,
     count_outlier_genres,
-    filter_by_bpm,
+    partition_bpm_pools,
     partition_outliers,
     resolve_genre_clusters,
+    select_canvases,
     sort_by_camelot,
 )
 from mixlab.config import CUSTOM_GENRES, GENRE_MAP, IGNORED_GENRES
 from mixlab.discord_client import send_report
+from mixlab.history import HistoryEntry, append_run, load_history
 from mixlab.llm import (
     MAX_STAGE1_POOL_CUSTOM,
     MIN_SHORTLIST_TRACKS,
     make_cascade_state,
-    select_shortlists_for_stage2,
     select_stage1_window,
     stage0_intent_brief,
     stage1_concepts,
     stage2_curate_and_report,
+    validate_stage2_output,
 )
 from mixlab.matcher import filter_unplayed
-from mixlab.models import MixConcept, Track
+from mixlab.models import MixCanvas, MixConcept, Track
 from mixlab.playlist_exporter import (
     export_merged_xml,
     generate_merged_xml_bytes,
@@ -453,6 +456,7 @@ async def run(
     catalog_url = os.environ.get("CATALOG_API_URL", "")
     used_catalog_api = False
     mix_names: list[str] = []
+    played_track_ids: set[str] = set()
     if all_tracks:
         print("--all-tracks set — skipping played-track filter, using full collection.")
         unplayed = list(tracks)
@@ -468,6 +472,8 @@ async def run(
         if mix_names:
             print(f"Fetched {len(mix_names)} catalogue mix name(s) — injecting into Stage 2 prompt.", flush=True)
         unplayed = filter_unplayed(tracks, played)
+        _unplayed_ids = {t.track_id for t in unplayed}
+        played_track_ids = {t.track_id for t in tracks if t.track_id not in _unplayed_ids}
         used_catalog_api = True
     else:
         print("No CATALOG_API_URL set — skipping played-track filter, using full collection.")
@@ -529,15 +535,15 @@ async def run(
 
         # 6a. LLM Stage 1 — standard path.
         for genre_label, cluster_tracks in clusters.items():
-            bpm_filtered = filter_by_bpm(cluster_tracks)
-            bpm_filtered_counts[genre_label] = len(bpm_filtered)
-            if len(bpm_filtered) < MIN_SHORTLIST_TRACKS:
+            pools = partition_bpm_pools(cluster_tracks)
+            bpm_filtered_counts[genre_label] = len(pools.core)
+            if len(pools.core) < MIN_SHORTLIST_TRACKS:
                 print(
-                    f"Stage 1: skipping {genre_label} — {len(bpm_filtered)} tracks after BPM filter "
+                    f"Stage 1: skipping {genre_label} — {len(pools.core)} tracks in core BPM pool "
                     f"(minimum {MIN_SHORTLIST_TRACKS})"
                 )
                 continue
-            sorted_tracks = sort_by_camelot(bpm_filtered)
+            sorted_tracks = sort_by_camelot(pools.core)
             all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label, cascade_state))
 
         # Outliers ≥ 4 within this genre scope — shortlist as Misc.
@@ -570,10 +576,12 @@ async def run(
             file=sys.stderr,
         )
 
-    # Select shortlists for Stage 2 — random sample from top candidates (ensures variety across runs).
-    all_shortlists = select_shortlists_for_stage2(all_shortlists)
-    if not all_shortlists:
-        print("No shortlists survived track resolution — collection may be out of sync.", file=sys.stderr)
+    # Build Mix Canvases and select top candidates for Stage 2 (diversity-aware, deterministic).
+    history = load_history(Path(".mixlab/concept-history.json"))
+    all_canvases: list[MixCanvas] = [build_mix_canvas(c, tracks_by_id) for c in all_shortlists]
+    selected_canvases = select_canvases(all_canvases, history)
+    if not selected_canvases:
+        print("No canvases could be built — collection may be out of sync.", file=sys.stderr)
         sys.exit(1)
     _print_pipeline_summary(
         collection_count=len(tracks),
@@ -583,21 +591,50 @@ async def run(
         bpm_filtered_counts=bpm_filtered_counts,
         same_genre_outlier_count=same_genre_outlier_count,
         stage1_shortlist_count=stage1_shortlist_count,
-        stage2_shortlist_count=len(all_shortlists),
+        stage2_shortlist_count=len(selected_canvases),
     )
 
     # 7. LLM Stage 2 — creative curation + full report (single Anthropic call).
-    print(f"Stage 2: curating {len(all_shortlists)} shortlist(s)...")
+    print(f"Stage 2: curating {len(selected_canvases)} canvas(es)...")
     all_concepts, report = await stage2_curate_and_report(
-        all_shortlists,
+        [c.source_concept for c in selected_canvases],
         tracks_by_id,
         custom_genre_label=genre if is_custom else None,
         custom_genre_sub_genres=custom_genre_sub_genres,
         used_mix_names=mix_names or None,
+        canvases=selected_canvases,
     )
     if not all_concepts:
         print(report, file=sys.stderr)
         sys.exit(1)
+
+    # Post-Stage-2 validation (warn-only — never aborts the run).
+    validation_warnings = validate_stage2_output(
+        all_concepts,
+        selected_canvases,
+        tracks_by_id,
+        played_ids=played_track_ids,
+        denylist_ids=set(),  # tracks filtered before Stage 1; can't appear in output
+        allow_played=all_tracks,
+        genre=genre or "_default",
+    )
+    if validation_warnings:
+        print("\n⚠ Validation Notes:")
+        for w in validation_warnings:
+            print(f"  {w}")
+        report += "\n\n⚠ **Validation Notes**\n" + "\n".join(f"- {w}" for w in validation_warnings)
+
+    # Persist run to concept history for novelty scoring in future runs.
+    try:
+        entry = HistoryEntry.from_run(
+            selected_canvases,
+            all_concepts,
+            genre=genre or "_default",
+            mode="all-tracks" if all_tracks else "standard",
+        )
+        append_run(history, entry, Path(".mixlab/concept-history.json"))
+    except Exception as exc:
+        print(f"Warning: could not write concept history: {exc}", file=sys.stderr)
     elapsed = time.monotonic() - t_start
     mins, secs = divmod(int(elapsed), 60)
     elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"

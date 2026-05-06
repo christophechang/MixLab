@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.6.0
+
+- **Mix Canvas selection.** Stage 1 concepts are now wrapped into structured Mix Canvases before Stage 2 receives them. Each canvas carries deterministic role candidates (opener, groove-locker, builder, pivot, peak, closer), contrast assets (vocal moments, texture changes, darker/brighter turns), and risk notes (weak opener/closer pool, BPM spread, artist or label over-repetition). Up to 6 canvases are selected for Stage 2 using a weighted scoring model — technical viability, role coverage, anchor strength, contrast potential, cross-canvas distinctiveness, and novelty — replacing the previous random sampling from the top-12 by pool size. Selection is deterministic given the same input.
+- **Three-pool BPM partitioning.** Tracks are no longer hard-filtered at ±6 BPM. Instead, each cluster is partitioned into core (±6 BPM from median), bridge (±12 BPM), and wildcard (>12 BPM). Core tracks go to Stage 1; bridge and wildcard tracks are retained as canvas metadata and are available to Stage 2 for structural roles — opener, pivot, reset, closer — where BPM deviation is intentional.
+- **Concept history and novelty scoring.** Each successful run writes a record to `.mixlab/concept-history.json`. On the next run, canvases whose track IDs overlap heavily with recent selections receive a novelty penalty (Jaccard similarity over a 10-run recency window, decaying at 0.8^age per run). This compounds with Stage 1's random window sampling to push repeated runs toward different corners of the collection over time.
+- **Post-Stage-2 validation.** A new warn-only validation pass runs after Stage 2 and before delivery. It checks for track IDs not in the library, denylist or played-track violations, Camelot jumps greater than 4, BPM jumps greater than 15 between consecutive tracks, and artist repeats of 3 or more. Warnings appear under **⚠ Validation Notes** in the Discord report and never abort a run.
+
+---
+
 ## v0.5.0
 
 - **Section-based mix thinking.** Stage 2 now explicitly reasons in five sections — Invitation, Groove Lock, Development, Peak/Payoff, Resolution — assigning every track to a section before deciding play order.

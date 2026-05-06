@@ -4,7 +4,16 @@ import re
 import statistics
 
 from mixlab.config import CustomGenre
-from mixlab.models import Track
+from mixlab.history import ConceptHistory, similarity_to_history
+from mixlab.models import (
+    BpmPools,
+    CanvasRoleCandidates,
+    CanvasScore,
+    ContrastAssets,
+    MixCanvas,
+    MixConcept,
+    Track,
+)
 
 _BPM_SPREAD = 6.0
 
@@ -153,6 +162,28 @@ def filter_by_bpm(tracks: list[Track]) -> list[Track]:
     return [t for t in tracks if abs(t.bpm - median) <= _BPM_SPREAD]
 
 
+_BRIDGE_SPREAD = 12.0
+
+
+def partition_bpm_pools(tracks: list[Track]) -> BpmPools:
+    """Split tracks into core/bridge/wildcard tiers relative to pool BPM median."""
+    if not tracks:
+        return BpmPools(core=[], bridge=[], wildcard=[])
+    median = statistics.median(t.bpm for t in tracks)
+    core: list[Track] = []
+    bridge: list[Track] = []
+    wildcard: list[Track] = []
+    for t in tracks:
+        delta = abs(t.bpm - median)
+        if delta <= _BPM_SPREAD:
+            core.append(t)
+        elif delta <= _BRIDGE_SPREAD:
+            bridge.append(t)
+        else:
+            wildcard.append(t)
+    return BpmPools(core=core, bridge=bridge, wildcard=wildcard)
+
+
 def filter_by_bpm_range(tracks: list[Track], bpm_min: float, bpm_max: float) -> list[Track]:
     """Keep only tracks whose BPM falls within [bpm_min, bpm_max] inclusive."""
     return [t for t in tracks if bpm_min <= t.bpm <= bpm_max]
@@ -180,3 +211,302 @@ def build_custom_genre_pool(
         pool = filter_by_bpm_range(pool, bpm_range[0], bpm_range[1])
 
     return pool
+
+
+# ---------------------------------------------------------------------------
+# Mix Canvas — role inference, contrast detection, risk notes, scoring
+# ---------------------------------------------------------------------------
+
+_VOCAL_TOKENS = frozenset({"feat.", "ft.", "feat", "ft", "vocal", "vocals", "w/"})
+_OPENER_MAX_ENERGY = 3
+_CLOSER_MAX_ENERGY = 4
+_GROOVE_ENERGY_MIN = 3
+_GROOVE_ENERGY_MAX = 5
+_BUILDER_ENERGY_MIN = 4
+_BUILDER_ENERGY_MAX = 6
+_PEAK_ENERGY_MIN = 6
+_GROOVE_BPM_TOLERANCE = 2.0
+
+
+def _has_vocal_token(text: str) -> bool:
+    lower = text.lower()
+    return any(tok in lower for tok in _VOCAL_TOKENS)
+
+
+def _energy_median(tracks: list[Track]) -> float | None:
+    energies = [t.energy for t in tracks if t.energy is not None]
+    return statistics.median(energies) if energies else None
+
+
+def _infer_roles(tracks: list[Track], pools: BpmPools) -> CanvasRoleCandidates:
+    if not tracks:
+        return CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[])
+
+    core_ids = {t.track_id for t in pools.core}
+    bridge_ids = {t.track_id for t in pools.bridge}
+    median_bpm = statistics.median(t.bpm for t in tracks)
+
+    # Dominant Camelot key (most common among core pool)
+    core_keys = [t.camelot_key for t in pools.core]
+    dominant_camelot = max(set(core_keys), key=core_keys.count) if core_keys else ""
+
+    opener: list[str] = []
+    groove_locker: list[str] = []
+    builder: list[str] = []
+    pivot: list[str] = []
+    peak: list[str] = []
+    closer: list[str] = []
+
+    for t in tracks:
+        in_core = t.track_id in core_ids
+        in_bridge = t.track_id in bridge_ids
+        e = t.energy
+
+        # Pivot: Camelot key ≥3 steps from dominant; prefer bridge
+        if dominant_camelot and camelot_distance(t.camelot_key, dominant_camelot) >= 3:
+            pivot.append(t.track_id)
+
+        if e is not None:
+            # Energy-based inference
+            if e <= _OPENER_MAX_ENERGY:
+                opener.append(t.track_id)
+            if in_core and _GROOVE_ENERGY_MIN <= e <= _GROOVE_ENERGY_MAX and abs(t.bpm - median_bpm) <= _GROOVE_BPM_TOLERANCE:
+                groove_locker.append(t.track_id)
+            if in_core and _BUILDER_ENERGY_MIN <= e <= _BUILDER_ENERGY_MAX:
+                builder.append(t.track_id)
+            if in_core and e >= _PEAK_ENERGY_MIN:
+                peak.append(t.track_id)
+            if e <= _CLOSER_MAX_ENERGY:
+                closer.append(t.track_id)
+        else:
+            # BPM-proxy fallback
+            if in_bridge:
+                opener.append(t.track_id)
+            if in_core and abs(t.bpm - median_bpm) <= _GROOVE_BPM_TOLERANCE:
+                groove_locker.append(t.track_id)
+            # Peak: highest BPM quartile in core
+            if in_core and t.bpm >= median_bpm + 2:
+                peak.append(t.track_id)
+            # Closer: lowest BPM in pool
+            if t.bpm <= median_bpm - 2:
+                closer.append(t.track_id)
+
+    return CanvasRoleCandidates(
+        opener=list(dict.fromkeys(opener)),
+        groove_locker=list(dict.fromkeys(groove_locker)),
+        builder=list(dict.fromkeys(builder)),
+        pivot=list(dict.fromkeys(pivot)),
+        peak=list(dict.fromkeys(peak)),
+        closer=list(dict.fromkeys(closer)),
+    )
+
+
+def _detect_contrast(tracks: list[Track], dominant_camelot: str) -> ContrastAssets:
+    energy_med = _energy_median(tracks)
+
+    vocal: list[str] = []
+    texture: list[str] = []
+    darker: list[str] = []
+    brighter: list[str] = []
+    resets: list[str] = []
+
+    for t in tracks:
+        if _has_vocal_token(t.artist) or _has_vocal_token(t.title):
+            vocal.append(t.track_id)
+
+        if dominant_camelot and camelot_distance(t.camelot_key, dominant_camelot) >= 3:
+            texture.append(t.track_id)
+
+        if energy_med is not None and t.energy is not None:
+            if t.energy < energy_med:
+                darker.append(t.track_id)
+            if t.energy > energy_med + 1:
+                brighter.append(t.track_id)
+
+    return ContrastAssets(
+        vocal_moments=list(dict.fromkeys(vocal)),
+        texture_changes=list(dict.fromkeys(texture)),
+        darker_turns=list(dict.fromkeys(darker)),
+        brighter_lifts=list(dict.fromkeys(brighter)),
+        lower_pressure_resets=list(dict.fromkeys(resets)),
+    )
+
+
+def _generate_risk_notes(
+    tracks: list[Track],
+    pools: BpmPools,
+    roles: CanvasRoleCandidates,
+) -> list[str]:
+    notes: list[str] = []
+
+    if len(roles.opener) < 2:
+        notes.append("weak opener pool")
+    if len(roles.closer) < 2:
+        notes.append("weak closer pool")
+
+    if pools.core:
+        core_bpms = [t.bpm for t in pools.core]
+        if max(core_bpms) - min(core_bpms) > 10:
+            notes.append("excessive BPM spread")
+
+    if pools.core and tracks:
+        core_keys = [t.camelot_key for t in pools.core]
+        dominant = max(set(core_keys), key=core_keys.count)
+        near_dominant = sum(1 for k in core_keys if camelot_distance(k, dominant) <= 1)
+        if near_dominant / len(core_keys) > 0.60:
+            notes.append("too-similar midsection")
+
+    from collections import Counter
+
+    artist_counts = Counter(t.artist for t in pools.core)
+    if any(c >= 3 for c in artist_counts.values()):
+        notes.append("over-repeated artist")
+
+    label_counts = Counter(t.label for t in pools.core if t.label)
+    if any(c >= 4 for c in label_counts.values()):
+        notes.append("over-repeated label")
+
+    energies = [t.energy for t in tracks if t.energy is not None]
+    if energies and sum(1 for e in energies if e >= 6) / len(energies) > 0.75:
+        notes.append("all high energy")
+
+    return notes
+
+
+def _canvas_id(concept: MixConcept, tracks: list[Track]) -> str:
+    genre = concept.mood[:8].replace(" ", "_") if concept.mood else "unknown"
+    if not tracks:
+        return f"{genre}_0_?"
+    median_bpm = round(statistics.median(t.bpm for t in tracks), 1)
+    core_keys = [t.camelot_key for t in tracks]
+    dominant = max(set(core_keys), key=core_keys.count) if core_keys else "?"
+    return f"{genre}_{median_bpm}_{dominant}"
+
+
+def build_mix_canvas(
+    concept: MixConcept,
+    tracks_by_id: dict[str, Track],
+) -> MixCanvas:
+    tracks = [tracks_by_id[tid] for tid in concept.track_ids if tid in tracks_by_id]
+    pools = partition_bpm_pools(tracks)
+
+    core_keys = [t.camelot_key for t in pools.core]
+    dominant_camelot = max(set(core_keys), key=core_keys.count) if core_keys else ""
+    dominant_bpm = statistics.median(t.bpm for t in tracks) if tracks else 0.0
+    bpm_values = [t.bpm for t in tracks]
+    bpm_range: tuple[float, float] = (min(bpm_values), max(bpm_values)) if bpm_values else (0.0, 0.0)
+
+    roles = _infer_roles(tracks, pools)
+    contrast = _detect_contrast(tracks, dominant_camelot)
+    risk_notes = _generate_risk_notes(tracks, pools, roles)
+
+    genre = tracks[0].genre if tracks else ""
+
+    return MixCanvas(
+        canvas_id=_canvas_id(concept, tracks),
+        genre=genre,
+        bpm_range=bpm_range,
+        dominant_bpm=dominant_bpm,
+        dominant_camelot=dominant_camelot,
+        core_track_ids=[t.track_id for t in pools.core],
+        bridge_track_ids=[t.track_id for t in pools.bridge],
+        wildcard_track_ids=[t.track_id for t in pools.wildcard],
+        roles=roles,
+        contrast=contrast,
+        risk_notes=risk_notes,
+        score=CanvasScore(),
+        source_concept=concept,
+    )
+
+
+def score_canvas(
+    canvas: MixCanvas,
+    history: ConceptHistory,
+    picked_ids: frozenset[str],
+) -> CanvasScore:
+    core_n = len(canvas.core_track_ids)
+    technical_viability = min(1.0, core_n / 20.0)
+
+    roles = canvas.roles
+    roles_filled = sum(
+        1
+        for r in (
+            roles.opener,
+            roles.groove_locker,
+            roles.builder,
+            roles.pivot,
+            roles.peak,
+            roles.closer,
+        )
+        if r
+    )
+    role_coverage = roles_filled / 6.0
+
+    anchor_pool = len(roles.opener) + len(roles.closer)
+    anchor_strength = min(1.0, anchor_pool / 8.0)
+
+    contrast_n = (
+        len(canvas.contrast.vocal_moments)
+        + len(canvas.contrast.texture_changes)
+        + len(canvas.contrast.darker_turns)
+        + len(canvas.contrast.brighter_lifts)
+    )
+    contrast_potential = min(1.0, contrast_n / 4.0)
+
+    # Distinctiveness vs already-picked canvases
+    if picked_ids and canvas.core_track_ids:
+        shared = len(picked_ids & frozenset(canvas.core_track_ids))
+        distinctiveness = 1.0 - shared / len(canvas.core_track_ids)
+    else:
+        distinctiveness = 1.0
+
+    novelty = 1.0 - similarity_to_history(canvas, history)
+
+    overall = (
+        technical_viability * 0.25
+        + role_coverage * 0.25
+        + anchor_strength * 0.15
+        + contrast_potential * 0.15
+        + distinctiveness * 0.10
+        + novelty * 0.10
+    )
+
+    return CanvasScore(
+        technical_viability=technical_viability,
+        role_coverage=role_coverage,
+        anchor_strength=anchor_strength,
+        contrast_potential=contrast_potential,
+        distinctiveness=distinctiveness,
+        novelty=novelty,
+        overall=overall,
+    )
+
+
+def select_canvases(
+    canvases: list[MixCanvas],
+    history: ConceptHistory,
+    n: int = 6,
+) -> list[MixCanvas]:
+    """Score and pick up to n canvases using diversity-aware deterministic selection."""
+    if not canvases:
+        return []
+    if len(canvases) <= n:
+        for canvas in canvases:
+            canvas.score = score_canvas(canvas, history, frozenset())
+        canvases.sort(key=lambda c: c.score.overall, reverse=True)
+        return canvases
+
+    picked: list[MixCanvas] = []
+    remaining = list(canvases)
+    picked_core_ids: frozenset[str] = frozenset()
+
+    while remaining and len(picked) < n:
+        # Score all remaining with current overlap context
+        for canvas in remaining:
+            canvas.score = score_canvas(canvas, history, picked_core_ids)
+        remaining.sort(key=lambda c: c.score.overall, reverse=True)
+        best = remaining.pop(0)
+        picked.append(best)
+        picked_core_ids = picked_core_ids | frozenset(best.core_track_ids)
+
+    return picked

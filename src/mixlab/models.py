@@ -45,6 +45,60 @@ class MixConcept(BaseModel):
     name_reason: str = ""
 
 
+@dataclass
+class BpmPools:
+    core: list[Track]  # |bpm - median| <= 6
+    bridge: list[Track]  # 6 < |bpm - median| <= 12
+    wildcard: list[Track]  # |bpm - median| > 12
+
+
+@dataclass
+class CanvasRoleCandidates:
+    opener: list[str]
+    groove_locker: list[str]
+    builder: list[str]
+    pivot: list[str]
+    peak: list[str]
+    closer: list[str]
+
+
+@dataclass
+class ContrastAssets:
+    vocal_moments: list[str]
+    texture_changes: list[str]
+    darker_turns: list[str]
+    brighter_lifts: list[str]
+    lower_pressure_resets: list[str]
+
+
+@dataclass
+class CanvasScore:
+    technical_viability: float = 0.0
+    role_coverage: float = 0.0
+    anchor_strength: float = 0.0
+    contrast_potential: float = 0.0
+    distinctiveness: float = 1.0
+    novelty: float = 1.0
+    overall: float = 0.0
+
+
+@dataclass
+class MixCanvas:
+    canvas_id: str
+    genre: str
+    bpm_range: tuple[float, float]
+    dominant_bpm: float
+    dominant_camelot: str
+    core_track_ids: list[str]
+    bridge_track_ids: list[str]
+    wildcard_track_ids: list[str]
+    roles: CanvasRoleCandidates
+    contrast: ContrastAssets
+    risk_notes: list[str]
+    score: CanvasScore
+    source_concept: MixConcept
+
+
 SeedTier = Literal["anchor", "supporting", "optional"]
 SetRole = Literal[
     "opener",
