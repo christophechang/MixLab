@@ -358,6 +358,8 @@ def test_run_playlist_mode_happy_path(
         unplayed_ids: set[str] | None = None,
         intent_brief: IntentBrief | None = None,
         used_mix_names: list[str] | None = None,
+        canvases: object = None,
+        debug: bool = False,
     ) -> tuple[list[MixConcept], str]:
         assert playlist_name == "Monday Night"
         assert seed_ids == frozenset({"1", "2", "3", "4"})
@@ -445,9 +447,11 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
         unplayed_ids: set[str] | None = None,
         intent_brief: IntentBrief | None = None,
         used_mix_names: list[str] | None = None,
+        canvases: object = None,
+        debug: bool = False,
     ) -> tuple[list[MixConcept], str]:
         del shortlists, tracks_by_id, custom_genre_label, custom_genre_sub_genres
-        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief, used_mix_names
+        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief, used_mix_names, canvases, debug
         return ([MixConcept(title="Completed Set", mood="warm", track_ids=["1", "2", "3", "4"])], "Playlist report")
 
     async def fake_send_report(*args: object, **kwargs: object) -> bool:
@@ -482,9 +486,11 @@ def test_run_playlist_mode_exports_all_ranked_variants(monkeypatch: pytest.Monke
         unplayed_ids: set[str] | None = None,
         intent_brief: IntentBrief | None = None,
         used_mix_names: list[str] | None = None,
+        canvases: object = None,
+        debug: bool = False,
     ) -> tuple[list[MixConcept], str]:
         del shortlists, tracks_by_id, custom_genre_label, custom_genre_sub_genres
-        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief, used_mix_names
+        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief, used_mix_names, canvases, debug
         return (
             [
                 MixConcept(title="WINNER - PRACTICAL - Gravity Well", mood="practical", track_ids=["1", "2", "3", "4"]),

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.7.0
+
+- **Canvas scoring diagnostics (`--debug`).** Pass `--debug` (or set `MIXLAB_DEBUG_SCORE=1`) to emit per-canvas score breakdowns to stderr. Output includes all six scoring components (`technical_viability`, `role_coverage`, `anchor_strength`, `contrast_potential`, `distinctiveness`, `novelty`, `overall`), overlap penalty with count of shared core tracks, novelty penalty with the closest history match (run date, genre, decayed Jaccard), core/bridge/wildcard track counts, and risk notes. Also shows the full candidate list before selection and the final pick order. Normal stdout and Discord output are unchanged.
+
+---
+
 ## v0.6.0
 
 - **Mix Canvas selection.** Stage 1 concepts are now wrapped into structured Mix Canvases before Stage 2 receives them. Each canvas carries deterministic role candidates (opener, groove-locker, builder, pivot, peak, closer), contrast assets (vocal moments, texture changes, darker/brighter turns), and risk notes (weak opener/closer pool, BPM spread, artist or label over-repetition). Up to 6 canvases are selected for Stage 2 using a weighted scoring model — technical viability, role coverage, anchor strength, contrast potential, cross-canvas distinctiveness, and novelty — replacing the previous random sampling from the top-12 by pool size. Selection is deterministic given the same input.

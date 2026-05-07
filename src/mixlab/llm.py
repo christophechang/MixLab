@@ -1219,9 +1219,7 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
     for item in data:
         raw_ids = item.get("track_ids")
         track_ids = [
-            nid
-            for tid in (raw_ids if isinstance(raw_ids, list) else [])
-            if (nid := _normalise_id(tid)) in valid_ids
+            nid for tid in (raw_ids if isinstance(raw_ids, list) else []) if (nid := _normalise_id(tid)) in valid_ids
         ]
         if len(track_ids) < _MIN_CONCEPT_TRACKS:
             continue
@@ -1571,6 +1569,7 @@ async def stage2_curate_and_report(
     intent_brief: IntentBrief | None = None,
     used_mix_names: list[str] | None = None,
     canvases: list[MixCanvas] | None = None,
+    debug: bool = False,
 ) -> tuple[list[MixConcept], str]:
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
     if not stage2_key:
