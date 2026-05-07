@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import statistics
+import sys
 
 from mixlab.config import CustomGenre
 from mixlab.history import ConceptHistory, similarity_to_history
@@ -270,7 +271,11 @@ def _infer_roles(tracks: list[Track], pools: BpmPools) -> CanvasRoleCandidates:
             # Energy-based inference
             if e <= _OPENER_MAX_ENERGY:
                 opener.append(t.track_id)
-            if in_core and _GROOVE_ENERGY_MIN <= e <= _GROOVE_ENERGY_MAX and abs(t.bpm - median_bpm) <= _GROOVE_BPM_TOLERANCE:
+            if (
+                in_core
+                and _GROOVE_ENERGY_MIN <= e <= _GROOVE_ENERGY_MAX
+                and abs(t.bpm - median_bpm) <= _GROOVE_BPM_TOLERANCE
+            ):
                 groove_locker.append(t.track_id)
             if in_core and _BUILDER_ENERGY_MIN <= e <= _BUILDER_ENERGY_MAX:
                 builder.append(t.track_id)
@@ -419,10 +424,77 @@ def build_mix_canvas(
     )
 
 
+# Mirrors history._RECENCY_WINDOW and history._DECAY — keep in sync if those change.
+_HIST_RECENCY = 10
+_HIST_DECAY = 0.8
+
+
+def _novelty_source(canvas: MixCanvas, history: ConceptHistory) -> str:
+    """Return a short description of the top history contributor to novelty penalty."""
+    if not history.runs or not canvas.core_track_ids:
+        return "no history"
+    canvas_ids = frozenset(canvas.core_track_ids)
+    recent = history.runs[-_HIST_RECENCY:]
+    best_sim = 0.0
+    best_label = "no overlap with history"
+    for age, entry in enumerate(reversed(recent)):
+        hist_ids = frozenset(entry.core_track_ids)
+        union = canvas_ids | hist_ids
+        if not union:
+            continue
+        jaccard = len(canvas_ids & hist_ids) / len(union)
+        decayed = jaccard * (_HIST_DECAY**age)
+        if decayed > best_sim:
+            best_sim = decayed
+            best_label = f"run[{entry.created_at[:10]} genre={entry.genre}] jaccard_decayed={decayed:.3f}"
+    return best_label
+
+
+def _emit_canvas_score_debug(
+    canvas: MixCanvas,
+    score: CanvasScore,
+    history: ConceptHistory,
+    picked_ids: frozenset[str],
+) -> None:
+    """Write per-canvas score diagnostics to stderr."""
+    core_n = len(canvas.core_track_ids)
+    overlap_count = len(picked_ids & frozenset(canvas.core_track_ids)) if canvas.core_track_ids else 0
+    overlap_frac = overlap_count / core_n if core_n > 0 else 0.0
+    novelty_penalty = round(1.0 - score.novelty, 3)
+    risk_str = ", ".join(canvas.risk_notes) if canvas.risk_notes else "none"
+    print(
+        f"  core={core_n}  bridge={len(canvas.bridge_track_ids)}  wildcard={len(canvas.wildcard_track_ids)}",
+        file=sys.stderr,
+    )
+    print(
+        f"  technical_viability={score.technical_viability:.3f}  "
+        f"role_coverage={score.role_coverage:.3f}  "
+        f"anchor_strength={score.anchor_strength:.3f}",
+        file=sys.stderr,
+    )
+    print(
+        f"  contrast_potential={score.contrast_potential:.3f}  "
+        f"distinctiveness={score.distinctiveness:.3f}  "
+        f"novelty={score.novelty:.3f}  overall={score.overall:.3f}",
+        file=sys.stderr,
+    )
+    print(
+        f"  overlap_penalty={overlap_frac:.3f} ({overlap_count}/{core_n} core tracks shared with picked)",
+        file=sys.stderr,
+    )
+    print(
+        f"  novelty_penalty={novelty_penalty:.3f} ({_novelty_source(canvas, history)})",
+        file=sys.stderr,
+    )
+    print(f"  risk_notes: {risk_str}", file=sys.stderr)
+
+
 def score_canvas(
     canvas: MixCanvas,
     history: ConceptHistory,
     picked_ids: frozenset[str],
+    *,
+    debug: bool = False,
 ) -> CanvasScore:
     core_n = len(canvas.core_track_ids)
     technical_viability = min(1.0, core_n / 20.0)
@@ -471,7 +543,7 @@ def score_canvas(
         + novelty * 0.10
     )
 
-    return CanvasScore(
+    score = CanvasScore(
         technical_viability=technical_viability,
         role_coverage=role_coverage,
         anchor_strength=anchor_strength,
@@ -480,20 +552,45 @@ def score_canvas(
         novelty=novelty,
         overall=overall,
     )
+    if debug:
+        print(f"[DEBUG canvas:{canvas.canvas_id}]", file=sys.stderr)
+        _emit_canvas_score_debug(canvas, score, history, picked_ids)
+    return score
 
 
 def select_canvases(
     canvases: list[MixCanvas],
     history: ConceptHistory,
     n: int = 6,
+    *,
+    debug: bool = False,
 ) -> list[MixCanvas]:
     """Score and pick up to n canvases using diversity-aware deterministic selection."""
     if not canvases:
         return []
+
+    if debug:
+        print(
+            f"\n[DEBUG select_canvases] {len(canvases)} candidates → selecting up to {n}",
+            file=sys.stderr,
+        )
+        for c in canvases:
+            print(
+                f"  candidate: {c.canvas_id}  core={len(c.core_track_ids)}  "
+                f"bridge={len(c.bridge_track_ids)}  wildcard={len(c.wildcard_track_ids)}  "
+                f"risk={c.risk_notes or 'none'}",
+                file=sys.stderr,
+            )
+
     if len(canvases) <= n:
         for canvas in canvases:
             canvas.score = score_canvas(canvas, history, frozenset())
         canvases.sort(key=lambda c: c.score.overall, reverse=True)
+        if debug:
+            print("\n[DEBUG final selection order (all candidates fit)]", file=sys.stderr)
+            for i, c in enumerate(canvases, 1):
+                print(f"\n[DEBUG pick #{i}] {c.canvas_id}  overall={c.score.overall:.3f}", file=sys.stderr)
+                _emit_canvas_score_debug(c, c.score, history, frozenset())
         return canvases
 
     picked: list[MixCanvas] = []
@@ -507,6 +604,15 @@ def select_canvases(
         remaining.sort(key=lambda c: c.score.overall, reverse=True)
         best = remaining.pop(0)
         picked.append(best)
+        pre_pick_ids = picked_core_ids
         picked_core_ids = picked_core_ids | frozenset(best.core_track_ids)
+        if debug:
+            print(f"\n[DEBUG pick #{len(picked)}] {best.canvas_id}  overall={best.score.overall:.3f}", file=sys.stderr)
+            _emit_canvas_score_debug(best, best.score, history, pre_pick_ids)
+
+    if debug:
+        print("\n[DEBUG final selection order]", file=sys.stderr)
+        for i, c in enumerate(picked, 1):
+            print(f"  #{i} {c.canvas_id}", file=sys.stderr)
 
     return picked

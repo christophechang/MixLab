@@ -570,3 +570,58 @@ def test_select_canvases_returns_all_when_fewer_than_n() -> None:
     assert all(isinstance(c, MixCanvas) for c in canvases)
     selected = select_canvases(canvases, ConceptHistory(), n=6)  # type: ignore[arg-type]
     assert len(selected) == 3
+
+
+# ---------------------------------------------------------------------------
+# debug output
+# ---------------------------------------------------------------------------
+
+
+def test_score_canvas_debug_emits_score_fields_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    from mixlab.models import MixCanvas
+
+    canvas = _rich_canvas("c1", [f"T{i:03d}" for i in range(20)])
+    assert isinstance(canvas, MixCanvas)
+    score_canvas(canvas, ConceptHistory(), frozenset(), debug=True)
+    captured = capsys.readouterr()
+    assert "technical_viability" in captured.err
+    assert "role_coverage" in captured.err
+    assert "anchor_strength" in captured.err
+    assert "novelty" in captured.err
+    assert "overall" in captured.err
+    assert "overlap_penalty" in captured.err
+    assert "novelty_penalty" in captured.err
+    assert "risk_notes" in captured.err
+
+
+def test_score_canvas_no_debug_no_stderr_output(capsys: pytest.CaptureFixture[str]) -> None:
+    from mixlab.models import MixCanvas
+
+    canvas = _rich_canvas("c1", [f"T{i:03d}" for i in range(20)])
+    assert isinstance(canvas, MixCanvas)
+    score_canvas(canvas, ConceptHistory(), frozenset())
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+
+def test_select_canvases_debug_emits_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    from mixlab.models import MixCanvas
+
+    canvases = [_rich_canvas(f"c{i}", [f"T{i}{j:02d}" for j in range(10)]) for i in range(3)]
+    assert all(isinstance(c, MixCanvas) for c in canvases)
+    select_canvases(canvases, ConceptHistory(), n=2, debug=True)  # type: ignore[arg-type]
+    captured = capsys.readouterr()
+    assert "DEBUG" in captured.err
+    assert "select_canvases" in captured.err
+    assert "pick #" in captured.err
+
+
+def test_select_canvases_debug_does_not_change_selection() -> None:
+    from mixlab.models import MixCanvas
+
+    canvases_a = [_rich_canvas(f"c{i}", [f"T{i}{j:02d}" for j in range(10)]) for i in range(4)]
+    canvases_b = [_rich_canvas(f"c{i}", [f"T{i}{j:02d}" for j in range(10)]) for i in range(4)]
+    assert all(isinstance(c, MixCanvas) for c in canvases_a + canvases_b)
+    selected_no_debug = [c.canvas_id for c in select_canvases(canvases_a, ConceptHistory(), n=3)]  # type: ignore[arg-type]
+    selected_debug = [c.canvas_id for c in select_canvases(canvases_b, ConceptHistory(), n=3, debug=True)]  # type: ignore[arg-type]
+    assert selected_no_debug == selected_debug

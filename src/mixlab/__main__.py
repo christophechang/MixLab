@@ -258,6 +258,7 @@ async def run_playlist_mode(
     max_bpm: float | None = None,
     min_year: int | None = None,
     max_year: int | None = None,
+    debug: bool = False,
 ) -> None:
     tracks = parse_collection(_XML_PATH)
     tracks, _ = _apply_do_not_recommend_filter(tracks, _XML_PATH)
@@ -347,6 +348,7 @@ async def run_playlist_mode(
         unplayed_ids=unplayed_ids,
         intent_brief=intent_brief,
         used_mix_names=mix_names or None,
+        debug=debug,
     )
     if not all_concepts:
         print(report, file=sys.stderr)
@@ -444,6 +446,7 @@ async def run(
     max_bpm: float | None = None,
     min_year: int | None = None,
     max_year: int | None = None,
+    debug: bool = False,
 ) -> None:
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
@@ -579,7 +582,7 @@ async def run(
     # Build Mix Canvases and select top candidates for Stage 2 (diversity-aware, deterministic).
     history = load_history(Path(".mixlab/concept-history.json"))
     all_canvases: list[MixCanvas] = [build_mix_canvas(c, tracks_by_id) for c in all_shortlists]
-    selected_canvases = select_canvases(all_canvases, history)
+    selected_canvases = select_canvases(all_canvases, history, debug=debug)
     if not selected_canvases:
         print("No canvases could be built — collection may be out of sync.", file=sys.stderr)
         sys.exit(1)
@@ -603,6 +606,7 @@ async def run(
         custom_genre_sub_genres=custom_genre_sub_genres,
         used_mix_names=mix_names or None,
         canvases=selected_canvases,
+        debug=debug,
     )
     if not all_concepts:
         print(report, file=sys.stderr)
@@ -826,6 +830,11 @@ examples:
         metavar="YEAR",
         help="Maximum release year (inclusive). Tracks with no year are excluded when this is set.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Emit verbose canvas scoring diagnostics to stderr. Also enabled by MIXLAB_DEBUG_SCORE=1.",
+    )
     args = parser.parse_args()
     _validate_range_args(
         min_bpm=args.min_bpm,
@@ -833,6 +842,7 @@ examples:
         min_year=args.min_year,
         max_year=args.max_year,
     )
+    debug = args.debug or bool(os.environ.get("MIXLAB_DEBUG_SCORE"))
     if args.genres:
         _show_cached_genres()
         return
@@ -858,6 +868,7 @@ examples:
                 max_bpm=args.max_bpm,
                 min_year=args.min_year,
                 max_year=args.max_year,
+                debug=debug,
             )
         )
         return
@@ -871,6 +882,7 @@ examples:
             max_bpm=args.max_bpm,
             min_year=args.min_year,
             max_year=args.max_year,
+            debug=debug,
         )
     )
 
