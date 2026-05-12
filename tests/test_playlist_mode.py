@@ -376,7 +376,7 @@ def test_run_playlist_mode_happy_path(
     monkeypatch.setattr(main_mod, "stage2_curate_and_report", fake_stage2)
     monkeypatch.setattr(main_mod, "send_report", fake_send_report)
 
-    asyncio.run(main_mod.run_playlist_mode("Monday Night", None, None, False))
+    asyncio.run(main_mod.run_playlist_mode("Monday Night", None, None, "unplayed"))
     captured = capsys.readouterr()
     assert "Playlist report" in captured.out
 
@@ -461,7 +461,7 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
     monkeypatch.setattr(main_mod, "stage2_curate_and_report", fake_stage2)
     monkeypatch.setattr(main_mod, "send_report", fake_send_report)
 
-    asyncio.run(main_mod.run_playlist_mode("Monday Night", "electronica", None, False))
+    asyncio.run(main_mod.run_playlist_mode("Monday Night", "electronica", None, "unplayed"))
     assert seen_library_genres == ["Electronica"]
 
 
@@ -531,7 +531,7 @@ def test_run_playlist_mode_exports_all_ranked_variants(monkeypatch: pytest.Monke
     monkeypatch.setattr(main_mod, "export_merged_xml", fake_export_merged_xml)
     monkeypatch.setattr(main_mod, "send_report", fake_send_report)
 
-    asyncio.run(main_mod.run_playlist_mode("Monday Night", None, tmp_path, False))
+    asyncio.run(main_mod.run_playlist_mode("Monday Night", None, tmp_path, "unplayed"))
 
     expected_titles = [
         "WINNER - PRACTICAL - Gravity Well",
@@ -550,7 +550,7 @@ def test_run_playlist_mode_playlist_not_found_exits(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(main_mod, "_XML_PATH", xml_path)
 
     with pytest.raises(SystemExit, match="1"):
-        asyncio.run(main_mod.run_playlist_mode("Missing", None, None, False))
+        asyncio.run(main_mod.run_playlist_mode("Missing", None, None, "unplayed"))
 
 
 # ---------------------------------------------------------------------------

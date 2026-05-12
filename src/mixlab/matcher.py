@@ -36,3 +36,8 @@ def is_played(track: Track, played: list[PlayedTrack]) -> bool:
 def filter_unplayed(tracks: list[Track], played: list[PlayedTrack]) -> list[Track]:
     played_set = {_played_key(p) for p in played}
     return [t for t in tracks if normalise(t.artist) + " " + normalise(t.title) not in played_set]
+
+
+def filter_played(tracks: list[Track], played: list[PlayedTrack]) -> list[Track]:
+    played_set = {_played_key(p) for p in played}
+    return [t for t in tracks if normalise(t.artist) + " " + normalise(t.title) in played_set]

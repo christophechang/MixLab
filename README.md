@@ -34,7 +34,7 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY + at least one Stage 1 key
 ## How it works
 
 1. Parses your exported Rekordbox XML collection
-2. If `CATALOG_API_URL` is set, fetches your play history and filters out already-played tracks; otherwise uses the full collection
+2. If `CATALOG_API_URL` is set, fetches your play history and applies `--mode` filtering (`unplayed` by default, or `played` to restrict to battle-tested tracks); without the catalog API the full collection is used
 3. Prints a crate availability table (no LLM cost)
 4. If `--genre` is specified, scopes the collection to that genre (or custom cross-genre pool), runs Stage 1 shortlisting, then writes a full Stage 2 mix planning report
 5. If `--playlist` is specified, uses that Rekordbox playlist as the seed, infers the set's intent, builds natural BPM-zone shortlists around the seed tracks, generates three completion variants, then writes the best playlist-completion report
@@ -199,15 +199,25 @@ Prints unplayed vs total counts per genre, sorted by availability. Only the cata
 
 ```bash
 ./mixlab --genre house
-./mixlab --genre 4x4 --all-tracks
+./mixlab --genre house --mode played
+./mixlab --genre 4x4 --mode all
 ```
 
-Runs the full genre pipeline: parse → fetch played history (unless `--all-tracks`) → scope to the requested genre → Stage 1 shortlist generation → Stage 2 report → Discord/stdout.
+Runs the full genre pipeline: parse → fetch played history (based on `--mode`) → scope to the requested genre → Stage 1 shortlist generation → Stage 2 report → Discord/stdout.
+
+`--mode` controls which tracks are eligible for concepts:
+
+| Mode | Behaviour |
+|------|-----------|
+| `unplayed` (default) | Only tracks never played live. Requires `CATALOG_API_URL`. |
+| `played` | Only tracks that have appeared in your play history — battle-tested and SoundCloud-proven. Requires `CATALOG_API_URL`. |
+| `all` | Full collection, ignoring play history entirely. |
 
 The report starts with a context header so you can see exactly what kind of run produced it, for example:
 
 ```text
 Report context: House (unplayed tracks)
+Report context: House (played tracks)
 Report context: 140 (custom genre, All Tracks)
 ```
 
@@ -219,7 +229,8 @@ For standard and custom genre runs, a Rekordbox-compatible merged XML file can b
 ./mixlab --playlist "Monday Night"
 ./mixlab --playlist "Monday Night" --genre electronica
 ./mixlab --playlist "Sets/Monday Night"
-./mixlab --playlist "Monday Night" --all-tracks
+./mixlab --playlist "Monday Night" --mode all
+./mixlab --playlist "Monday Night" --mode played
 ```
 
 Playlist mode is a different workflow from genre mode:
@@ -234,7 +245,7 @@ Playlist mode is a different workflow from genre mode:
 Important playlist-mode rules:
 
 - `--genre` in playlist mode constrains added library tracks to that genre scope; it does not filter the seed playlist itself
-- `--all-tracks` disables played-track weighting in playlist mode and uses the full collection as the candidate pool
+- `--mode` controls which library tracks are candidates: `unplayed` (default) biases towards unplayed tracks, `played` restricts the pool to battle-tested tracks only, `all` uses the full collection with no weighting
 - Playlist names are matched case-insensitively
 - If the same playlist name exists in multiple folders, pass the full path such as `Sets/Monday Night`
 - Playlist mode requires at least 4 valid seed tracks with BPM and Camelot key after parsing
@@ -242,6 +253,8 @@ Important playlist-mode rules:
 Playlist runs use the same report context header as genre runs, for example:
 
 ```text
+Report context: Monday Night playlist (Electronica, unplayed tracks)
+Report context: Monday Night playlist (played tracks)
 Report context: Monday Night playlist (Electronica, All Tracks)
 ```
 

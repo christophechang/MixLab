@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+TrackMode = Literal["unplayed", "all", "played"]
+
 
 class Track(BaseModel):
     track_id: str

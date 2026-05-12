@@ -36,8 +36,8 @@ from mixlab.llm import (
     stage2_curate_and_report,
     validate_stage2_output,
 )
-from mixlab.matcher import filter_unplayed
-from mixlab.models import MixCanvas, MixConcept, Track
+from mixlab.matcher import filter_played, filter_unplayed
+from mixlab.models import MixCanvas, MixConcept, Track, TrackMode
 from mixlab.playlist_exporter import (
     export_merged_xml,
     generate_merged_xml_bytes,
@@ -66,7 +66,7 @@ def _format_report_context(
     *,
     genre: str | None,
     playlist_name: str | None,
-    all_tracks: bool,
+    mode: TrackMode,
     export_dir: Path | None,
 ) -> str:
     base_label: str
@@ -86,7 +86,8 @@ def _format_report_context(
     else:
         base_label = "MixLab run"
 
-    details.append("All Tracks" if all_tracks else "unplayed tracks")
+    mode_label = {"all": "All Tracks", "unplayed": "unplayed tracks", "played": "played tracks"}[mode]
+    details.append(mode_label)
     if export_dir is not None:
         details.append("export enabled")
 
@@ -176,6 +177,7 @@ def _print_pipeline_summary(
     collection_count: int,
     unplayed_count: int,
     used_catalog_api: bool,
+    pool_label: str = "unplayed",
     genre_cluster_counts: dict[str, int],
     bpm_filtered_counts: dict[str, int],
     same_genre_outlier_count: int,
@@ -183,7 +185,7 @@ def _print_pipeline_summary(
     stage2_shortlist_count: int,
 ) -> None:
     print("Pipeline summary:")
-    filter_label = "unplayed" if used_catalog_api else "eligible"
+    filter_label = pool_label if used_catalog_api else "eligible"
     print(f"- Track pool: {unplayed_count} {filter_label} / {collection_count} in scoped collection")
     print(f"- Genre scope before BPM filter: {_format_pipeline_counts(genre_cluster_counts)}")
     print(f"- Genre scope after BPM filter: {_format_pipeline_counts(bpm_filtered_counts)}")
@@ -198,13 +200,14 @@ def _print_availability(
     unplayed: list[Track],
     show_unplayed: bool = True,
     excluded_count: int = 0,
+    pool_label: str = "unplayed",
 ) -> tuple[dict[str, tuple[int, int]], int, dict[str, tuple[int, int]]]:
     counts = count_available_by_genre(all_tracks, unplayed, GENRE_MAP)
     outlier_genres = count_outlier_genres(all_tracks, unplayed, GENRE_MAP, ignored=IGNORED_GENRES)
     outlier_count = sum(u for _, u in outlier_genres.values())
 
     if show_unplayed:
-        print("\nAvailable tracks (unplayed / in collection):")
+        print(f"\nAvailable tracks ({pool_label} / in collection):")
         for label, (total, available) in counts.items():
             bar = "█" * min(available // 10, 30)
             print(f"  {label:<20} {available:>4} / {total:<4}  {bar}")
@@ -253,7 +256,7 @@ async def run_playlist_mode(
     playlist_name: str,
     genre: str | None,
     export_dir: Path | None,
-    all_tracks: bool,
+    mode: TrackMode = "unplayed",
     min_bpm: float | None = None,
     max_bpm: float | None = None,
     min_year: int | None = None,
@@ -268,8 +271,9 @@ async def run_playlist_mode(
     catalog_url = os.environ.get("CATALOG_API_URL", "")
     unplayed_ids: set[str] | None = None
     mix_names: list[str] = []
-    if all_tracks:
-        print("--all-tracks set — skipping played-track weighting in playlist mode.")
+    played_track_ids_set: set[str] = set()
+    if mode == "all":
+        print("--mode all — skipping played-track weighting in playlist mode.")
     elif catalog_url:
         try:
             played, mix_names = await asyncio.gather(
@@ -281,7 +285,12 @@ async def run_playlist_mode(
             sys.exit(1)
         if mix_names:
             print(f"Fetched {len(mix_names)} catalogue mix name(s) — injecting into Stage 2 prompt.", flush=True)
-        unplayed_ids = {track.track_id for track in filter_unplayed(tracks, played)}
+        if mode == "unplayed":
+            unplayed_ids = {track.track_id for track in filter_unplayed(tracks, played)}
+        else:  # mode == "played"
+            _unplayed_set = {t.track_id for t in filter_unplayed(tracks, played)}
+            played_track_ids_set = {t.track_id for t in tracks if t.track_id not in _unplayed_set}
+            unplayed_ids = set()  # no unplayed bonus; pool is played-only
 
     playlists = parse_playlists(_XML_PATH)
     try:
@@ -326,9 +335,13 @@ async def run_playlist_mode(
     library_tracks = _apply_range_filters(
         library_tracks, min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year
     )
+    if mode == "played" and played_track_ids_set:
+        library_tracks = [t for t in library_tracks if t.track_id in played_track_ids_set]
 
     try:
-        shortlists = build_zone_shortlists(seed_tracks, library_tracks, unplayed_ids, all_tracks, intent_brief)
+        shortlists = build_zone_shortlists(
+            seed_tracks, library_tracks, unplayed_ids, all_tracks_flag=mode != "unplayed", intent_brief=intent_brief
+        )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
@@ -360,7 +373,7 @@ async def run_playlist_mode(
     report_context = _format_report_context(
         genre=genre,
         playlist_name=playlist_name,
-        all_tracks=all_tracks,
+        mode=mode,
         export_dir=export_dir,
     )
     report += f'\n\n---\n\nPlaylist completion: "{playlist_name}"'
@@ -441,7 +454,7 @@ async def run_export_unplayed() -> None:
 async def run(
     genre: str | None,
     export_dir: Path | None,
-    all_tracks: bool = False,
+    mode: TrackMode = "unplayed",
     min_bpm: float | None = None,
     max_bpm: float | None = None,
     min_year: int | None = None,
@@ -454,14 +467,15 @@ async def run(
     tracks = apply_bpm_corrections(tracks)
     tracks = _apply_range_filters(tracks, min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year)
 
-    # 2. Fetch played tracks and filter (skipped when --all-tracks is set).
+    # 2. Fetch played tracks and filter pool based on mode.
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
     catalog_url = os.environ.get("CATALOG_API_URL", "")
     used_catalog_api = False
     mix_names: list[str] = []
     played_track_ids: set[str] = set()
-    if all_tracks:
-        print("--all-tracks set — skipping played-track filter, using full collection.")
+    pool_label = "unplayed"
+    if mode == "all":
+        print("--mode all — skipping played-track filter, using full collection.")
         unplayed = list(tracks)
     elif catalog_url:
         try:
@@ -474,9 +488,14 @@ async def run(
             sys.exit(1)
         if mix_names:
             print(f"Fetched {len(mix_names)} catalogue mix name(s) — injecting into Stage 2 prompt.", flush=True)
-        unplayed = filter_unplayed(tracks, played)
-        _unplayed_ids = {t.track_id for t in unplayed}
-        played_track_ids = {t.track_id for t in tracks if t.track_id not in _unplayed_ids}
+        if mode == "played":
+            pool_label = "played"
+            unplayed = filter_played(tracks, played)
+            # all pool tracks are played; validation should not warn about them
+        else:  # mode == "unplayed"
+            unplayed = filter_unplayed(tracks, played)
+            _unplayed_ids = {t.track_id for t in unplayed}
+            played_track_ids = {t.track_id for t in tracks if t.track_id not in _unplayed_ids}
         used_catalog_api = True
     else:
         print("No CATALOG_API_URL set — skipping played-track filter, using full collection.")
@@ -484,7 +503,7 @@ async def run(
 
     # 3. Always print the availability table (deterministic, no LLM cost).
     counts, outlier_count, outlier_genres = _print_availability(
-        tracks, unplayed, show_unplayed=used_catalog_api, excluded_count=denylist_excluded
+        tracks, unplayed, show_unplayed=used_catalog_api, excluded_count=denylist_excluded, pool_label=pool_label
     )
     save_genre_cache(counts, outlier_count, outlier_genres)
 
@@ -509,7 +528,7 @@ async def run(
     if is_custom:
         pool = build_custom_genre_pool(genre, unplayed, CUSTOM_GENRES, GENRE_MAP)
         if not pool:
-            print(f"No unplayed tracks found for custom genre '{genre}'.", file=sys.stderr)
+            print(f"No tracks found for custom genre '{genre}'.", file=sys.stderr)
             sys.exit(1)
         print(f"Custom genre '{genre}': {len(pool)} tracks in pool.")
         # Sort by BPM for Stage 1 window selection — ensures each window is BPM-coherent.
@@ -533,7 +552,7 @@ async def run(
         genre_cluster_counts = {genre_label: len(cluster_tracks) for genre_label, cluster_tracks in clusters.items()}
 
         if not clusters:
-            print(f"No unplayed tracks found for genre '{genre}'.", file=sys.stderr)
+            print(f"No tracks found for genre '{genre}'.", file=sys.stderr)
             sys.exit(1)
 
         # 6a. LLM Stage 1 — standard path.
@@ -565,6 +584,7 @@ async def run(
             collection_count=len(tracks),
             unplayed_count=len(unplayed),
             used_catalog_api=used_catalog_api,
+            pool_label=pool_label,
             genre_cluster_counts=genre_cluster_counts,
             bpm_filtered_counts=bpm_filtered_counts,
             same_genre_outlier_count=same_genre_outlier_count,
@@ -590,6 +610,7 @@ async def run(
         collection_count=len(tracks),
         unplayed_count=len(unplayed),
         used_catalog_api=used_catalog_api,
+        pool_label=pool_label,
         genre_cluster_counts=genre_cluster_counts,
         bpm_filtered_counts=bpm_filtered_counts,
         same_genre_outlier_count=same_genre_outlier_count,
@@ -619,7 +640,7 @@ async def run(
         tracks_by_id,
         played_ids=played_track_ids,
         denylist_ids=set(),  # tracks filtered before Stage 1; can't appear in output
-        allow_played=all_tracks,
+        allow_played=mode in ("all", "played"),
         genre=genre or "_default",
     )
     if validation_warnings:
@@ -634,7 +655,7 @@ async def run(
             selected_canvases,
             all_concepts,
             genre=genre or "_default",
-            mode="all-tracks" if all_tracks else "standard",
+            mode={"all": "all-tracks", "played": "played", "unplayed": "standard"}[mode],
         )
         append_run(history, entry, Path(".mixlab/concept-history.json"))
     except Exception as exc:
@@ -645,7 +666,7 @@ async def run(
     report_context = _format_report_context(
         genre=genre,
         playlist_name=None,
-        all_tracks=all_tracks,
+        mode=mode,
         export_dir=export_dir,
     )
     report += f"\n⏱ Generated in {elapsed_str}"
@@ -755,7 +776,8 @@ examples:
   mixlab --playlist "Monday Night"    complete a playlist concept from seed
   mixlab --playlist "Monday Night" --genre electronica  keep added tracks within electronica
   mixlab --playlist "Sets/Monday Night"  use full folder path if name is ambiguous
-  mixlab --genre 4x4 --all-tracks     cross-genre 4x4 set from full collection
+  mixlab --genre 4x4 --mode all        cross-genre 4x4 set from full collection
+  mixlab --genre house --mode played   house set from battle-tested played tracks
   mixlab --genre house --min-bpm 122 --max-bpm 128  narrow pool by BPM range
   mixlab --genre drum_and_bass --min-year 2020       tracks from 2020 onwards only
   mixlab --genres                     show cached counts from last run (no API)
@@ -793,9 +815,15 @@ examples:
         help="Export merged Rekordbox XML to output/playlists/rekordbox_export.xml",
     )
     parser.add_argument(
-        "--all-tracks",
-        action="store_true",
-        help="Use the full collection, ignoring played-track history (overrides CATALOG_API_URL)",
+        "--mode",
+        choices=["unplayed", "all", "played"],
+        default="unplayed",
+        help=(
+            "Track selection mode: "
+            "unplayed (default) — only tracks never played live; "
+            "all — full collection ignoring play history; "
+            "played — only battle-tested tracks from play history."
+        ),
     )
     parser.add_argument(
         "--export-unplayed",
@@ -863,7 +891,7 @@ examples:
                 args.playlist,
                 args.genre,
                 export_dir,
-                args.all_tracks,
+                args.mode,
                 min_bpm=args.min_bpm,
                 max_bpm=args.max_bpm,
                 min_year=args.min_year,
@@ -877,7 +905,7 @@ examples:
         run(
             args.genre,
             export_dir,
-            args.all_tracks,
+            args.mode,
             min_bpm=args.min_bpm,
             max_bpm=args.max_bpm,
             min_year=args.min_year,

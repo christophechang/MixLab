@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.8.0
+
+- **`--mode` flag replaces `--all-tracks`.** Track selection is now controlled by `--mode {unplayed,all,played}` (default: `unplayed`). `unplayed` preserves the previous default behaviour. `all` replicates the old `--all-tracks` flag. `played` is new: restricts the candidate pool to tracks that have appeared in your play history — battle-tested and SoundCloud-proven. Works in both genre mode and playlist mode.
+- **`filter_played()` added to matcher.** Symmetric counterpart to `filter_unplayed`. Returns tracks whose artist/title normalised key matches any entry in the played history.
+- **`TrackMode` type added to models.** `Literal["unplayed", "all", "played"]` exported from `models.py` for use across the CLI and future extensions.
+- **Availability table and pipeline summary reflect active mode.** The header `Available tracks (unplayed / in collection)` now reads `played` when `--mode played` is active. Pipeline summary `Track pool:` line follows the same label.
+
+---
+
 ## v0.7.0
 
 - **Canvas scoring diagnostics (`--debug`).** Pass `--debug` (or set `MIXLAB_DEBUG_SCORE=1`) to emit per-canvas score breakdowns to stderr. Output includes all six scoring components (`technical_viability`, `role_coverage`, `anchor_strength`, `contrast_potential`, `distinctiveness`, `novelty`, `overall`), overlap penalty with count of shared core tracks, novelty penalty with the closest history match (run date, genre, decayed Jaccard), core/bridge/wildcard track counts, and risk notes. Also shows the full candidate list before selection and the final pick order. Normal stdout and Discord output are unchanged.
