@@ -473,10 +473,41 @@ async def run(
     used_catalog_api = False
     mix_names: list[str] = []
     played_track_ids: set[str] = set()
+    unplayed_ids_for_stage2: set[str] | None = None
     pool_label = "unplayed"
     if mode == "all":
-        print("--mode all — skipping played-track filter, using full collection.")
         unplayed = list(tracks)
+        if catalog_url:
+            try:
+                played, mix_names = await asyncio.gather(
+                    fetch_played_tracks(api_key, catalog_url),
+                    fetch_mix_names(api_key, catalog_url),
+                )
+            except Exception as exc:
+                print(
+                    f"--mode all: catalog fetch failed ({type(exc).__name__}: {exc}) — "
+                    f"Stage 2 played/unplayed signal disabled.",
+                    file=sys.stderr,
+                )
+            else:
+                if mix_names:
+                    print(
+                        f"Fetched {len(mix_names)} catalogue mix name(s) — injecting into Stage 2 prompt.",
+                        flush=True,
+                    )
+                played_ids_set = {t.track_id for t in filter_played(tracks, played)}
+                unplayed_ids_for_stage2 = {t.track_id for t in tracks if t.track_id not in played_ids_set}
+                used_catalog_api = True
+                print(
+                    f"--mode all — fetched played status: {len(played_ids_set)}/{len(tracks)} played, "
+                    f"{len(unplayed_ids_for_stage2)} unplayed. Stage 2 will favour unplayed in ties.",
+                    flush=True,
+                )
+        else:
+            print(
+                "--mode all — CATALOG_API_URL not set, Stage 2 played/unplayed signal disabled.",
+                file=sys.stderr,
+            )
     elif catalog_url:
         try:
             played, mix_names = await asyncio.gather(
@@ -627,6 +658,7 @@ async def run(
         custom_genre_sub_genres=custom_genre_sub_genres,
         used_mix_names=mix_names or None,
         canvases=selected_canvases,
+        unplayed_ids=unplayed_ids_for_stage2,
         debug=debug,
     )
     if not all_concepts:

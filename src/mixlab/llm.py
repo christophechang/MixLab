@@ -10,13 +10,14 @@ import statistics
 import sys
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, cast
+from typing import Any, Callable, Literal, cast, get_args
 
 import httpx
 
 from mixlab.clustering import camelot_distance
 from mixlab.config import TRACK_COUNT_TARGETS, shortfall_warning
 from mixlab.models import (
+    ArcType,
     CompletionVariant,
     DJPracticalityScore,
     IntentBrief,
@@ -29,6 +30,8 @@ from mixlab.models import (
     Track,
     Transition,
 )
+
+_ARC_TYPE_VALUES: frozenset[str] = frozenset(get_args(ArcType))
 
 _MAX_TRACKS_PER_CALL = 40
 _MAX_TRACKS_PER_CALL_CUSTOM = 60  # larger chunks for custom multi-genre pools
@@ -737,7 +740,10 @@ _STAGE2_CANVAS_RULES = """\
 - Core tracks: use freely.\n\
 - Bridge tracks [bridge]: require role-aware justification — suitable for opener, pivot, reset, or closer where BPM deviation is intentional.\n\
 - Wildcard tracks [wildcard]: require explicit creative reason; use only if concept-defining.\n\
+- Role candidates shown in the canvas header (Opener:, Builder:, Peak:, etc.) are derived from technical analysis — energy score, BPM proximity, Camelot distance. They are hints, not assignments. Override them freely when your DJ instinct says a track serves a different role better, and briefly say why in the report.\n\
+- For bridge or wildcard tracks, "creative reason" means a specific structural role (e.g. "opener with deliberate BPM drop-in", "pivot that earns a key reset", "closer whose energy arc signals finality") — not "interesting track" or "good contrast".\n\
 - If a canvas shows risk notes, address the noted weakness in your selection or energy path.\n\
+- If a canvas's risk notes describe structural problems you cannot overcome with track selection (e.g. weak closer pool with no resolution candidate, all-high-energy with no viable dynamic arc), you may skip that canvas rather than force a weak concept. You are not obligated to produce a concept from every canvas.\n\
 - Not every mix needs every role.\n\
 - Harmonic and BPM compatibility are helpers, not constraints.\n\
 - For transitions involving bridge or wildcard tracks, state the specific mechanism that makes it survivable.\
@@ -937,6 +943,7 @@ Your output must be a JSON array where each element has exactly this schema:
     {"from_id": "id1", "to_id": "id2", "is_risky": false, "risk_type": ""},
     {"from_id": "id2", "to_id": "id3", "is_risky": true,  "risk_type": "chapter_pivot"}
   ],
+  "arc_type": "...",
   "report": "..."
 }
 
@@ -945,6 +952,15 @@ is_risky: true if the move is a notable harmonic or energy risk.
 risk_type: one of "chapter_pivot" | "peak_impact" | "deliberate_reset" | "closer_move" \
            | "cut_only" | "low_tonal_risk" | "" (empty string when is_risky=false).
 "cut_only" means: risky, with no mechanism that earns it — just a hard cut.
+arc_type: one of "plateau" | "wave" | "progressive-build" | "build-and-drop" | "double-peak" \
+          | "sustained-pressure" | "front-loaded" | "dark-to-light" | "light-to-dark" \
+          | "narrative" | "abstract-journey". Pick the value that best describes this \
+concept's overall arc. Structural arcs (plateau, wave, progressive-build, build-and-drop, \
+double-peak, sustained-pressure, front-loaded) describe the energy shape; directional arcs \
+(dark-to-light, light-to-dark) describe mood travel; narrative describes a chapter-based \
+story; abstract-journey describes a non-linear, impressionistic set. The chosen arc_type \
+should be visible in the track sequence and consistent with the energy path you describe \
+in the report.
 
 Give each concept a short, evocative name (2–4 words max) — not the pool name from Stage 1. \
 Avoid generic [Adjective][Noun] patterns (e.g. "Warm Gravity", "Committed Floor", "Orbital Descent" are bad). \
@@ -1236,6 +1252,7 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
                     )
                 )
         name_reason = str(item.get("name_reason", ""))
+        arc_type = _extract_arc_type(item.get("arc_type"))
         curated.append(
             MixConcept(
                 title=str(item.get("title", "")),
@@ -1243,11 +1260,129 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
                 track_ids=track_ids,
                 transitions=transitions,
                 name_reason=name_reason,
+                arc_type=arc_type,
             )
         )
         report_parts.append(str(item.get("report", "")))
 
     return curated, "\n\n---\n\n".join(report_parts)
+
+
+def _extract_arc_type(raw: object) -> ArcType | None:
+    """Defensively extract an arc_type value from Stage 2 JSON output.
+
+    Returns None when the field is missing or carries an unknown value, so
+    downstream consumers can fall back gracefully. Accepts mild formatting
+    drift (case, underscores instead of hyphens).
+    """
+    if not isinstance(raw, str):
+        return None
+    normalized = raw.strip().lower().replace("_", "-")
+    if normalized in _ARC_TYPE_VALUES:
+        return cast(ArcType, normalized)
+    return None
+
+
+# Risk-type enum values from Transition.risk_type mapped to human-readable mechanism labels.
+# Empty string and unknown values yield no mechanism (bullet line is skipped).
+_RISK_TYPE_LABELS: dict[str, str] = {
+    "chapter_pivot": "chapter pivot",
+    "peak_impact": "peak impact",
+    "deliberate_reset": "deliberate reset",
+    "closer_move": "closer move",
+    "cut_only": "cut only",
+    "low_tonal_risk": "low tonal risk",
+}
+
+
+def _match_canvas_for_concept(concept: MixConcept, canvases: list[MixCanvas]) -> MixCanvas | None:
+    """Pick the canvas whose full pool covers the most of the concept's track IDs.
+
+    Returns None when no canvas shares any tracks with the concept.
+    """
+    if not canvases:
+        return None
+    concept_ids = set(concept.track_ids)
+    best: MixCanvas | None = None
+    best_overlap = 0
+    for canvas in canvases:
+        pool = set(canvas.core_track_ids) | set(canvas.bridge_track_ids) | set(canvas.wildcard_track_ids)
+        overlap = len(concept_ids & pool)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best = canvas
+    return best
+
+
+def _format_bold_moves(
+    concept: MixConcept,
+    canvas: MixCanvas,
+    tracks_by_id: dict[str, Track],
+) -> str:
+    """Build the 'Bold moves:' annotation listing bridge/wildcard tracks in a concept.
+
+    Counts non-core picks and emits per-track bullet lines when an incoming transition
+    names a mechanism (Transition.risk_type). Tracks whose incoming transition has no
+    risk_type yield only the count, no bullet.
+    """
+    bridge_ids = set(canvas.bridge_track_ids)
+    wildcard_ids = set(canvas.wildcard_track_ids)
+    incoming: dict[str, Transition] = {t.to_id: t for t in concept.transitions}
+
+    bridge_hits: list[tuple[str, str]] = []  # (track_id, mechanism_label)
+    wildcard_hits: list[tuple[str, str]] = []
+    for tid in concept.track_ids:
+        if tid in bridge_ids:
+            mech = _RISK_TYPE_LABELS.get(incoming.get(tid, Transition(from_id="", to_id=tid)).risk_type, "")
+            bridge_hits.append((tid, mech))
+        elif tid in wildcard_ids:
+            mech = _RISK_TYPE_LABELS.get(incoming.get(tid, Transition(from_id="", to_id=tid)).risk_type, "")
+            wildcard_hits.append((tid, mech))
+
+    if not bridge_hits and not wildcard_hits:
+        return "Bold moves: none"
+
+    parts: list[str] = []
+    if bridge_hits:
+        parts.append(f"{len(bridge_hits)} bridge")
+    if wildcard_hits:
+        parts.append(f"{len(wildcard_hits)} wildcard")
+    lines = [f"Bold moves: {', '.join(parts)}"]
+    for tid, mech in bridge_hits:
+        if not mech:
+            continue
+        t = tracks_by_id.get(tid)
+        if t is None:
+            continue
+        lines.append(f"- {t.artist} — {t.title} (bridge): {mech}")
+    for tid, mech in wildcard_hits:
+        if not mech:
+            continue
+        t = tracks_by_id.get(tid)
+        if t is None:
+            continue
+        lines.append(f"- {t.artist} — {t.title} (wildcard): {mech}")
+    return "\n".join(lines)
+
+
+def _append_bold_moves_to_report(
+    report: str,
+    concept: MixConcept,
+    canvases: list[MixCanvas] | None,
+    tracks_by_id: dict[str, Track],
+) -> str:
+    """Append a 'Bold moves:' annotation block to a concept report.
+
+    Skips when no canvases are available (e.g. playlist mode) — there is no bridge/wildcard
+    classification without a canvas.
+    """
+    if not canvases:
+        return report
+    canvas = _match_canvas_for_concept(concept, canvases)
+    if canvas is None:
+        return report
+    annotation = _format_bold_moves(concept, canvas, tracks_by_id)
+    return f"{report.rstrip()}\n\n{annotation}"
 
 
 def _playlist_retention_stats(
@@ -1734,7 +1869,10 @@ async def stage2_curate_and_report(
 
     if playlist_name is None:
         reports = await _call_stage2_reports(curated, tracks_by_id, seed_ids, unplayed_ids, stage2_key)
-        report = "\n\n---\n\n".join(reports)
+        annotated_reports = [
+            _append_bold_moves_to_report(r, c, canvases, tracks_by_id) for r, c in zip(reports, curated, strict=True)
+        ]
+        report = "\n\n---\n\n".join(annotated_reports)
 
     if playlist_name is not None and seed_ids is not None and curated:
         playlist_seed_track_ids = seed_track_ids or sorted(seed_ids)
