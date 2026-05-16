@@ -15,6 +15,7 @@ from mixlab.__main__ import (
     _print_availability,
     _print_pipeline_summary,
     _validate_range_args,
+    run,
     run_export_unplayed,
 )
 from mixlab.models import PlayedTrack, Track
@@ -452,3 +453,93 @@ async def test_run_export_unplayed_exports_only_unplayed_tracks(
     assert "3" in exported_ids
     out = capsys.readouterr().out
     assert "2 / 3" in out
+
+
+# ---------------------------------------------------------------------------
+# run() --mode all played/unplayed signal handling
+# ---------------------------------------------------------------------------
+
+# Minimal collection used for --mode all dispatch tests. genre=None makes run() exit
+# after the availability table, so we exercise the mode-dispatch logic without
+# triggering Stage 1 / Stage 2 LLM calls.
+_MODE_ALL_XML = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <DJ_PLAYLISTS Version="1.0.0">
+      <COLLECTION Entries="3">
+        <TRACK TrackID="1" Name="A" Artist="Artist A" AverageBpm="124.00" Tonality="8A" Genre="House"/>
+        <TRACK TrackID="2" Name="B" Artist="Artist B" AverageBpm="125.00" Tonality="9A" Genre="House"/>
+        <TRACK TrackID="3" Name="C" Artist="Artist C" AverageBpm="126.00" Tonality="10A" Genre="House"/>
+      </COLLECTION>
+    </DJ_PLAYLISTS>
+""")
+
+
+async def test_run_mode_all_warns_when_catalog_url_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--mode all without CATALOG_API_URL emits a one-line stderr warning and continues."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_MODE_ALL_XML)
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    # save_genre_cache writes to cwd-relative path; chdir to tmp so the project's real cache is untouched.
+    monkeypatch.chdir(tmp_path)
+
+    await run(genre=None, export_dir=None, mode="all")
+
+    captured = capsys.readouterr()
+    assert "CATALOG_API_URL not set" in captured.err
+    assert "played/unplayed signal disabled" in captured.err
+
+
+async def test_run_mode_all_fetches_played_when_catalog_url_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--mode all with CATALOG_API_URL set fetches played tracks and reports played/unplayed split."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_MODE_ALL_XML)
+    monkeypatch.setenv("CATALOG_API_URL", "http://fake")
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.chdir(tmp_path)
+
+    played = [PlayedTrack(artist="Artist B", title="B")]
+    with (
+        patch("mixlab.__main__.fetch_played_tracks", new=AsyncMock(return_value=played)),
+        patch("mixlab.__main__.fetch_mix_names", new=AsyncMock(return_value=[])),
+    ):
+        await run(genre=None, export_dir=None, mode="all")
+
+    captured = capsys.readouterr()
+    # Status message includes the played/unplayed counts (1 of 3 played, 2 unplayed).
+    assert "1/3 played" in captured.out
+    assert "2 unplayed" in captured.out
+    assert "favour unplayed in ties" in captured.out
+
+
+async def test_run_mode_all_handles_catalog_fetch_failure_gracefully(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--mode all warns and continues when the catalog API call raises."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_MODE_ALL_XML)
+    monkeypatch.setenv("CATALOG_API_URL", "http://fake")
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.chdir(tmp_path)
+
+    fetch_played = AsyncMock(side_effect=RuntimeError("network down"))
+    with (
+        patch("mixlab.__main__.fetch_played_tracks", fetch_played),
+        patch("mixlab.__main__.fetch_mix_names", new=AsyncMock(return_value=[])),
+    ):
+        # Should NOT raise — graceful fallback per --mode all design.
+        await run(genre=None, export_dir=None, mode="all")
+
+    captured = capsys.readouterr()
+    assert "catalog fetch failed" in captured.err
+    assert "played/unplayed signal disabled" in captured.err

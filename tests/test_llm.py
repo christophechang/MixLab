@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import get_args
 
 import pytest
 import respx
@@ -381,6 +382,61 @@ def test_parse_curated_concepts_repairs_literal_newlines_in_strings() -> None:
     assert "line two" in report
 
 
+def test_parse_curated_concepts_extracts_arc_type() -> None:
+    from mixlab.llm import _parse_curated_concepts
+
+    raw = json.dumps(
+        [{"title": "T", "mood": "m", "track_ids": ["1", "2", "3", "4"], "arc_type": "wave", "report": "x"}]
+    )
+    concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
+    assert concepts[0].arc_type == "wave"
+
+
+def test_parse_curated_concepts_missing_arc_type_is_none() -> None:
+    from mixlab.llm import _parse_curated_concepts
+
+    raw = json.dumps([{"title": "T", "mood": "m", "track_ids": ["1", "2", "3", "4"], "report": "x"}])
+    concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
+    assert concepts[0].arc_type is None
+
+
+def test_parse_curated_concepts_invalid_arc_type_is_none() -> None:
+    from mixlab.llm import _parse_curated_concepts
+
+    raw = json.dumps(
+        [
+            {
+                "title": "T",
+                "mood": "m",
+                "track_ids": ["1", "2", "3", "4"],
+                "arc_type": "not-a-real-arc",
+                "report": "x",
+            }
+        ]
+    )
+    concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
+    assert concepts[0].arc_type is None
+
+
+def test_parse_curated_concepts_normalises_arc_type_underscores_and_case() -> None:
+    from mixlab.llm import _parse_curated_concepts
+
+    # Model may emit "build_and_drop" or "Build-And-Drop" — parser should normalise to canonical form.
+    raw = json.dumps(
+        [
+            {
+                "title": "T",
+                "mood": "m",
+                "track_ids": ["1", "2", "3", "4"],
+                "arc_type": "Build_And_Drop",
+                "report": "x",
+            }
+        ]
+    )
+    concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
+    assert concepts[0].arc_type == "build-and-drop"
+
+
 # ---------------------------------------------------------------------------
 # _extract_complete_objects — truncation recovery
 # ---------------------------------------------------------------------------
@@ -740,6 +796,49 @@ async def test_stage2_prompt_omits_unverified_flag_for_high_confidence(monkeypat
     }
 
     await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    body = json.loads(route.calls[0].request.content.decode())
+    user_prompt: str = body["messages"][0]["content"]
+    assert "[unverified]" not in user_prompt
+
+
+@respx.mock
+async def test_stage2_marks_only_unplayed_tracks_when_unplayed_ids_provided(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When unplayed_ids is provided, only those tracks get the 'unplayed' marker — not all tracks."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    # All tracks have play_count > 0 — the play_count fallback would mark NONE of them. So any
+    # "unplayed" markers we see in the prompt must come from the explicit unplayed_ids set.
+    tracks_by_id = {
+        str(i): Track(
+            track_id=str(i),
+            artist=f"Artist{i}",
+            title=f"Title{i}",
+            bpm=174.0,
+            camelot_key="8A",
+            genre="Drum & Bass",
+            play_count=5,
+        )
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, unplayed_ids={"1", "3"})
+
+    body = json.loads(route.calls[0].request.content)
+    prompt_text = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    lines_by_tid: dict[str, str] = {}
+    for line in prompt_text.split("\n"):
+        for tid in ("1", "2", "3", "4"):
+            if f"ID:{tid} " in line or f"ID:{tid}|" in line:
+                lines_by_tid[tid] = line
+    assert "unplayed" in lines_by_tid["1"]
+    assert "unplayed" in lines_by_tid["3"]
+    assert "unplayed" not in lines_by_tid["2"]
+    assert "unplayed" not in lines_by_tid["4"]
 
     import json as _json
 
@@ -1514,6 +1613,65 @@ def test_used_mix_names_are_injected_into_playlist_selection_system() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stage 2 canvas rules language (role hints, bridge form, canvas skip)
+# ---------------------------------------------------------------------------
+
+
+def test_stage2_canvas_rules_state_role_hints_can_be_overridden() -> None:
+    from mixlab.llm import _STAGE2_CANVAS_RULES
+
+    assert "hints, not assignments" in _STAGE2_CANVAS_RULES
+    assert "Override them freely" in _STAGE2_CANVAS_RULES
+
+
+def test_stage2_canvas_rules_require_specific_structural_reason_for_bridge_wildcard() -> None:
+    from mixlab.llm import _STAGE2_CANVAS_RULES
+
+    assert "specific structural role" in _STAGE2_CANVAS_RULES
+    assert '"interesting track"' in _STAGE2_CANVAS_RULES
+
+
+def test_stage2_canvas_rules_allow_canvas_skip_on_unfixable_risks() -> None:
+    from mixlab.llm import _STAGE2_CANVAS_RULES
+
+    assert "may skip that canvas" in _STAGE2_CANVAS_RULES
+    assert "not obligated to produce a concept from every canvas" in _STAGE2_CANVAS_RULES
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 schema — arc_type enum
+# ---------------------------------------------------------------------------
+
+
+def test_stage2_system_documents_arc_type_field_in_schema() -> None:
+    from mixlab.llm import _STAGE2_SYSTEM
+
+    assert '"arc_type":' in _STAGE2_SYSTEM
+
+
+def test_stage2_system_documents_all_arc_type_enum_values() -> None:
+    from mixlab.llm import _STAGE2_SYSTEM
+    from mixlab.models import ArcType
+
+    for value in get_args(ArcType):
+        assert f'"{value}"' in _STAGE2_SYSTEM, f"arc_type enum value {value!r} missing from _STAGE2_SYSTEM"
+
+
+def test_stage2_selection_system_retains_arc_type_field() -> None:
+    from mixlab.llm import _STAGE2_SYSTEM_SELECTION
+
+    # Selection-pass system prompt strips the report field but must keep arc_type for the selection JSON output.
+    assert '"arc_type":' in _STAGE2_SYSTEM_SELECTION
+    assert '"report":' not in _STAGE2_SYSTEM_SELECTION
+
+
+def test_stage2_playlist_selection_system_retains_arc_type_field() -> None:
+    from mixlab.llm import _STAGE2_SYSTEM_PLAYLIST_SELECTION
+
+    assert '"arc_type":' in _STAGE2_SYSTEM_PLAYLIST_SELECTION
+
+
+# ---------------------------------------------------------------------------
 # _call_stage2_reports — parallel report generation
 # ---------------------------------------------------------------------------
 
@@ -1577,6 +1735,134 @@ async def test_call_stage2_reports_fires_parallel_calls(
 
     assert len(reports) == 3
     assert call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Bold moves annotation — bridge/wildcard usage surfaced in concept report (#15)
+# ---------------------------------------------------------------------------
+
+
+def _make_canvas_full(
+    core_ids: list[str],
+    bridge_ids: list[str] | None = None,
+    wildcard_ids: list[str] | None = None,
+) -> MixCanvas:
+    """Canvas factory that accepts wildcard tracks (the default helper only supports bridge)."""
+    all_ids = core_ids + (bridge_ids or []) + (wildcard_ids or [])
+    concept = MixConcept(title="T", mood="dark", track_ids=all_ids)
+    return MixCanvas(
+        canvas_id="test_canvas",
+        genre="Drum & Bass",
+        bpm_range=(160.0, 180.0),
+        dominant_bpm=172.0,
+        dominant_camelot="4A",
+        core_track_ids=core_ids,
+        bridge_track_ids=bridge_ids or [],
+        wildcard_track_ids=wildcard_ids or [],
+        roles=CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[]),
+        contrast=ContrastAssets(
+            vocal_moments=[],
+            texture_changes=[],
+            darker_turns=[],
+            brighter_lifts=[],
+            lower_pressure_resets=[],
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=concept,
+    )
+
+
+def test_format_bold_moves_all_core_returns_none() -> None:
+    from mixlab.llm import _format_bold_moves
+
+    ids = [str(i) for i in range(1, 9)]
+    canvas = _make_canvas_full(core_ids=ids)
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    result = _format_bold_moves(concept, canvas, _lib(ids))
+    assert result == "Bold moves: none"
+
+
+def test_format_bold_moves_counts_bridge_and_wildcard() -> None:
+    from mixlab.llm import _format_bold_moves
+    from mixlab.models import Transition
+
+    core_ids = ["1", "2", "3", "4", "5", "6"]
+    bridge_ids = ["7"]
+    wildcard_ids = ["8"]
+    canvas = _make_canvas_full(core_ids=core_ids, bridge_ids=bridge_ids, wildcard_ids=wildcard_ids)
+    concept = MixConcept(
+        title="T",
+        mood="dark",
+        track_ids=core_ids + bridge_ids + wildcard_ids,
+        transitions=[
+            Transition(from_id="6", to_id="7", is_risky=True, risk_type="chapter_pivot"),
+            Transition(from_id="7", to_id="8", is_risky=True, risk_type="peak_impact"),
+        ],
+    )
+    result = _format_bold_moves(concept, canvas, _lib(core_ids + bridge_ids + wildcard_ids))
+    first_line = result.split("\n")[0]
+    assert first_line == "Bold moves: 1 bridge, 1 wildcard"
+    assert "(bridge): chapter pivot" in result
+    assert "(wildcard): peak impact" in result
+
+
+def test_format_bold_moves_skips_bullet_when_no_risk_type() -> None:
+    """Bridge track without a named mechanism gets the count but no bullet line."""
+    from mixlab.llm import _format_bold_moves
+    from mixlab.models import Transition
+
+    core_ids = ["1", "2", "3", "4", "5", "6", "7"]
+    bridge_ids = ["8"]
+    canvas = _make_canvas_full(core_ids=core_ids, bridge_ids=bridge_ids)
+    concept = MixConcept(
+        title="T",
+        mood="dark",
+        track_ids=core_ids + bridge_ids,
+        # Incoming transition has empty risk_type — should not produce a bullet.
+        transitions=[Transition(from_id="7", to_id="8", is_risky=False, risk_type="")],
+    )
+    result = _format_bold_moves(concept, canvas, _lib(core_ids + bridge_ids))
+    assert result == "Bold moves: 1 bridge"
+
+
+def test_match_canvas_for_concept_picks_canvas_with_most_overlap() -> None:
+    from mixlab.llm import _match_canvas_for_concept
+
+    canvas_a = _make_canvas_full(core_ids=["1", "2", "3", "4"])  # 4-track pool
+    canvas_b = _make_canvas_full(core_ids=["10", "11", "12", "13"])  # disjoint pool
+    concept = MixConcept(title="T", mood="dark", track_ids=["1", "2", "3"])
+    match = _match_canvas_for_concept(concept, [canvas_a, canvas_b])
+    assert match is canvas_a
+
+
+def test_match_canvas_for_concept_returns_none_when_no_overlap() -> None:
+    from mixlab.llm import _match_canvas_for_concept
+
+    canvas = _make_canvas_full(core_ids=["100", "101", "102"])
+    concept = MixConcept(title="T", mood="dark", track_ids=["1", "2", "3"])
+    assert _match_canvas_for_concept(concept, [canvas]) is None
+
+
+def test_append_bold_moves_to_report_no_canvases_returns_report_unchanged() -> None:
+    from mixlab.llm import _append_bold_moves_to_report
+
+    concept = MixConcept(title="T", mood="dark", track_ids=["1", "2", "3", "4"])
+    original = "CONCEPT: T\n\nSome report body."
+    result = _append_bold_moves_to_report(original, concept, None, _lib(["1", "2", "3", "4"]))
+    assert result == original
+
+
+def test_append_bold_moves_to_report_appends_annotation_block() -> None:
+    from mixlab.llm import _append_bold_moves_to_report
+
+    ids = [str(i) for i in range(1, 9)]
+    canvas = _make_canvas_full(core_ids=ids[:7], bridge_ids=[ids[7]])
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    original = "CONCEPT: T\n\nSome report body."
+    result = _append_bold_moves_to_report(original, concept, [canvas], _lib(ids))
+    assert result.startswith(original)
+    assert "Bold moves: 1 bridge" in result
 
 
 # ---------------------------------------------------------------------------

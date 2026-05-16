@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.9.0
+
+- **Stage 2 canvas rules tightened.** Role candidates shown in the canvas header are now explicitly framed as hints derived from technical analysis rather than fixed assignments — Stage 2 can override them when its DJ instinct disagrees, with a brief reason in the report. Bridge and wildcard tracks now require a specific structural role as justification ("opener with deliberate BPM drop-in", "pivot that earns a key reset") rather than a generic "interesting track" rationale. Stage 2 may skip a canvas entirely when its risk notes describe structural problems that cannot be overcome with track selection — every canvas need not produce a concept.
+- **`arc_type` structured output field.** Every Stage 2 concept now carries a structured `arc_type` value alongside the prose energy-path description. Enum: `plateau`, `wave`, `progressive-build`, `build-and-drop`, `double-peak`, `sustained-pressure`, `front-loaded`, `dark-to-light`, `light-to-dark`, `narrative`, `abstract-journey`. The parser tolerates case variants and underscore/hyphen drift; missing or invalid values fall back to `None` so downstream consumers can ship independently.
+- **`--mode all` honours real played/unplayed status.** When `CATALOG_API_URL` is set, `--mode all` now fetches the play history and passes the real unplayed track IDs to Stage 2. Previously every track was marked `unplayed` in the prompt, making the tiebreaker rule a no-op. Stage 2 can now favour unplayed tracks in ties when composing concepts from the full collection. Falls back gracefully with a one-line stderr warning when `CATALOG_API_URL` is absent or the fetch fails.
+- **Bold moves annotation in concept reports.** Every concept report (genre mode) now ends with a `Bold moves:` line summarising how many bridge and wildcard tracks made the final selection. When the Stage 2 transition specifies a `risk_type`, a bullet per bold pick names the mechanism (chapter pivot, peak impact, deliberate reset, etc.). Concepts drawn entirely from core tracks read `Bold moves: none`. Provides measurement of how often the three-tier BPM partitioning actually surfaces in the final output.
+
+---
+
 ## v0.8.0
 
 - **`--mode` flag replaces `--all-tracks`.** Track selection is now controlled by `--mode {unplayed,all,played}` (default: `unplayed`). `unplayed` preserves the previous default behaviour. `all` replicates the old `--all-tracks` flag. `played` is new: restricts the candidate pool to tracks that have appeared in your play history — battle-tested and SoundCloud-proven. Works in both genre mode and playlist mode.

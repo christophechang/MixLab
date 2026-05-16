@@ -39,12 +39,32 @@ class Transition(BaseModel):
     # | "closer_move" | "cut_only" | "low_tonal_risk" | ""
 
 
+# Structured energy/mood arc descriptor emitted by Stage 2 curation.
+# Structural arcs: plateau, wave, progressive-build, build-and-drop, double-peak,
+# sustained-pressure, front-loaded.
+# Directional/mood arcs: dark-to-light, light-to-dark, narrative, abstract-journey.
+ArcType = Literal[
+    "plateau",
+    "wave",
+    "progressive-build",
+    "build-and-drop",
+    "double-peak",
+    "sustained-pressure",
+    "front-loaded",
+    "dark-to-light",
+    "light-to-dark",
+    "narrative",
+    "abstract-journey",
+]
+
+
 class MixConcept(BaseModel):
     title: str
     mood: str
     track_ids: list[str]
     transitions: list[Transition] = Field(default_factory=list)
     name_reason: str = ""
+    arc_type: ArcType | None = None
 
 
 @dataclass
