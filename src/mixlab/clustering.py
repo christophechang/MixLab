@@ -398,6 +398,115 @@ def _generate_risk_notes(
     return notes
 
 
+_ANCHOR_WEIGHT_PROVENANCE = 0.30
+_ANCHOR_WEIGHT_RARITY = 0.25
+_ANCHOR_WEIGHT_CENTRALITY = 0.20
+_ANCHOR_WEIGHT_ENERGY = 0.15
+_ANCHOR_WEIGHT_RECENCY = 0.10
+
+_ANCHOR_THRESHOLD = 0.55
+_ANCHOR_TOP_FRACTION = 0.20
+_ANCHOR_RARITY_FLOOR = 5
+_ANCHOR_CURRENT_YEAR = 2026
+
+
+def _provenance_signal(t: Track) -> float:
+    score = 0.0
+    if t.remixer:
+        score += 0.45
+    if t.enrichment_confidence == "high":
+        score += 0.35
+    elif t.enrichment_confidence == "medium":
+        score += 0.15
+    if t.label:
+        score += 0.20
+    return min(1.0, score)
+
+
+def _rarity_signal(t: Track, label_counts: dict[str, int], artist_counts: dict[str, int]) -> float:
+    """Library rarity: rare label/artist scores higher, saturating at <5 other tracks."""
+    label_total = label_counts.get(t.label, 0) if t.label else _ANCHOR_RARITY_FLOOR
+    artist_total = artist_counts.get(t.artist, 0) if t.artist else _ANCHOR_RARITY_FLOOR
+    label_rarity = max(0.0, 1.0 - max(0, label_total - 1) / _ANCHOR_RARITY_FLOOR)
+    artist_rarity = max(0.0, 1.0 - max(0, artist_total - 1) / _ANCHOR_RARITY_FLOOR)
+    return min(1.0, 0.5 * label_rarity + 0.5 * artist_rarity)
+
+
+def _centrality_signal(t: Track, median_bpm: float, dominant_camelot: str) -> float:
+    score = 0.0
+    if median_bpm > 0 and abs(t.bpm - median_bpm) <= 2.0:
+        score += 0.6
+    if dominant_camelot and t.camelot_key == dominant_camelot:
+        score += 0.4
+    return min(1.0, score)
+
+
+def _energy_signal(t: Track) -> float:
+    if t.energy is None:
+        return 0.0
+    if 6 <= t.energy <= 7:
+        return 0.8
+    if t.energy <= 2:
+        return 0.5
+    return 0.0
+
+
+def _recency_signal(t: Track) -> float:
+    if t.year is None or t.year <= 0:
+        return 0.0
+    age = _ANCHOR_CURRENT_YEAR - t.year
+    if age <= 3:
+        return 1.0
+    return 0.0
+
+
+def score_anchors(
+    pool: list[Track],
+    tracks_by_id: dict[str, Track],
+) -> dict[str, float]:
+    """Compute anchor scores for every track in ``pool`` (#19).
+
+    The score combines provenance, library rarity, pool centrality, energy
+    positioning, and recency — each normalised to [0, 1] and weighted-summed.
+    Library rarity uses ``tracks_by_id`` (the full collection) for label/artist
+    counts. Returns ``{track_id: score}`` covering every pool track.
+    """
+    if not pool:
+        return {}
+    from collections import Counter
+
+    label_counts: dict[str, int] = dict(Counter(t.label for t in tracks_by_id.values() if t.label))
+    artist_counts: dict[str, int] = dict(Counter(t.artist for t in tracks_by_id.values() if t.artist))
+
+    median_bpm = statistics.median(t.bpm for t in pool) if pool else 0.0
+    core_keys = [t.camelot_key for t in pool]
+    dominant_camelot = max(set(core_keys), key=core_keys.count) if core_keys else ""
+
+    scores: dict[str, float] = {}
+    for t in pool:
+        score = (
+            _provenance_signal(t) * _ANCHOR_WEIGHT_PROVENANCE
+            + _rarity_signal(t, label_counts, artist_counts) * _ANCHOR_WEIGHT_RARITY
+            + _centrality_signal(t, median_bpm, dominant_camelot) * _ANCHOR_WEIGHT_CENTRALITY
+            + _energy_signal(t) * _ANCHOR_WEIGHT_ENERGY
+            + _recency_signal(t) * _ANCHOR_WEIGHT_RECENCY
+        )
+        scores[t.track_id] = round(min(1.0, score), 4)
+    return scores
+
+
+def _select_anchor_ids(scores: dict[str, float]) -> list[str]:
+    """Pick top-20% of pool by anchor score, requiring ≥ _ANCHOR_THRESHOLD absolute."""
+    if not scores:
+        return []
+    eligible = [(tid, s) for tid, s in scores.items() if s >= _ANCHOR_THRESHOLD]
+    if not eligible:
+        return []
+    eligible.sort(key=lambda kv: kv[1], reverse=True)
+    cap = max(1, int(round(len(scores) * _ANCHOR_TOP_FRACTION)))
+    return [tid for tid, _ in eligible[:cap]]
+
+
 def _canvas_id(concept: MixConcept, tracks: list[Track]) -> str:
     genre = concept.mood[:8].replace(" ", "_") if concept.mood else "unknown"
     if not tracks:
@@ -425,6 +534,9 @@ def build_mix_canvas(
     contrast = _detect_contrast(tracks, dominant_camelot)
     risk_notes = _generate_risk_notes(tracks, pools, roles)
 
+    anchor_scores = score_anchors(pools.core, tracks_by_id)
+    core_anchor_ids = _select_anchor_ids(anchor_scores)
+
     genre = tracks[0].genre if tracks else ""
 
     return MixCanvas(
@@ -441,6 +553,7 @@ def build_mix_canvas(
         risk_notes=risk_notes,
         score=CanvasScore(),
         source_concept=concept,
+        core_anchor_ids=core_anchor_ids,
     )
 
 

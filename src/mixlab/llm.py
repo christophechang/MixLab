@@ -709,6 +709,9 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
     if role_parts:
         lines.append(" | ".join(role_parts))
 
+    if canvas.core_anchor_ids:
+        lines.append(f"Anchors: {ids_block(canvas.core_anchor_ids)}")
+
     contrast_parts = []
     if c.vocal_moments:
         contrast_parts.append(f"Vocal: {ids_block(c.vocal_moments)}")
@@ -769,7 +772,8 @@ _STAGE2_CANVAS_RULES = """\
 - If a canvas's risk notes describe structural problems you cannot overcome with track selection (e.g. weak closer pool with no resolution candidate, all-high-energy with no viable dynamic arc), you may skip that canvas rather than force a weak concept. You are not obligated to produce a concept from every canvas.\n\
 - Not every mix needs every role.\n\
 - Harmonic and BPM compatibility are helpers, not constraints.\n\
-- For transitions involving bridge or wildcard tracks, state the specific mechanism that makes it survivable.\
+- For transitions involving bridge or wildcard tracks, state the specific mechanism that makes it survivable.\n\
+- Anchor candidates shown on the canvas header (Anchors:) are tracks the system has identified as distinctive or identity-defining based on provenance, library rarity, and pool centrality. Prefer including one anchor in each concept's tracklist — the concept will feel more rooted. This is preference, not requirement; a concept built entirely from non-anchor tracks is acceptable if the narrative is stronger without anchor inclusion.\
 """
 
 

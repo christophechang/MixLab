@@ -137,6 +137,10 @@ class MixCanvas:
     risk_notes: list[str]
     score: CanvasScore
     source_concept: MixConcept
+    # Genre-mode anchor candidates from `score_anchors` (#19). Top-scoring core-pool
+    # tracks Stage 2 is nudged to prefer as identity-defining picks. Signal only —
+    # not enforced. Empty when no track clears the threshold (or for legacy canvases).
+    core_anchor_ids: list[str] = field(default_factory=list)
 
 
 SeedTier = Literal["anchor", "supporting", "optional"]
