@@ -360,3 +360,68 @@ def test_append_run_round_trip_preserves_new_fields(tmp_path: Path) -> None:
     assert reloaded.runs[0].selected_canvas_risk_notes == ["weak opener pool"]
     assert reloaded.runs[0].bpm_band == (122.0, 126.0)
     assert reloaded.runs[0].role_pattern == ["opener", "closer"]
+
+
+# ---------------------------------------------------------------------------
+# format_recent_concepts — Stage 2 prompt injection helper (#13)
+# ---------------------------------------------------------------------------
+
+
+def test_format_recent_concepts_returns_none_for_empty_history() -> None:
+    from mixlab.history import format_recent_concepts
+
+    assert format_recent_concepts(ConceptHistory()) is None
+
+
+def test_format_recent_concepts_lists_titles_in_reverse_chronological_order() -> None:
+    from mixlab.history import format_recent_concepts
+
+    e1 = _entry("r1", ["T001"], genre="house")
+    e1.concept_title = "Older"
+    e2 = _entry("r2", ["T002"], genre="house")
+    e2.concept_title = "Newer"
+    block = format_recent_concepts(ConceptHistory(runs=[e1, e2]))
+    assert block is not None
+    # Newer appears before Older — reverse chronological.
+    assert block.index("Newer") < block.index("Older")
+
+
+def test_format_recent_concepts_includes_arc_and_mood() -> None:
+    from mixlab.history import format_recent_concepts
+
+    entry = _entry("r1", ["T001"], genre="house")
+    entry.concept_title = "Late Latitude"
+    entry.energy_path = "wave"
+    entry.mood = "dark"
+    block = format_recent_concepts(ConceptHistory(runs=[entry]))
+    assert block is not None
+    assert "Late Latitude" in block
+    assert "arc: wave" in block
+    assert "mood: dark" in block
+
+
+def test_format_recent_concepts_respects_limit() -> None:
+    from mixlab.history import format_recent_concepts
+
+    entries = []
+    for i in range(10):
+        e = _entry(f"r{i}", [f"T{i:03d}"], genre="house")
+        e.concept_title = f"Concept{i}"
+        entries.append(e)
+    block = format_recent_concepts(ConceptHistory(runs=entries), limit=3)
+    assert block is not None
+    # Only the three most recent (Concept9, Concept8, Concept7) should appear.
+    assert "Concept9" in block
+    assert "Concept8" in block
+    assert "Concept7" in block
+    assert "Concept6" not in block
+    assert "Concept0" not in block
+
+
+def test_format_recent_concepts_includes_divergence_instruction() -> None:
+    """The block ends with a paragraph telling the model to diverge from prior runs."""
+    from mixlab.history import format_recent_concepts
+
+    block = format_recent_concepts(ConceptHistory(runs=[_entry("r1", ["T001"])]))
+    assert block is not None
+    assert "Diverge deliberately" in block

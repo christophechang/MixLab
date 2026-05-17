@@ -803,6 +803,99 @@ async def test_stage2_prompt_omits_unverified_flag_for_high_confidence(monkeypat
 
 
 @respx.mock
+async def test_stage2_prompt_includes_recent_concepts_block_when_history_provided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When concept_history has entries, Stage 2 sees a RECENT CONCEPTS block listing prior titles."""
+    from mixlab.history import ConceptHistory, HistoryEntry
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+    history = ConceptHistory(
+        runs=[
+            HistoryEntry(
+                run_id="r1",
+                created_at="2026-05-10T12:00:00+00:00",
+                mode="standard",
+                genre="dnb",
+                selected_canvas_ids=["c1"],
+                dominant_bpm_clusters=[174.0],
+                dominant_camelot_keys=["8A"],
+                core_track_ids=["X1"],
+                anchor_track_ids=["X1"],
+                opener_candidates=["X1"],
+                closer_candidates=["X1"],
+                concept_title="Late Latitude",
+                concept_track_ids=["X1"],
+                energy_path="wave",
+                mood="dark",
+            )
+        ]
+    )
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, concept_history=history)
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "RECENT CONCEPTS" in user_prompt
+    assert "Late Latitude" in user_prompt
+
+
+@respx.mock
+async def test_stage2_prompt_omits_recent_concepts_block_when_history_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty history must not produce an orphan header in the prompt."""
+    from mixlab.history import ConceptHistory
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, concept_history=ConceptHistory())
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "RECENT CONCEPTS" not in user_prompt
+
+
+@respx.mock
+async def test_stage2_prompt_omits_recent_concepts_block_when_history_not_supplied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Passing concept_history=None (default) leaves the prompt unchanged."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "RECENT CONCEPTS" not in user_prompt
+
+
+@respx.mock
 async def test_stage2_marks_only_unplayed_tracks_when_unplayed_ids_provided(monkeypatch: pytest.MonkeyPatch) -> None:
     """When unplayed_ids is provided, only those tracks get the 'unplayed' marker — not all tracks."""
     from mixlab.llm import stage2_curate_and_report

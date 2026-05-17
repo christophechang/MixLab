@@ -16,6 +16,7 @@ import httpx
 
 from mixlab.clustering import camelot_distance
 from mixlab.config import TRACK_COUNT_TARGETS, shortfall_warning
+from mixlab.history import ConceptHistory, format_recent_concepts
 from mixlab.models import (
     ArcType,
     CompletionVariant,
@@ -1704,6 +1705,7 @@ async def stage2_curate_and_report(
     intent_brief: IntentBrief | None = None,
     used_mix_names: list[str] | None = None,
     canvases: list[MixCanvas] | None = None,
+    concept_history: ConceptHistory | None = None,
     debug: bool = False,
 ) -> tuple[list[MixConcept], str]:
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -1760,6 +1762,15 @@ async def stage2_curate_and_report(
     if n == 0:
         raise RuntimeError("Stage 2 received no shortlists with resolvable tracks — nothing to curate.")
 
+    # Recent-concepts block — shown to Stage 2 so it can deliberately diverge from
+    # prior runs. Skipped on first-ever run (empty history) or when caller did not
+    # provide a history snapshot. See history.format_recent_concepts.
+    recent_concepts_block = ""
+    if concept_history is not None:
+        block = format_recent_concepts(concept_history)
+        if block:
+            recent_concepts_block = block + "\n\n"
+
     if playlist_name is not None:
         playlist_seed_track_ids = seed_track_ids or sorted(seed_ids or [])
         minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids), intent_brief)
@@ -1797,6 +1808,7 @@ async def stage2_curate_and_report(
                 f"Coherent set: {'yes' if intent_brief.is_coherent_set else 'no \u2014 treat as chapters'}\n\n"
             )
         prompt = (
+            f"{recent_concepts_block}"
             f"{intent_section}"
             f"Curate three completion variants from the following {n} BPM zone shortlists. "
             f'This is a playlist completion run seeded from the Rekordbox playlist "{playlist_name}".\n\n'
@@ -1814,12 +1826,14 @@ async def stage2_curate_and_report(
     else:
         if canvases is not None:
             prompt = (
+                f"{recent_concepts_block}"
                 f"Curate a set of mix concepts from the following {n} candidate canvases. "
                 f"Produce between 3 and 6 distinct concepts total. Each concept must draw only from tracks within a single canvas.\n\n"
                 + "\n\n".join(sections)
             )
         else:
             prompt = (
+                f"{recent_concepts_block}"
                 f"Curate a set of mix concepts from the following {n} candidate shortlists. "
                 f"Produce between 3 and 6 distinct concepts total. A rich shortlist may yield more than one concept; "
                 f"a thin shortlist may yield none — but each concept must draw only from tracks within a single shortlist.\n\n"

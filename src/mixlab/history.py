@@ -212,6 +212,39 @@ def append_run(history: ConceptHistory, entry: HistoryEntry, path: Path) -> None
         logger.warning("Failed to write concept-history.json")
 
 
+_RECENT_CONCEPTS_LIMIT = 5
+
+
+def format_recent_concepts(history: ConceptHistory, limit: int = _RECENT_CONCEPTS_LIMIT) -> str | None:
+    """Build a compact 'recent concepts' block for Stage 2 prompt injection.
+
+    Returns None when history is empty so the caller can omit the section entirely
+    (rather than rendering an empty header). The block lists the most recent N
+    concepts in reverse chronological order with title, date, genre, arc_type, and
+    mood — enough character for the model to deliberately diverge from prior runs.
+    """
+    if not history.runs:
+        return None
+    recent = history.runs[-limit:]
+    lines: list[str] = ["RECENT CONCEPTS (avoid retreading these):"]
+    for entry in reversed(recent):
+        date_part = entry.created_at[:10] if entry.created_at else "unknown"
+        title = entry.concept_title or "(untitled)"
+        arc = entry.energy_path or "unspecified"
+        mood = entry.mood or "unspecified"
+        lines.append(f'- "{title}" ({date_part}, {entry.genre}, arc: {arc}, mood: {mood})')
+    lines.append("")
+    lines.append(
+        "These are concepts you generated previously. Diverge deliberately: pick titles, "
+        "theses, and energy arcs that contrast with the list above. Do not echo their "
+        "character. If a recent concept used a wave arc, prefer a different shape today. "
+        "If recent titles were abstract and place-based, today's might lean object-based "
+        "or moment-based. Repeating an arc or character only counts when the pool genuinely "
+        "supports nothing else."
+    )
+    return "\n".join(lines)
+
+
 def similarity_to_history(
     canvas: MixCanvas,
     history: ConceptHistory,
