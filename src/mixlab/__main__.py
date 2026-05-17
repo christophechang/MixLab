@@ -639,7 +639,7 @@ async def run(
     # Build Mix Canvases and select top candidates for Stage 2 (diversity-aware, deterministic).
     history = load_history(Path(".mixlab/concept-history.json"))
     all_canvases: list[MixCanvas] = [build_mix_canvas(c, tracks_by_id) for c in all_shortlists]
-    selected_canvases = select_canvases(all_canvases, history, debug=debug)
+    selected_canvases = select_canvases(all_canvases, history, mode=mode, debug=debug)
     if not selected_canvases:
         print("No canvases could be built — collection may be out of sync.", file=sys.stderr)
         sys.exit(1)

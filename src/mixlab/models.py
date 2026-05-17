@@ -93,6 +93,39 @@ class ContrastAssets:
     lower_pressure_resets: list[str]
 
 
+@dataclass(frozen=True)
+class CanvasScoreWeights:
+    """Per-mode weights for the canvas score components (#24).
+
+    All weights must sum to 1.0. Validated by ``__post_init__``. The eight fields
+    line up with the eight :class:`CanvasScore` scoring components — penalty terms
+    (weakness_penalty, floor_multiplier) are separate and not weighted.
+    """
+
+    technical_viability: float
+    role_coverage: float
+    anchor_strength: float
+    contrast_potential: float
+    distinctiveness: float
+    era_coherence: float
+    label_coherence: float
+    novelty: float
+
+    def __post_init__(self) -> None:
+        total = (
+            self.technical_viability
+            + self.role_coverage
+            + self.anchor_strength
+            + self.contrast_potential
+            + self.distinctiveness
+            + self.era_coherence
+            + self.label_coherence
+            + self.novelty
+        )
+        if abs(total - 1.0) > 1e-9:
+            raise ValueError(f"CanvasScoreWeights must sum to 1.0; got {total:.6f}")
+
+
 @dataclass
 class CanvasScore:
     technical_viability: float = 0.0

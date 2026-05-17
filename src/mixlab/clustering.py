@@ -30,12 +30,14 @@ from mixlab.models import (
     BpmPools,
     CanvasRoleCandidates,
     CanvasScore,
+    CanvasScoreWeights,
     ConceptAnchorCandidate,
     ConceptAnchorType,
     ContrastAssets,
     MixCanvas,
     MixConcept,
     Track,
+    TrackMode,
 )
 
 _BPM_SPREAD = 6.0
@@ -824,7 +826,63 @@ _WEAKNESS_PENALTY_CAP = 0.20
 _FLOOR_MULTIPLIER_BELOW_MIN_CORE = 0.5
 _MIN_CORE_FOR_FULL_SCORE = 8
 
-# Weights sum to 1.0. Tuned across v0.10 (#9) and v0.11 (#20):
+# Mode-aware canvas score weights (#24). The default (`unplayed`-aligned) baseline
+# below is also the v0.11 baseline used when no mode is supplied. Each mode-specific
+# table shifts a small number of percentage points to align scoring with the
+# mode's curation objective:
+#  - unplayed: discovery — boost novelty at the cost of anchor strength
+#  - played:   reassembly — boost anchor + role at the cost of distinctiveness / novelty
+#  - all:      composition — boost distinctiveness at the cost of novelty
+CANVAS_SCORE_WEIGHTS_BY_MODE: dict[TrackMode, CanvasScoreWeights] = {
+    "unplayed": CanvasScoreWeights(
+        technical_viability=0.10,
+        role_coverage=0.25,
+        anchor_strength=0.10,
+        contrast_potential=0.15,
+        distinctiveness=0.15,
+        era_coherence=0.05,
+        label_coherence=0.05,
+        novelty=0.15,
+    ),
+    "played": CanvasScoreWeights(
+        technical_viability=0.10,
+        role_coverage=0.25,
+        anchor_strength=0.25,
+        contrast_potential=0.15,
+        distinctiveness=0.10,
+        era_coherence=0.05,
+        label_coherence=0.05,
+        novelty=0.05,
+    ),
+    "all": CanvasScoreWeights(
+        technical_viability=0.10,
+        role_coverage=0.25,
+        anchor_strength=0.15,
+        contrast_potential=0.15,
+        distinctiveness=0.20,
+        era_coherence=0.05,
+        label_coherence=0.05,
+        novelty=0.05,
+    ),
+}
+
+# Default weights when no mode is supplied. Matches the v0.11 baseline (post-#20):
+# anchor_strength 0.15, novelty 0.10. The unplayed-mode table is intentionally
+# *not* identical — unplayed shifts 5pp from anchor to novelty because the unplayed
+# pool's discovery objective benefits from a stronger novelty pull.
+DEFAULT_CANVAS_WEIGHTS = CanvasScoreWeights(
+    technical_viability=0.10,
+    role_coverage=0.25,
+    anchor_strength=0.15,
+    contrast_potential=0.15,
+    distinctiveness=0.15,
+    era_coherence=0.05,
+    label_coherence=0.05,
+    novelty=0.10,
+)
+
+
+# Provenance of the default weights (DEFAULT_CANVAS_WEIGHTS above):
 #  - #9 (v0.10): distinctiveness raised from 0.10 to 0.15 at the cost of
 #    technical_viability (0.25 → 0.20). Technical viability is also logarithmic
 #    with saturation at 15 tracks (was linear, saturating at 20), so a 15-track
@@ -835,14 +893,9 @@ _MIN_CORE_FOR_FULL_SCORE = 8
 #    a uniformly-scattered pool does not — and missing year/label data is
 #    treated as no signal (no penalty), so libraries with patchy metadata are
 #    not punished.
-_WEIGHT_TECHNICAL_VIABILITY = 0.10
-_WEIGHT_ROLE_COVERAGE = 0.25
-_WEIGHT_ANCHOR_STRENGTH = 0.15
-_WEIGHT_CONTRAST_POTENTIAL = 0.15
-_WEIGHT_DISTINCTIVENESS = 0.15
-_WEIGHT_ERA_COHERENCE = 0.05
-_WEIGHT_LABEL_COHERENCE = 0.05
-_WEIGHT_NOVELTY = 0.10
+#  - #24 (v0.12): mode-aware weight tables now select per run via
+#    CANVAS_SCORE_WEIGHTS_BY_MODE; the default above is used only when no mode
+#    is supplied (legacy callers and tests).
 
 
 def score_canvas(
@@ -850,6 +903,7 @@ def score_canvas(
     history: ConceptHistory,
     picked_ids: frozenset[str],
     *,
+    weights: CanvasScoreWeights | None = None,
     debug: bool = False,
 ) -> CanvasScore:
     core_n = len(canvas.core_track_ids)
@@ -898,15 +952,16 @@ def score_canvas(
     era_coherence = _era_coherence_from_window(canvas.era_window)
     label_coherence = _label_coherence_from_share(canvas.label_share) if canvas.dominant_label else 0.0
 
+    w = weights if weights is not None else DEFAULT_CANVAS_WEIGHTS
     weighted = (
-        technical_viability * _WEIGHT_TECHNICAL_VIABILITY
-        + role_coverage * _WEIGHT_ROLE_COVERAGE
-        + anchor_strength * _WEIGHT_ANCHOR_STRENGTH
-        + contrast_potential * _WEIGHT_CONTRAST_POTENTIAL
-        + distinctiveness * _WEIGHT_DISTINCTIVENESS
-        + era_coherence * _WEIGHT_ERA_COHERENCE
-        + label_coherence * _WEIGHT_LABEL_COHERENCE
-        + novelty * _WEIGHT_NOVELTY
+        technical_viability * w.technical_viability
+        + role_coverage * w.role_coverage
+        + anchor_strength * w.anchor_strength
+        + contrast_potential * w.contrast_potential
+        + distinctiveness * w.distinctiveness
+        + era_coherence * w.era_coherence
+        + label_coherence * w.label_coherence
+        + novelty * w.novelty
     )
 
     # Weakness penalty: each flagged risk note shaves 0.04 off the weighted sum, capped at 0.20.
@@ -944,15 +999,23 @@ def select_canvases(
     history: ConceptHistory,
     n: int = 6,
     *,
+    mode: TrackMode | None = None,
     debug: bool = False,
 ) -> list[MixCanvas]:
-    """Score and pick up to n canvases using diversity-aware deterministic selection."""
+    """Score and pick up to n canvases using diversity-aware deterministic selection.
+
+    ``mode`` selects the weight table from :data:`CANVAS_SCORE_WEIGHTS_BY_MODE`.
+    When ``None``, falls back to :data:`DEFAULT_CANVAS_WEIGHTS` (kept stable for
+    legacy callers / tests that predate the mode-aware split in #24).
+    """
     if not canvases:
         return []
 
+    weights = CANVAS_SCORE_WEIGHTS_BY_MODE[mode] if mode is not None else DEFAULT_CANVAS_WEIGHTS
+
     if debug:
         print(
-            f"\n[DEBUG select_canvases] {len(canvases)} candidates → selecting up to {n}",
+            f"\n[DEBUG select_canvases] {len(canvases)} candidates → selecting up to {n}  mode={mode or 'default'}",
             file=sys.stderr,
         )
         for c in canvases:
@@ -965,7 +1028,7 @@ def select_canvases(
 
     if len(canvases) <= n:
         for canvas in canvases:
-            canvas.score = score_canvas(canvas, history, frozenset())
+            canvas.score = score_canvas(canvas, history, frozenset(), weights=weights)
         canvases.sort(key=lambda c: c.score.overall, reverse=True)
         if debug:
             print("\n[DEBUG final selection order (all candidates fit)]", file=sys.stderr)
@@ -981,7 +1044,7 @@ def select_canvases(
     while remaining and len(picked) < n:
         # Score all remaining with current overlap context
         for canvas in remaining:
-            canvas.score = score_canvas(canvas, history, picked_core_ids)
+            canvas.score = score_canvas(canvas, history, picked_core_ids, weights=weights)
         remaining.sort(key=lambda c: c.score.overall, reverse=True)
         best = remaining.pop(0)
         picked.append(best)

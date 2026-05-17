@@ -1035,6 +1035,140 @@ def test_concept_anchor_canvas_label_rarity_is_primary() -> None:
     assert ids.get("wild_loner") == "identity"
 
 
+# ---------------------------------------------------------------------------
+# Mode-aware canvas weights (#24)
+# ---------------------------------------------------------------------------
+
+
+def test_canvas_weights_per_mode_sum_to_one() -> None:
+    """Every mode-specific weight table must sum exactly to 1.0."""
+    from mixlab.clustering import CANVAS_SCORE_WEIGHTS_BY_MODE, DEFAULT_CANVAS_WEIGHTS
+
+    for mode, w in CANVAS_SCORE_WEIGHTS_BY_MODE.items():
+        total = (
+            w.technical_viability
+            + w.role_coverage
+            + w.anchor_strength
+            + w.contrast_potential
+            + w.distinctiveness
+            + w.era_coherence
+            + w.label_coherence
+            + w.novelty
+        )
+        assert abs(total - 1.0) < 1e-9, f"mode {mode!r} weights sum to {total}, not 1.0"
+    default_total = (
+        DEFAULT_CANVAS_WEIGHTS.technical_viability
+        + DEFAULT_CANVAS_WEIGHTS.role_coverage
+        + DEFAULT_CANVAS_WEIGHTS.anchor_strength
+        + DEFAULT_CANVAS_WEIGHTS.contrast_potential
+        + DEFAULT_CANVAS_WEIGHTS.distinctiveness
+        + DEFAULT_CANVAS_WEIGHTS.era_coherence
+        + DEFAULT_CANVAS_WEIGHTS.label_coherence
+        + DEFAULT_CANVAS_WEIGHTS.novelty
+    )
+    assert abs(default_total - 1.0) < 1e-9
+
+
+def test_canvas_weights_invalid_sum_raises() -> None:
+    """CanvasScoreWeights enforces the sum-to-1.0 invariant on construction."""
+    from mixlab.models import CanvasScoreWeights
+
+    with pytest.raises(ValueError, match="must sum to 1.0"):
+        CanvasScoreWeights(
+            technical_viability=0.5,
+            role_coverage=0.5,
+            anchor_strength=0.0,
+            contrast_potential=0.0,
+            distinctiveness=0.0,
+            era_coherence=0.0,
+            label_coherence=0.0,
+            novelty=0.5,  # total = 1.5
+        )
+
+
+def test_score_canvas_played_mode_rewards_strong_anchors() -> None:
+    """Played mode weights anchor_strength heavier — the gap between anchor-rich and
+    anchor-poor canvases must widen under played vs unplayed.
+    """
+    from mixlab.clustering import CANVAS_SCORE_WEIGHTS_BY_MODE
+    from mixlab.models import CanvasRoleCandidates, MixCanvas
+
+    canvas_with_anchors = _rich_canvas("with", [f"T{i:03d}" for i in range(20)])
+    canvas_no_anchors = _rich_canvas("none", [f"X{i:03d}" for i in range(20)])
+    assert isinstance(canvas_with_anchors, MixCanvas)
+    assert isinstance(canvas_no_anchors, MixCanvas)
+    # Strip opener/closer pools from the second canvas so its anchor_strength → 0.
+    canvas_no_anchors.roles = CanvasRoleCandidates(
+        opener=[],
+        groove_locker=canvas_no_anchors.roles.groove_locker,
+        builder=canvas_no_anchors.roles.builder,
+        pivot=canvas_no_anchors.roles.pivot,
+        peak=canvas_no_anchors.roles.peak,
+        closer=[],
+    )
+    unplayed = CANVAS_SCORE_WEIGHTS_BY_MODE["unplayed"]
+    played = CANVAS_SCORE_WEIGHTS_BY_MODE["played"]
+    s_with_unplayed = score_canvas(canvas_with_anchors, ConceptHistory(), frozenset(), weights=unplayed)
+    s_no_unplayed = score_canvas(canvas_no_anchors, ConceptHistory(), frozenset(), weights=unplayed)
+    s_with_played = score_canvas(canvas_with_anchors, ConceptHistory(), frozenset(), weights=played)
+    s_no_played = score_canvas(canvas_no_anchors, ConceptHistory(), frozenset(), weights=played)
+    gap_unplayed = s_with_unplayed.overall - s_no_unplayed.overall
+    gap_played = s_with_played.overall - s_no_played.overall
+    assert gap_played > gap_unplayed
+
+
+def test_score_canvas_mode_affects_overall_when_components_differ() -> None:
+    """Unplayed vs played differ on a canvas whose components are not all 1.0 — strip the
+    opener pool so anchor_strength=0.5, leaving the mode weights room to disagree.
+    """
+    from mixlab.clustering import CANVAS_SCORE_WEIGHTS_BY_MODE
+    from mixlab.models import CanvasRoleCandidates, MixCanvas
+
+    canvas = _rich_canvas("c1", [f"T{i:03d}" for i in range(20)])
+    assert isinstance(canvas, MixCanvas)
+    canvas.roles = CanvasRoleCandidates(
+        opener=[],
+        groove_locker=canvas.roles.groove_locker,
+        builder=canvas.roles.builder,
+        pivot=canvas.roles.pivot,
+        peak=canvas.roles.peak,
+        closer=canvas.roles.closer,
+    )
+    s_unplayed = score_canvas(canvas, ConceptHistory(), frozenset(), weights=CANVAS_SCORE_WEIGHTS_BY_MODE["unplayed"])
+    s_played = score_canvas(canvas, ConceptHistory(), frozenset(), weights=CANVAS_SCORE_WEIGHTS_BY_MODE["played"])
+    assert s_unplayed.overall != s_played.overall
+
+
+def test_select_canvases_threads_mode_to_score_canvas() -> None:
+    """select_canvases with mode='played' produces different scores than mode='unplayed'."""
+    from mixlab.models import CanvasRoleCandidates, MixCanvas
+
+    def _strip_opener(canvases: list[MixCanvas]) -> None:
+        # Force a non-trivial scoring surface so the mode weights disagree.
+        for c in canvases:
+            c.roles = CanvasRoleCandidates(
+                opener=[],
+                groove_locker=c.roles.groove_locker,
+                builder=c.roles.builder,
+                pivot=c.roles.pivot,
+                peak=c.roles.peak,
+                closer=c.roles.closer,
+            )
+
+    canvases_a = [_rich_canvas(f"c{i}", [f"T{i}{j:02d}" for j in range(10)]) for i in range(4)]
+    canvases_b = [_rich_canvas(f"c{i}", [f"T{i}{j:02d}" for j in range(10)]) for i in range(4)]
+    assert all(isinstance(c, MixCanvas) for c in canvases_a + canvases_b)
+    typed_a: list[MixCanvas] = [c for c in canvases_a if isinstance(c, MixCanvas)]
+    typed_b: list[MixCanvas] = [c for c in canvases_b if isinstance(c, MixCanvas)]
+    _strip_opener(typed_a)
+    _strip_opener(typed_b)
+    picked_unplayed = select_canvases(typed_a, ConceptHistory(), n=4, mode="unplayed")
+    picked_played = select_canvases(typed_b, ConceptHistory(), n=4, mode="played")
+    scores_unplayed = [c.score.overall for c in picked_unplayed]
+    scores_played = [c.score.overall for c in picked_played]
+    assert scores_unplayed != scores_played
+
+
 def test_build_mix_canvas_no_dominant_label_when_scattered() -> None:
     from mixlab.models import MixCanvas
 
