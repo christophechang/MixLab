@@ -2620,26 +2620,19 @@ def _canvas_with_roles(
     )
 
 
-def test_validate_stage2_output_warns_when_no_opener_in_first_two_positions() -> None:
-    """Strong-tier check: opener role must appear in positions 1 or 2 (fires regardless of genre)."""
+def test_validate_stage2_output_does_not_warn_about_role_pool_opener_or_closer() -> None:
+    """Removed in #27 — canvas-pool-based opener/closer classification disagreed with
+    Stage 2's textual role picks too often. These warnings no longer fire."""
     from mixlab.llm import validate_stage2_output
 
     ids = [str(i) for i in range(1, 9)]
-    canvas = _canvas_with_roles(ids, opener=["8"], closer=["8"])  # opener only at end
+    canvas_no_opener = _canvas_with_roles(ids, opener=["8"], closer=["8"])
+    canvas_no_closer = _canvas_with_roles(ids, opener=["1"], closer=["1"])
     concept = MixConcept(title="T", mood="dark", track_ids=ids)
-    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
-    assert any("no opener-role track in first 2 positions" in w for w in warnings)
-
-
-def test_validate_stage2_output_warns_when_no_closer_in_last_two_positions() -> None:
-    """Strong-tier check: closer role must appear in positions N or N-1."""
-    from mixlab.llm import validate_stage2_output
-
-    ids = [str(i) for i in range(1, 9)]
-    canvas = _canvas_with_roles(ids, opener=["1"], closer=["1"])  # closer only at start
-    concept = MixConcept(title="T", mood="dark", track_ids=ids)
-    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
-    assert any("no closer-role track in last 2 positions" in w for w in warnings)
+    warnings_a = validate_stage2_output([concept], [canvas_no_opener], _lib(ids), set(), set())
+    warnings_b = validate_stage2_output([concept], [canvas_no_closer], _lib(ids), set(), set())
+    assert not any("no opener-role track in first 2 positions" in w for w in warnings_a)
+    assert not any("no closer-role track in last 2 positions" in w for w in warnings_b)
 
 
 def test_validate_stage2_output_no_peak_warning_softened_by_plateau_arc() -> None:
@@ -2654,19 +2647,36 @@ def test_validate_stage2_output_no_peak_warning_softened_by_plateau_arc() -> Non
     assert not any("no peak-role" in w for w in warnings)
 
 
-def test_validate_stage2_output_warns_about_consecutive_builder_run() -> None:
-    """Three consecutive builder-role tracks fires the role-family-run warning."""
+def test_validate_stage2_output_does_not_warn_about_role_family_run() -> None:
+    """Removed in #27 — role-family-run check relied on the same canvas-pool
+    classification as the dropped opener/closer warnings."""
     from mixlab.llm import validate_stage2_output
 
     ids = [str(i) for i in range(1, 9)]
     canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], builder=["3", "4", "5"], peak=["6"])
     concept = MixConcept(title="T", mood="dark", track_ids=ids)
     warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
-    assert any("consecutive builder tracks" in w for w in warnings)
+    assert not any("consecutive builder tracks" in w for w in warnings)
 
 
 def test_validate_stage2_output_warns_all_high_energy_no_dynamic_range() -> None:
     """Concept where every track is energy ≥6/8 fires the high-energy band warning."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    lib = {
+        tid: Track(track_id=tid, artist="A", title="T", bpm=124.0, camelot_key="8A", genre="HipHop", energy=7)
+        for tid in ids
+    }
+    canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    # Use a genre outside the soft-tier softening families so the warning fires.
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="hip_hop")
+    assert any("all tracks high-energy" in w for w in warnings)
+
+
+def test_validate_stage2_output_high_energy_warning_softened_for_house() -> None:
+    """House and techno are sustained-groove genres — all-high-energy warning suppressed (#27)."""
     from mixlab.llm import validate_stage2_output
 
     ids = [str(i) for i in range(1, 9)]
@@ -2676,8 +2686,10 @@ def test_validate_stage2_output_warns_all_high_energy_no_dynamic_range() -> None
     }
     canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
     concept = MixConcept(title="T", mood="dark", track_ids=ids)
-    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="house")
-    assert any("all tracks high-energy" in w for w in warnings)
+    warnings_house = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="house")
+    warnings_techno = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="techno")
+    assert not any("all tracks high-energy" in w for w in warnings_house)
+    assert not any("all tracks high-energy" in w for w in warnings_techno)
 
 
 def test_validate_stage2_output_high_energy_warning_softened_for_dnb() -> None:
@@ -2717,13 +2729,30 @@ def test_validate_stage2_output_wind_down_warning_fires_when_final_three_all_hig
     # First five tracks low-energy, last three high — fires "no wind-down" warning.
     energies = [2, 3, 3, 4, 4, 7, 7, 8]
     lib = {
+        tid: Track(track_id=tid, artist="A", title="T", bpm=124.0, camelot_key="8A", genre="HipHop", energy=e)
+        for tid, e in zip(ids, energies, strict=True)
+    }
+    canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    # Use a non-soft-tier genre so the warning fires.
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="hip_hop")
+    assert any("no wind-down" in w for w in warnings)
+
+
+def test_validate_stage2_output_wind_down_warning_softened_for_house() -> None:
+    """House sustained-groove sets don't owe a wind-down ramp (#27)."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    energies = [2, 3, 3, 4, 4, 7, 7, 8]
+    lib = {
         tid: Track(track_id=tid, artist="A", title="T", bpm=124.0, camelot_key="8A", genre="House", energy=e)
         for tid, e in zip(ids, energies, strict=True)
     }
     canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
     concept = MixConcept(title="T", mood="dark", track_ids=ids)
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="house")
-    assert any("no wind-down" in w for w in warnings)
+    assert not any("no wind-down" in w for w in warnings)
 
 
 def test_validate_stage2_output_skips_structural_checks_when_canvas_has_no_role_data() -> None:
@@ -2931,11 +2960,13 @@ def test_generic_name_regex_classification(title: str, should_flag: bool) -> Non
 @pytest.mark.parametrize(
     "genre,arc_type,should_warn",
     [
-        ("house", None, True),  # default genre, no arc → warns
+        ("hip_hop", None, True),  # default genre, no arc → warns
         ("drum_and_bass", None, False),  # DnB suppresses high-energy warning
-        ("house", "plateau", False),  # arc_type suppresses
-        ("house", "sustained-pressure", False),  # arc_type suppresses
+        ("hip_hop", "plateau", False),  # arc_type suppresses
+        ("hip_hop", "sustained-pressure", False),  # arc_type suppresses
         ("electronica", None, True),  # electronica does NOT suppress high-energy specifically
+        ("house", None, False),  # house is sustained-groove — suppresses (#27)
+        ("techno", None, False),  # techno is sustained-groove — suppresses (#27)
     ],
 )
 def test_structural_high_energy_warning_softening(genre: str, arc_type: str | None, should_warn: bool) -> None:
