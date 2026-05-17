@@ -480,15 +480,16 @@ def test_score_canvas_weights_sum_to_one() -> None:
     canvas = _rich_canvas("c1", [f"T{i:03d}" for i in range(20)])
     assert isinstance(canvas, MixCanvas)
     s = score_canvas(canvas, ConceptHistory(), frozenset())
-    # All individual weights should sum to overall
-    expected = (
-        s.technical_viability * 0.25
+    # Weighted sum minus weakness_penalty, multiplied by floor_multiplier. Weights total 1.0.
+    weighted = (
+        s.technical_viability * 0.20
         + s.role_coverage * 0.25
         + s.anchor_strength * 0.15
         + s.contrast_potential * 0.15
-        + s.distinctiveness * 0.10
+        + s.distinctiveness * 0.15
         + s.novelty * 0.10
     )
+    expected = max(0.0, (weighted - s.weakness_penalty) * s.floor_multiplier)
     assert s.overall == pytest.approx(expected, abs=1e-9)
 
 
@@ -498,7 +499,157 @@ def test_score_canvas_full_core_pool_maxes_technical_viability() -> None:
     canvas = _rich_canvas("c1", [f"T{i:03d}" for i in range(20)])
     assert isinstance(canvas, MixCanvas)
     s = score_canvas(canvas, ConceptHistory(), frozenset())
+    # Logarithmic curve saturates at 15 core tracks; 20 still hits the cap of 1.0.
     assert s.technical_viability == pytest.approx(1.0)
+
+
+def test_score_canvas_technical_viability_saturates_at_15_tracks() -> None:
+    """Logarithmic curve: 15 tracks → 1.0, more tracks does not exceed 1.0."""
+    from mixlab.models import MixCanvas
+
+    canvas_15 = _rich_canvas("c15", [f"T{i:03d}" for i in range(15)])
+    canvas_30 = _rich_canvas("c30", [f"T{i:03d}" for i in range(30)])
+    assert isinstance(canvas_15, MixCanvas)
+    assert isinstance(canvas_30, MixCanvas)
+    s15 = score_canvas(canvas_15, ConceptHistory(), frozenset())
+    s30 = score_canvas(canvas_30, ConceptHistory(), frozenset())
+    assert s15.technical_viability == pytest.approx(1.0)
+    assert s30.technical_viability == pytest.approx(1.0)
+
+
+def test_score_canvas_technical_viability_grows_logarithmically_below_15() -> None:
+    """Diminishing returns: 8-track canvas scores between 0.7 and 0.9, not the linear 0.4."""
+    from mixlab.models import MixCanvas
+
+    canvas = _rich_canvas("c8", [f"T{i:03d}" for i in range(8)])
+    assert isinstance(canvas, MixCanvas)
+    s = score_canvas(canvas, ConceptHistory(), frozenset())
+    # log(9)/log(16) ≈ 0.792
+    assert 0.7 < s.technical_viability < 0.9
+
+
+def test_score_canvas_weak_pool_floor_multiplier_halves_overall() -> None:
+    """Canvases with fewer than 8 core tracks have their overall halved."""
+    from mixlab.models import MixCanvas
+
+    canvas_7 = _rich_canvas("c7", [f"T{i:03d}" for i in range(7)])
+    canvas_8 = _rich_canvas("c8", [f"T{i:03d}" for i in range(8)])
+    assert isinstance(canvas_7, MixCanvas)
+    assert isinstance(canvas_8, MixCanvas)
+    s7 = score_canvas(canvas_7, ConceptHistory(), frozenset())
+    s8 = score_canvas(canvas_8, ConceptHistory(), frozenset())
+    assert s7.floor_multiplier == 0.5
+    assert s8.floor_multiplier == 1.0
+
+
+def test_score_canvas_anchor_strength_presence_based() -> None:
+    """Anchor strength = 0.5 per role (opener + closer), regardless of pool size."""
+    from mixlab.models import CanvasRoleCandidates, MixCanvas
+
+    canvas = _rich_canvas("c1", [f"T{i:03d}" for i in range(20)])
+    assert isinstance(canvas, MixCanvas)
+    # Replace roles to test presence variants.
+    canvas.roles = CanvasRoleCandidates(
+        opener=["T000"], groove_locker=[], builder=[], pivot=[], peak=[], closer=["T019"]
+    )
+    s_both = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s_both.anchor_strength == pytest.approx(1.0)
+
+    canvas.roles = CanvasRoleCandidates(opener=["T000"], groove_locker=[], builder=[], pivot=[], peak=[], closer=[])
+    s_opener_only = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s_opener_only.anchor_strength == pytest.approx(0.5)
+
+    canvas.roles = CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[])
+    s_neither = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s_neither.anchor_strength == pytest.approx(0.0)
+
+
+def test_score_canvas_anchor_strength_does_not_reward_volume() -> None:
+    """One opener candidate scores the same on anchor_strength as ten opener candidates."""
+    from mixlab.models import CanvasRoleCandidates, MixCanvas
+
+    canvas = _rich_canvas("c1", [f"T{i:03d}" for i in range(20)])
+    assert isinstance(canvas, MixCanvas)
+    canvas.roles = CanvasRoleCandidates(
+        opener=["T000"], groove_locker=[], builder=[], pivot=[], peak=[], closer=["T019"]
+    )
+    s_one_each = score_canvas(canvas, ConceptHistory(), frozenset())
+    canvas.roles = CanvasRoleCandidates(
+        opener=[f"T{i:03d}" for i in range(10)],
+        groove_locker=[],
+        builder=[],
+        pivot=[],
+        peak=[],
+        closer=[f"T{i:03d}" for i in range(10, 20)],
+    )
+    s_many_each = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s_one_each.anchor_strength == s_many_each.anchor_strength
+
+
+def test_score_canvas_weakness_penalty_subtracts_per_risk_note() -> None:
+    """Each risk note shaves 0.04 off the weighted sum, up to a cap of 0.20."""
+    from mixlab.models import MixCanvas
+
+    base = _rich_canvas("clean", [f"T{i:03d}" for i in range(20)])
+    flagged = _rich_canvas("flagged", [f"T{i:03d}" for i in range(20)])
+    assert isinstance(base, MixCanvas)
+    assert isinstance(flagged, MixCanvas)
+    flagged.risk_notes = ["weak opener pool", "excessive BPM spread", "over-repeated artist"]
+    s_clean = score_canvas(base, ConceptHistory(), frozenset())
+    s_flagged = score_canvas(flagged, ConceptHistory(), frozenset())
+    assert s_flagged.weakness_penalty == pytest.approx(0.12, abs=1e-9)  # 3 * 0.04
+    assert s_flagged.overall < s_clean.overall
+
+
+def test_score_canvas_weakness_penalty_caps_at_0_20() -> None:
+    """Six or more risk notes do not exceed the 0.20 weakness penalty cap."""
+    from mixlab.models import MixCanvas
+
+    canvas = _rich_canvas("noisy", [f"T{i:03d}" for i in range(20)])
+    assert isinstance(canvas, MixCanvas)
+    canvas.risk_notes = [f"note {i}" for i in range(10)]
+    s = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s.weakness_penalty == pytest.approx(0.20, abs=1e-9)
+
+
+def test_score_canvas_small_distinctive_canvas_beats_large_generic() -> None:
+    """A 15-track canvas with all roles filled and no overlap beats a 30-track canvas with role gaps and overlap."""
+    from mixlab.models import CanvasRoleCandidates, ContrastAssets, MixCanvas
+
+    # Canvas A: 15 distinctive tracks, all roles filled, contrast assets present
+    ids_a = [f"A{i:03d}" for i in range(15)]
+    canvas_a = _rich_canvas("A", ids_a)
+
+    # Canvas B: 30 generic tracks but only opener role, no contrast, overlaps with picked set
+    ids_b = [f"B{i:03d}" for i in range(30)]
+    canvas_b = _rich_canvas("B", ids_b)
+    assert isinstance(canvas_a, MixCanvas)
+    assert isinstance(canvas_b, MixCanvas)
+    canvas_b.roles = CanvasRoleCandidates(opener=["B000"], groove_locker=[], builder=[], pivot=[], peak=[], closer=[])
+    canvas_b.contrast = ContrastAssets(
+        vocal_moments=[], texture_changes=[], darker_turns=[], brighter_lifts=[], lower_pressure_resets=[]
+    )
+
+    # Already picked some tracks from canvas_b — penalises its distinctiveness.
+    picked = frozenset(ids_b[:15])
+    s_a = score_canvas(canvas_a, ConceptHistory(), picked)
+    s_b = score_canvas(canvas_b, ConceptHistory(), picked)
+    assert s_a.overall > s_b.overall
+
+
+def test_score_canvas_overall_never_negative() -> None:
+    """Even an extremely weak canvas (small + many risk notes) stays at or above zero."""
+    from mixlab.models import CanvasRoleCandidates, ContrastAssets, MixCanvas
+
+    canvas = _rich_canvas("bad", ["T1", "T2"])  # below floor
+    assert isinstance(canvas, MixCanvas)
+    canvas.risk_notes = [f"note {i}" for i in range(20)]
+    canvas.roles = CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[])
+    canvas.contrast = ContrastAssets(
+        vocal_moments=[], texture_changes=[], darker_turns=[], brighter_lifts=[], lower_pressure_resets=[]
+    )
+    s = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s.overall >= 0.0
 
 
 def test_select_canvases_prefers_higher_score() -> None:
@@ -592,6 +743,8 @@ def test_score_canvas_debug_emits_score_fields_to_stderr(capsys: pytest.CaptureF
     assert "overlap_penalty" in captured.err
     assert "novelty_penalty" in captured.err
     assert "risk_notes" in captured.err
+    assert "weakness_penalty" in captured.err
+    assert "floor_multiplier" in captured.err
 
 
 def test_score_canvas_no_debug_no_stderr_output(capsys: pytest.CaptureFixture[str]) -> None:
