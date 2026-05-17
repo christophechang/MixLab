@@ -485,11 +485,13 @@ def test_score_canvas_weights_sum_to_one() -> None:
     s = score_canvas(canvas, ConceptHistory(), frozenset())
     # Weighted sum minus weakness_penalty, multiplied by floor_multiplier. Weights total 1.0.
     weighted = (
-        s.technical_viability * 0.20
+        s.technical_viability * 0.10
         + s.role_coverage * 0.25
         + s.anchor_strength * 0.15
         + s.contrast_potential * 0.15
         + s.distinctiveness * 0.15
+        + s.era_coherence * 0.05
+        + s.label_coherence * 0.05
         + s.novelty * 0.10
     )
     expected = max(0.0, (weighted - s.weakness_penalty) * s.floor_multiplier)
@@ -884,3 +886,75 @@ def test_build_mix_canvas_no_anchors_when_pool_uniformly_weak() -> None:
     canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
     assert isinstance(canvas, MixCanvas)
     assert canvas.core_anchor_ids == []
+
+
+# ---------------------------------------------------------------------------
+# Era and label canvas dimensions (#20)
+# ---------------------------------------------------------------------------
+
+
+def test_build_mix_canvas_tight_era_window_sets_high_coherence() -> None:
+    from mixlab.models import MixCanvas
+
+    tracks = [_anchor_track(f"t{i:02d}", bpm=172.0 + (i * 0.05), year=1996 + (i % 3)) for i in range(12)]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    assert canvas.era_window == (1996, 1998)
+    s = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s.era_coherence == pytest.approx(1.0)
+
+
+def test_build_mix_canvas_wide_era_span_zero_coherence() -> None:
+    from mixlab.models import MixCanvas
+
+    # Span 1992–2024 = 32 years → well past the _ERA_SPAN_ZERO cap.
+    tracks = [_anchor_track(f"t{i:02d}", bpm=172.0 + (i * 0.05), year=1992 + (i * 3)) for i in range(11)]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    assert canvas.era_window is not None
+    s = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s.era_coherence == pytest.approx(0.0)
+
+
+def test_build_mix_canvas_patchy_year_data_yields_no_era_window() -> None:
+    from mixlab.models import MixCanvas
+
+    # Only 2/12 tracks have year — below the 60% coverage floor.
+    tracks = [_anchor_track(f"t{i:02d}", bpm=172.0 + (i * 0.05), year=None) for i in range(10)]
+    tracks.append(_anchor_track("d1", bpm=172.5, year=2020))
+    tracks.append(_anchor_track("d2", bpm=172.6, year=2021))
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    assert canvas.era_window is None
+    s = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s.era_coherence == pytest.approx(0.0)
+
+
+def test_build_mix_canvas_dominant_label_above_share_threshold() -> None:
+    from mixlab.models import MixCanvas
+
+    # 6 of 11 (~55%) labelled tracks are on Warp — clears 40% share + 5-count floor.
+    tracks = [_anchor_track(f"w{i:02d}", bpm=172.0 + (i * 0.05), label="Warp") for i in range(6)]
+    tracks += [_anchor_track(f"o{i:02d}", bpm=172.0 + ((i + 6) * 0.05), label=f"Other{i}") for i in range(5)]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    assert canvas.dominant_label == "Warp"
+    assert canvas.label_share == pytest.approx(6 / 11, abs=1e-3)
+    s = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s.label_coherence > 0.0
+
+
+def test_build_mix_canvas_no_dominant_label_when_scattered() -> None:
+    from mixlab.models import MixCanvas
+
+    tracks = [_anchor_track(f"t{i:02d}", bpm=172.0 + (i * 0.05), label=f"Label{i}") for i in range(12)]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    assert canvas.dominant_label is None
+    s = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s.label_coherence == pytest.approx(0.0)

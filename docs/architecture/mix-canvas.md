@@ -141,15 +141,17 @@ Since v0.10, the `weakness_penalty` term in `score_canvas` subtracts 0.04 per ri
 
 Defined in [`clustering.py`](../../src/mixlab/clustering.py) `score_canvas`.
 
-Each canvas receives six scoring components plus two penalty terms, weighted and combined into a single `overall` value used to rank canvases. Current weights (tuned in v0.10 via #9):
+Each canvas receives eight scoring components plus two penalty terms, weighted and combined into a single `overall` value used to rank canvases. Current weights (tuned in v0.10 via #9 and v0.11 via #20):
 
 ```
 overall = (
-    technical_viability * 0.20 +
+    technical_viability * 0.10 +
     role_coverage       * 0.25 +
     anchor_strength     * 0.15 +
     contrast_potential  * 0.15 +
     distinctiveness     * 0.15 +
+    era_coherence       * 0.05 +
+    label_coherence     * 0.05 +
     novelty             * 0.10
 ) − weakness_penalty
 overall *= floor_multiplier
@@ -164,6 +166,8 @@ overall = max(0.0, overall)
 | `contrast_potential`  | `min(1.0, contrast_assets / 4)`                                                                | Count of non-empty contrast pools (vocal/texture/darker/brighter).                  |
 | `distinctiveness`     | `1 − overlap_with_already_picked / core_n`                                                     | Penalty when a canvas shares core tracks with canvases already selected this run.   |
 | `novelty`             | `1 − similarity_to_history` (Jaccard with decay; see §8)                                       | Penalty when a canvas overlaps with recent prior runs.                              |
+| `era_coherence`       | 1.0 when core span ≤ 3 years, linear decay to 0.0 at span ≥ 18 years (needs ≥ 60% year cover)   | Bonus when a canvas is era-defined; never a penalty when year data is missing.       |
+| `label_coherence`     | ramp from 0.0 at 40 % share to 1.0 at 70 %+ share (needs ≥ 5 tracks on the dominant label)      | Bonus when a single label dominates the core pool; never a penalty when no label dominates. |
 | `weakness_penalty`    | `min(0.20, len(risk_notes) × 0.04)`                                                            | Subtracted from the weighted sum.                                                   |
 | `floor_multiplier`    | `0.5` when `core_n < 8`, `1.0` otherwise                                                       | Halves the score for canvases below the minimum core size.                          |
 

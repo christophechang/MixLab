@@ -398,6 +398,82 @@ def _generate_risk_notes(
     return notes
 
 
+# Era/label canvas dimensions (#20).
+_ERA_MIN_YEAR_COVERAGE = 0.60
+_ERA_SPAN_FULL = 3  # years — below this, era_coherence is 1.0
+_ERA_SPAN_ZERO = 18  # years — above this, era_coherence is 0.0
+_LABEL_SHARE_THRESHOLD = 0.40
+_LABEL_MIN_COUNT = 5
+_LABEL_SHARE_FLOOR_FOR_COHERENCE = 0.30  # coherence = (share - 0.30) / 0.40, clamped to [0, 1]
+_LABEL_SHARE_FLOOR_DIVISOR = 0.40
+
+
+def _compute_era_window(core: list[Track]) -> tuple[tuple[int, int] | None, float]:
+    """Compute (era_window, era_coherence) for a core pool. Empty window when patchy.
+
+    Coherence is 1.0 when the span is <= ``_ERA_SPAN_FULL`` years, decays linearly to
+    0.0 by ``_ERA_SPAN_ZERO`` years. Year-coverage floor at ``_ERA_MIN_YEAR_COVERAGE``
+    of the pool — below that the era signal is suppressed entirely.
+    """
+    if not core:
+        return None, 0.0
+    years = [t.year for t in core if t.year is not None and t.year > 0]
+    if len(years) < _ERA_MIN_YEAR_COVERAGE * len(core):
+        return None, 0.0
+    lo, hi = min(years), max(years)
+    span = hi - lo
+    if span <= _ERA_SPAN_FULL:
+        coherence = 1.0
+    elif span >= _ERA_SPAN_ZERO:
+        coherence = 0.0
+    else:
+        coherence = max(0.0, 1.0 - (span - _ERA_SPAN_FULL) / (_ERA_SPAN_ZERO - _ERA_SPAN_FULL))
+    return (lo, hi), round(coherence, 4)
+
+
+def _compute_dominant_label(core: list[Track]) -> tuple[str | None, float, float]:
+    """Compute (dominant_label, label_share, label_coherence) for a core pool.
+
+    Returns (None, 0.0, 0.0) when no label clears the share threshold or the absolute
+    minimum count. Coherence ramps from 0.0 at the threshold up to 1.0 around 0.70+
+    share so a near-monolithic canvas gets a stronger bonus than a barely-dominant one.
+    """
+    from collections import Counter
+
+    labelled = [t.label for t in core if t.label]
+    if not labelled:
+        return None, 0.0, 0.0
+    counts = Counter(labelled)
+    top_label, top_count = counts.most_common(1)[0]
+    share = top_count / len(labelled)
+    if share < _LABEL_SHARE_THRESHOLD or top_count < _LABEL_MIN_COUNT:
+        return None, 0.0, 0.0
+    coherence = min(1.0, max(0.0, (share - _LABEL_SHARE_FLOOR_FOR_COHERENCE) / _LABEL_SHARE_FLOOR_DIVISOR))
+    return top_label, round(share, 4), round(coherence, 4)
+
+
+def _era_coherence_from_window(window: tuple[int, int] | None) -> float:
+    """Coherence value for a precomputed (min_year, max_year) tuple."""
+    if window is None:
+        return 0.0
+    span = window[1] - window[0]
+    if span <= _ERA_SPAN_FULL:
+        return 1.0
+    if span >= _ERA_SPAN_ZERO:
+        return 0.0
+    return round(max(0.0, 1.0 - (span - _ERA_SPAN_FULL) / (_ERA_SPAN_ZERO - _ERA_SPAN_FULL)), 4)
+
+
+def _label_coherence_from_share(share: float) -> float:
+    """Coherence ramp from the share threshold up to a near-monolithic canvas."""
+    if share < _LABEL_SHARE_THRESHOLD:
+        return 0.0
+    return round(
+        min(1.0, max(0.0, (share - _LABEL_SHARE_FLOOR_FOR_COHERENCE) / _LABEL_SHARE_FLOOR_DIVISOR)),
+        4,
+    )
+
+
 _ANCHOR_WEIGHT_PROVENANCE = 0.30
 _ANCHOR_WEIGHT_RARITY = 0.25
 _ANCHOR_WEIGHT_CENTRALITY = 0.20
@@ -537,6 +613,9 @@ def build_mix_canvas(
     anchor_scores = score_anchors(pools.core, tracks_by_id)
     core_anchor_ids = _select_anchor_ids(anchor_scores)
 
+    era_window, _ = _compute_era_window(pools.core)
+    dominant_label, label_share, _ = _compute_dominant_label(pools.core)
+
     genre = tracks[0].genre if tracks else ""
 
     return MixCanvas(
@@ -554,6 +633,9 @@ def build_mix_canvas(
         score=CanvasScore(),
         source_concept=concept,
         core_anchor_ids=core_anchor_ids,
+        era_window=era_window,
+        dominant_label=dominant_label,
+        label_share=label_share,
     )
 
 
@@ -609,6 +691,13 @@ def _emit_canvas_score_debug(
         f"novelty={score.novelty:.3f}  overall={score.overall:.3f}",
         file=sys.stderr,
     )
+    era_str = f"{canvas.era_window[0]}-{canvas.era_window[1]}" if canvas.era_window else "—"
+    label_str = f"{canvas.dominant_label} ({canvas.label_share:.2f})" if canvas.dominant_label else "—"
+    print(
+        f"  era_coherence={score.era_coherence:.3f} ({era_str})  "
+        f"label_coherence={score.label_coherence:.3f} ({label_str})",
+        file=sys.stderr,
+    )
     print(
         f"  weakness_penalty={score.weakness_penalty:.3f} ({len(canvas.risk_notes)} risk note(s))  "
         f"floor_multiplier={score.floor_multiplier:.2f}",
@@ -630,15 +719,24 @@ _WEAKNESS_PENALTY_CAP = 0.20
 _FLOOR_MULTIPLIER_BELOW_MIN_CORE = 0.5
 _MIN_CORE_FOR_FULL_SCORE = 8
 
-# Weights sum to 1.0. Tuned in v0.10 — distinctiveness raised from 0.10 to 0.15
-# at the cost of technical_viability (0.25 → 0.20). Technical viability is also
-# logarithmic with saturation at 15 tracks (was linear, saturating at 20), so a
-# 15-track distinctive canvas can outrank a 30-track generic one.
-_WEIGHT_TECHNICAL_VIABILITY = 0.20
+# Weights sum to 1.0. Tuned across v0.10 (#9) and v0.11 (#20):
+#  - #9 (v0.10): distinctiveness raised from 0.10 to 0.15 at the cost of
+#    technical_viability (0.25 → 0.20). Technical viability is also logarithmic
+#    with saturation at 15 tracks (was linear, saturating at 20), so a 15-track
+#    distinctive canvas can outrank a 30-track generic one.
+#  - #20 (v0.11): era_coherence and label_coherence introduced at 0.05 each,
+#    funded by halving technical_viability again (0.20 → 0.10). Canvases with a
+#    tight era window or a dominant label now get a small structural bonus that
+#    a uniformly-scattered pool does not — and missing year/label data is
+#    treated as no signal (no penalty), so libraries with patchy metadata are
+#    not punished.
+_WEIGHT_TECHNICAL_VIABILITY = 0.10
 _WEIGHT_ROLE_COVERAGE = 0.25
 _WEIGHT_ANCHOR_STRENGTH = 0.15
 _WEIGHT_CONTRAST_POTENTIAL = 0.15
 _WEIGHT_DISTINCTIVENESS = 0.15
+_WEIGHT_ERA_COHERENCE = 0.05
+_WEIGHT_LABEL_COHERENCE = 0.05
 _WEIGHT_NOVELTY = 0.10
 
 
@@ -690,12 +788,19 @@ def score_canvas(
 
     novelty = 1.0 - similarity_to_history(canvas, history)
 
+    # Era and label coherence (#20). era_window/dominant_label/label_share are populated
+    # by build_mix_canvas. Missing data → coherence 0.0 (no penalty, just no bonus).
+    era_coherence = _era_coherence_from_window(canvas.era_window)
+    label_coherence = _label_coherence_from_share(canvas.label_share) if canvas.dominant_label else 0.0
+
     weighted = (
         technical_viability * _WEIGHT_TECHNICAL_VIABILITY
         + role_coverage * _WEIGHT_ROLE_COVERAGE
         + anchor_strength * _WEIGHT_ANCHOR_STRENGTH
         + contrast_potential * _WEIGHT_CONTRAST_POTENTIAL
         + distinctiveness * _WEIGHT_DISTINCTIVENESS
+        + era_coherence * _WEIGHT_ERA_COHERENCE
+        + label_coherence * _WEIGHT_LABEL_COHERENCE
         + novelty * _WEIGHT_NOVELTY
     )
 
@@ -717,6 +822,8 @@ def score_canvas(
         contrast_potential=contrast_potential,
         distinctiveness=distinctiveness,
         novelty=novelty,
+        era_coherence=era_coherence,
+        label_coherence=label_coherence,
         weakness_penalty=weakness_penalty,
         floor_multiplier=floor_multiplier,
         overall=overall,

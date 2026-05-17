@@ -712,6 +712,15 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
     if canvas.core_anchor_ids:
         lines.append(f"Anchors: {ids_block(canvas.core_anchor_ids)}")
 
+    if canvas.era_window is not None:
+        lo, hi = canvas.era_window
+        lines.append(f"Era: {lo}-{hi} (era_coherence: {canvas.score.era_coherence:.2f})")
+    if canvas.dominant_label:
+        lines.append(
+            f"Dominant label: {canvas.dominant_label} "
+            f"(share: {canvas.label_share:.2f}, label_coherence: {canvas.score.label_coherence:.2f})"
+        )
+
     contrast_parts = []
     if c.vocal_moments:
         contrast_parts.append(f"Vocal: {ids_block(c.vocal_moments)}")

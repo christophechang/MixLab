@@ -139,6 +139,8 @@ class HistoryEntry:
                 "contrast_potential": statistics.mean(c.score.contrast_potential for c in canvases),
                 "distinctiveness": statistics.mean(c.score.distinctiveness for c in canvases),
                 "novelty": statistics.mean(c.score.novelty for c in canvases),
+                "era_coherence": statistics.mean(c.score.era_coherence for c in canvases),
+                "label_coherence": statistics.mean(c.score.label_coherence for c in canvases),
                 "weakness_penalty": statistics.mean(c.score.weakness_penalty for c in canvases),
                 "overall": statistics.mean(c.score.overall for c in canvases),
             }

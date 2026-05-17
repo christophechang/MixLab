@@ -101,6 +101,10 @@ class CanvasScore:
     contrast_potential: float = 0.0
     distinctiveness: float = 1.0
     novelty: float = 1.0
+    # Era/label coherence (#20). 0.0 = no signal (missing data or scattered) — never a penalty,
+    # only a bonus when the canvas has a tight era window or a dominant label.
+    era_coherence: float = 0.0
+    label_coherence: float = 0.0
     weakness_penalty: float = 0.0  # subtracted from the weighted sum (max 0.20)
     floor_multiplier: float = 1.0  # 0.5 when core_n < 8, 1.0 otherwise
     overall: float = 0.0
@@ -141,6 +145,14 @@ class MixCanvas:
     # tracks Stage 2 is nudged to prefer as identity-defining picks. Signal only —
     # not enforced. Empty when no track clears the threshold (or for legacy canvases).
     core_anchor_ids: list[str] = field(default_factory=list)
+    # Era and label canvas dimensions (#20). ``era_window`` is (min_year, max_year)
+    # over core tracks with year data; None when coverage is too patchy. ``dominant_label``
+    # is the most-frequent label name when its share clears the threshold; None otherwise.
+    # ``label_share`` is the share of that label across labelled core tracks (0.0 when no
+    # dominant label).
+    era_window: tuple[int, int] | None = None
+    dominant_label: str | None = None
+    label_share: float = 0.0
 
 
 SeedTier = Literal["anchor", "supporting", "optional"]
