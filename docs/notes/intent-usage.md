@@ -17,6 +17,31 @@ Schema per entry:
 
 ---
 
+## 2026-05-17 — v0.12.2 release smoke (post prose/JSON alignment fix)
+
+- **Command:** `./mixlab --genre house`
+- **Intent:** (none)
+- **Mode / Genre:** unplayed / house
+- **Concepts:**
+  - Interzone (energy path: Slow Climb; 11 tracks)
+  - Fever (energy path: Slow Climb; 11 tracks)
+  - Last Light (energy path: Wave; 12 tracks)
+- **Validation notes:** none. Zero warnings emitted (vs 2 in the v0.12.1 smoke earlier today).
+- **Observations:**
+  - **Prose/JSON alignment shipped (#29).** Prose `Risk:` lines now use `risk_type` enum vocabulary verbatim:
+    - Fever track 10: `Risk: chapter pivot — ...`
+    - Last Light track 3: `Risk: chapter pivot — ...`
+    - Last Light track 7: `Risk: peak impact — ...`
+    - Last Light track 8: `Risk: deliberate reset — ...`
+    - Interzone track 7: `Risk: peak impact — ...`
+    - Interzone track 11: `Risk: closer move — ...`
+    Report writer now mirrors structured annotations from selection pass. CONSISTENCY rule + transition-block injection working as designed.
+  - Caveat: cannot fully isolate "warning count dropped because alignment shipped" from "different concepts produced different transitions" — LLM stochasticity + different seed pool means causal attribution is uncertain. Vocabulary alignment is unambiguous though.
+  - Three concepts this time (vs two in prior smoke). No `--intent` used — #17 gate counter still ~2-3.
+  - Runtime ~1m 37s. No errors. No `--deep`. Default model (Sonnet 4.6).
+
+---
+
 ## 2026-05-17 — v0.12.1 release smoke
 
 - **Command:** `./mixlab --genre house`
