@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.12.1
+
+- **Validator: suppress BPM/Camelot jump warnings on justified-risk transitions (#28).** `validate_stage2_output` previously fired `BPM jump >15` and `Camelot jump >4` warnings regardless of whether the transition was annotated as a deliberate risk. Mirroring the bridge/wildcard role-check pattern already in place, both warnings are now suppressed when the corresponding `Transition` has `is_risky=True` AND a non-empty `risk_type` (`chapter_pivot`, `peak_impact`, `deliberate_reset`, `closer_move`, `low_tonal_risk`). Unannotated jumps still warn, and `is_risky=True` with empty `risk_type` still warns (unjustified risk). Thresholds (15 BPM / 4 Camelot) unchanged — per-mode tuning deferred until an adventurous mode knob lands. Warning becomes "unjustified threshold breach" signal rather than "any threshold breach".
+
+---
+
 ## v0.12.0
 
 - **Sharper Stage 2 role vocabulary (#23).** The Stage 2 set-role list trimmed 19 → 10: `opener`, `groove`, `hook`, `pivot`, `lift`, `vocal-moment`, `texture-change`, `peak`, `resolution`, `closer`. Removes semantic overlap (early-hook ≈ world-setter ≈ opener; groove-locker ≈ builder ≈ connector; weapon ≈ peak; post-peak ≈ cleanser ≈ resolution; risk ≈ pivot; utility removed). Stage 2 selection + report prompts updated, parser coerces old strings to `unknown`, playlist_mode missing-role checks switched (`builder` → `groove`, `cleanser` → `resolution`). `CanvasRoleCandidates` field names kept stable (internal canvas pools).
