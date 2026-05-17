@@ -896,6 +896,107 @@ async def test_stage2_prompt_omits_recent_concepts_block_when_history_not_suppli
 
 
 @respx.mock
+async def test_stage2_genre_intent_passthrough_in_genre_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Genre-mode Stage 2 prompt must contain the literal --intent text inside USER INTENT block."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    intent_text = "warmup set for an outdoor afternoon, low pressure, melodic"
+    await stage2_curate_and_report(shortlists, tracks_by_id, genre_intent=intent_text)
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "USER INTENT" in user_prompt
+    assert intent_text in user_prompt
+    # Intent block must precede the candidates listing.
+    assert user_prompt.index("USER INTENT") < user_prompt.index("Curate a set of mix concepts")
+
+
+@respx.mock
+async def test_stage2_genre_intent_block_absent_when_not_supplied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default behaviour: no genre_intent means no USER INTENT block in the prompt."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "USER INTENT" not in user_prompt
+
+
+@respx.mock
+async def test_stage2_genre_intent_ignored_in_playlist_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Playlist mode runs Stage 0; --intent must be ignored even when threaded through."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset({"1"}),
+        seed_track_ids=["1"],
+        genre_intent="should not appear in playlist mode prompt",
+    )
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "USER INTENT" not in user_prompt
+    assert "should not appear in playlist mode prompt" not in user_prompt
+
+
+@respx.mock
+async def test_stage2_genre_intent_blank_string_emits_no_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whitespace-only intent string is treated as no intent — block omitted."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, genre_intent="   ")
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "USER INTENT" not in user_prompt
+
+
+@respx.mock
 async def test_stage2_marks_only_unplayed_tracks_when_unplayed_ids_provided(monkeypatch: pytest.MonkeyPatch) -> None:
     """When unplayed_ids is provided, only those tracks get the 'unplayed' marker — not all tracks."""
     from mixlab.llm import stage2_curate_and_report

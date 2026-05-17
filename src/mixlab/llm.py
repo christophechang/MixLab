@@ -1912,6 +1912,7 @@ async def stage2_curate_and_report(
     used_mix_names: list[str] | None = None,
     canvases: list[MixCanvas] | None = None,
     concept_history: ConceptHistory | None = None,
+    genre_intent: str | None = None,
     debug: bool = False,
 ) -> tuple[list[MixConcept], str]:
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -1977,6 +1978,22 @@ async def stage2_curate_and_report(
         if block:
             recent_concepts_block = block + "\n\n"
 
+    # Genre-mode user intent block (#16). Pure free-text passthrough — no parsing.
+    # Ignored in playlist mode, which has its own Stage 0 intent brief.
+    genre_intent_block = ""
+    if genre_intent is not None and playlist_name is None:
+        intent_text = genre_intent.strip()
+        if intent_text:
+            genre_intent_block = (
+                "USER INTENT\n"
+                "The user has stated the following intent for this run:\n"
+                f'"{intent_text}"\n\n'
+                "Read this as creative direction. It is not exhaustive — fill in what the user did not "
+                "specify. If the intent conflicts with what the candidate pool can actually support, "
+                "prioritise honesty: pick the closest viable interpretation and note the gap in Assumptions.\n\n"
+                "---\n\n"
+            )
+
     if playlist_name is not None:
         playlist_seed_track_ids = seed_track_ids or sorted(seed_ids or [])
         minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids), intent_brief)
@@ -2032,6 +2049,7 @@ async def stage2_curate_and_report(
     else:
         if canvases is not None:
             prompt = (
+                f"{genre_intent_block}"
                 f"{recent_concepts_block}"
                 f"Curate a set of mix concepts from the following {n} candidate canvases. "
                 f"Produce between 3 and 6 distinct concepts total. Each concept must draw only from tracks within a single canvas.\n\n"
@@ -2039,6 +2057,7 @@ async def stage2_curate_and_report(
             )
         else:
             prompt = (
+                f"{genre_intent_block}"
                 f"{recent_concepts_block}"
                 f"Curate a set of mix concepts from the following {n} candidate shortlists. "
                 f"Produce between 3 and 6 distinct concepts total. A rich shortlist may yield more than one concept; "
