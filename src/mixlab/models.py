@@ -106,6 +106,22 @@ class CanvasScore:
     overall: float = 0.0
 
 
+@dataclass(frozen=True)
+class ConceptShape:
+    """Deterministic shape fingerprint of a concept for shape-novelty scoring (#7).
+
+    Fields are deliberately reliable-or-omitted: ``energy_path`` is excluded from
+    similarity comparison when empty (Option A — unknown arc is not a match).
+    """
+
+    bpm_band: str  # e.g. "170-180" (10-BPM bucket). "" when unknown.
+    camelot_zone: str  # dominant Camelot key. "" when unknown.
+    energy_path: str  # arc_type from history. "" when unknown — excluded from comparison.
+    has_opener: bool
+    has_closer: bool
+    has_peak: bool
+
+
 @dataclass
 class MixCanvas:
     canvas_id: str

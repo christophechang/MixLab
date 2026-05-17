@@ -6,15 +6,22 @@ from pathlib import Path
 import pytest
 
 from mixlab.history import (
+    _NOVELTY_SHAPE_WEIGHT,
+    _NOVELTY_TRACK_WEIGHT,
     ConceptHistory,
     HistoryEntry,
     append_run,
+    concept_shape_from_canvas,
+    concept_shape_from_entry,
+    concept_shape_similarity,
     load_history,
+    similarity_breakdown_to_history,
     similarity_to_history,
 )
 from mixlab.models import (
     CanvasRoleCandidates,
     CanvasScore,
+    ConceptShape,
     ContrastAssets,
     MixCanvas,
     MixConcept,
@@ -43,6 +50,9 @@ def _entry(run_id: str, core_ids: list[str], genre: str = "drum_and_bass") -> Hi
 
 
 def _canvas(core_ids: list[str]) -> MixCanvas:
+    # Roles populated so the shape fingerprint matches `_entry` (has_opener/closer True).
+    # This keeps the existing similarity_to_history tests focused on track-overlap
+    # behaviour against a fixed matching shape; shape-specific tests below vary it.
     return MixCanvas(
         canvas_id="dnb_172.0_4A",
         genre="drum_and_bass",
@@ -52,7 +62,14 @@ def _canvas(core_ids: list[str]) -> MixCanvas:
         core_track_ids=core_ids,
         bridge_track_ids=[],
         wildcard_track_ids=[],
-        roles=CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[]),
+        roles=CanvasRoleCandidates(
+            opener=core_ids[:1],
+            groove_locker=[],
+            builder=[],
+            pivot=[],
+            peak=[],
+            closer=core_ids[-1:],
+        ),
         contrast=ContrastAssets(
             vocal_moments=[],
             texture_changes=[],
@@ -116,11 +133,13 @@ def test_similarity_to_history_identical() -> None:
     assert sim == pytest.approx(1.0)
 
 
-def test_similarity_to_history_disjoint() -> None:
+def test_similarity_to_history_disjoint_tracks_same_shape() -> None:
+    """Disjoint tracks but matching concept shape — shape contributes 0.35 (#7)."""
     canvas = _canvas(["T001", "T002"])
     history = ConceptHistory(runs=[_entry("r1", ["T010", "T011"])])
     sim = similarity_to_history(canvas, history)
-    assert sim == pytest.approx(0.0)
+    # track_sim=0.0, shape_sim=1.0, age=0 → combined = 0.35
+    assert sim == pytest.approx(_NOVELTY_SHAPE_WEIGHT)
 
 
 def test_similarity_to_history_empty_history() -> None:
@@ -135,20 +154,121 @@ def test_similarity_to_history_decay() -> None:
 
     canvas = _canvas(["T001", "T002", "T003"])
     old_entry = _entry("r_old", ["T001", "T002", "T003"])
-    recent_entry = _entry("r_recent", ["X001", "X002", "X003"])  # disjoint
-    # old_entry is age=1 (second from end in reversed order), recent is age=0 but disjoint
+    recent_entry = _entry("r_recent", ["X001", "X002", "X003"])  # disjoint tracks but same shape
+    # old_entry is age=1 (second from end in reversed order), recent is age=0
     history = ConceptHistory(runs=[old_entry, recent_entry])
     sim = similarity_to_history(canvas, history)
-    # old_entry jaccard=1.0 decayed by _DECAY^1, recent=0.0
+    # old_entry: combined=1.0, decayed by _DECAY^1 = 0.8
+    # recent_entry: combined=0.35 (shape only), age=0 = 0.35
+    # max picks the older identical match.
     assert sim == pytest.approx(1.0 * _DECAY)
 
 
-def test_similarity_to_history_partial_overlap() -> None:
+def test_similarity_to_history_partial_overlap_same_shape() -> None:
     canvas = _canvas(["T001", "T002", "T003", "T004"])
     history = ConceptHistory(runs=[_entry("r1", ["T001", "T002", "X001", "X002"])])
     sim = similarity_to_history(canvas, history)
-    # intersection=2, union=6, jaccard=1/3, age=0 → no decay
-    assert sim == pytest.approx(2 / 6)
+    # track jaccard=2/6=1/3, shape=1.0 → combined = 0.65*(1/3) + 0.35
+    expected = _NOVELTY_TRACK_WEIGHT * (2 / 6) + _NOVELTY_SHAPE_WEIGHT * 1.0
+    assert sim == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# Concept-shape novelty (#7)
+# ---------------------------------------------------------------------------
+
+
+def _shape(
+    bpm: str = "170-180",
+    cam: str = "4A",
+    arc: str = "",
+    opener: bool = True,
+    closer: bool = True,
+    peak: bool = False,
+) -> ConceptShape:
+    return ConceptShape(
+        bpm_band=bpm,
+        camelot_zone=cam,
+        energy_path=arc,
+        has_opener=opener,
+        has_closer=closer,
+        has_peak=peak,
+    )
+
+
+def test_concept_shape_similarity_identical() -> None:
+    s = _shape()
+    assert concept_shape_similarity(s, s) == pytest.approx(1.0)
+
+
+def test_concept_shape_similarity_fully_different() -> None:
+    a = _shape(bpm="120-130", cam="8A", opener=True, closer=True, peak=True)
+    b = _shape(bpm="170-180", cam="4A", opener=False, closer=False, peak=False)
+    # 5 comparable fields (energy_path excluded both ""), all mismatch.
+    assert concept_shape_similarity(a, b) == pytest.approx(0.0)
+
+
+def test_concept_shape_similarity_partial() -> None:
+    a = _shape(bpm="170-180", cam="4A", opener=True, closer=True, peak=False)
+    b = _shape(bpm="170-180", cam="8A", opener=False, closer=True, peak=False)
+    # 5 fields compared: bpm match, camelot mismatch, has_opener mismatch,
+    # has_closer match, has_peak match → 3/5.
+    assert concept_shape_similarity(a, b) == pytest.approx(3 / 5)
+
+
+def test_concept_shape_similarity_excludes_empty_energy_path() -> None:
+    """Empty energy_path is excluded — unknown is not a match (Option A)."""
+    a = _shape(arc="")
+    b = _shape(arc="")
+    # 5 fields compared (energy_path excluded both sides). All other fields match → 1.0.
+    assert concept_shape_similarity(a, b) == pytest.approx(1.0)
+
+
+def test_concept_shape_similarity_compares_energy_path_when_both_populated() -> None:
+    a = _shape(arc="wave")
+    b = _shape(arc="single_arc")
+    # 6 fields compared, energy_path mismatch, rest match → 5/6.
+    assert concept_shape_similarity(a, b) == pytest.approx(5 / 6)
+
+
+def test_concept_shape_from_canvas_uses_bpm_bucket() -> None:
+    canvas = _canvas(["T001", "T002"])
+    shape = concept_shape_from_canvas(canvas)
+    assert shape.bpm_band == "170-180"
+    assert shape.camelot_zone == "4A"
+    # Canvas-side shape never has energy_path (Stage 2 has not run).
+    assert shape.energy_path == ""
+    assert shape.has_opener is True
+    assert shape.has_closer is True
+    assert shape.has_peak is False
+
+
+def test_concept_shape_from_entry_pulls_arc_type() -> None:
+    entry = _entry("r1", ["T001", "T002"])
+    shape = concept_shape_from_entry(entry)
+    assert shape.energy_path == "single_arc"
+    assert shape.bpm_band == "170-180"
+
+
+def test_similarity_breakdown_decomposes_track_and_shape() -> None:
+    """Debug breakdown reports both components and which run drove the score."""
+    canvas = _canvas(["T001", "T002", "T003"])
+    history = ConceptHistory(runs=[_entry("r1", ["T001", "T002", "T003"])])
+    breakdown = similarity_breakdown_to_history(canvas, history)
+    assert breakdown.combined == pytest.approx(1.0)
+    assert breakdown.track_similarity == pytest.approx(1.0)
+    assert breakdown.shape_similarity == pytest.approx(1.0)
+    assert breakdown.age_of_top_match == 0
+
+
+def test_similarity_breakdown_isolates_shape_only_match() -> None:
+    """Disjoint tracks but matching shape — combined is shape-only."""
+    canvas = _canvas(["T001"])
+    history = ConceptHistory(runs=[_entry("r1", ["X999"])])
+    breakdown = similarity_breakdown_to_history(canvas, history)
+    assert breakdown.track_similarity == pytest.approx(0.0)
+    assert breakdown.shape_similarity == pytest.approx(1.0)
+    assert breakdown.combined == pytest.approx(_NOVELTY_SHAPE_WEIGHT)
 
 
 def test_history_entry_from_run() -> None:
@@ -250,8 +370,12 @@ def test_from_run_populates_role_pattern_from_canvas_role_pools() -> None:
 
 
 def test_from_run_role_pattern_uses_unknown_for_unclassified_tracks() -> None:
+    # No role assignments — tracks fall through to "unknown". Build a canvas with
+    # empty role pools explicitly (the default `_canvas` populates opener/closer for
+    # shape-matching in similarity tests).
     canvas = _canvas(["T001", "T002"])
-    # No role assignments — tracks fall through to "unknown".
+    canvas.roles.opener = []
+    canvas.roles.closer = []
     concept = MixConcept(title="T", mood="m", track_ids=["T001", "T002"])
     entry = HistoryEntry.from_run([canvas], [concept], genre="house", mode="standard")
     assert entry.role_pattern == ["unknown", "unknown"]

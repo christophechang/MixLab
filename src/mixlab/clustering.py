@@ -25,7 +25,7 @@ import statistics
 import sys
 
 from mixlab.config import CustomGenre
-from mixlab.history import ConceptHistory, similarity_to_history
+from mixlab.history import ConceptHistory, similarity_breakdown_to_history, similarity_to_history
 from mixlab.models import (
     BpmPools,
     CanvasRoleCandidates,
@@ -450,24 +450,22 @@ _HIST_DECAY = 0.8
 
 
 def _novelty_source(canvas: MixCanvas, history: ConceptHistory) -> str:
-    """Return a short description of the top history contributor to novelty penalty."""
-    if not history.runs or not canvas.core_track_ids:
+    """Return a short description of the top history contributor to novelty penalty.
+
+    Shows the combined value alongside its track/shape components so the user can see
+    when the penalty is driven by track overlap, by repeated concept shape, or both.
+    """
+    if not history.runs:
         return "no history"
-    canvas_ids = frozenset(canvas.core_track_ids)
-    recent = history.runs[-_HIST_RECENCY:]
-    best_sim = 0.0
-    best_label = "no overlap with history"
-    for age, entry in enumerate(reversed(recent)):
-        hist_ids = frozenset(entry.core_track_ids)
-        union = canvas_ids | hist_ids
-        if not union:
-            continue
-        jaccard = len(canvas_ids & hist_ids) / len(union)
-        decayed = jaccard * (_HIST_DECAY**age)
-        if decayed > best_sim:
-            best_sim = decayed
-            best_label = f"run[{entry.created_at[:10]} genre={entry.genre}] jaccard_decayed={decayed:.3f}"
-    return best_label
+    breakdown = similarity_breakdown_to_history(canvas, history, _HIST_RECENCY)
+    if breakdown.age_of_top_match < 0 or breakdown.combined == 0.0:
+        return "no overlap with history"
+    entry = list(reversed(history.runs[-_HIST_RECENCY:]))[breakdown.age_of_top_match]
+    return (
+        f"run[{entry.created_at[:10]} genre={entry.genre}] "
+        f"combined_decayed={breakdown.combined:.3f} "
+        f"(track={breakdown.track_similarity:.3f}, shape={breakdown.shape_similarity:.3f})"
+    )
 
 
 def _emit_canvas_score_debug(
