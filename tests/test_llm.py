@@ -1936,9 +1936,83 @@ def test_make_selection_system_preserves_curation_instructions() -> None:
 
     result = _make_selection_system(_STAGE2_SYSTEM)
     # Key curation guidance must survive
-    assert "peak weapons" in result
+    assert "stacked peaks" in result
     assert "name_reason" in result
     assert "chapter_pivot" in result
+
+
+def test_stage2_system_role_vocabulary_trimmed_to_ten_roles() -> None:
+    """Stage 2 prompts must reference the new 10-role vocabulary, not the old 19-role list (#23)."""
+    from mixlab.llm import _STAGE2_REPORT_SYSTEM, _STAGE2_SYSTEM
+
+    new_roles = {
+        "opener",
+        "groove",
+        "hook",
+        "pivot",
+        "lift",
+        "vocal-moment",
+        "texture-change",
+        "peak",
+        "resolution",
+        "closer",
+    }
+    old_only = {
+        "world-setter",
+        "early-hook",
+        "groove-locker",
+        "builder",
+        "connector",
+        "pressure",
+        "cleanser",
+        "weapon",
+        "post-peak",
+        "utility",
+    }
+    for prompt in (_STAGE2_SYSTEM, _STAGE2_REPORT_SYSTEM):
+        for role in new_roles:
+            assert role in prompt, f"new role '{role}' missing from prompt"
+        for role in old_only:
+            # Old role tokens must not appear as standalone role labels in the prompt.
+            assert f", {role}," not in prompt and f", {role}." not in prompt, (
+                f"old role '{role}' still listed in prompt"
+            )
+
+
+def test_stage0_system_role_vocabulary_trimmed() -> None:
+    """Stage 0 (playlist mode) inferred-role options match the new vocabulary."""
+    from mixlab.llm import _STAGE0_SYSTEM
+
+    assert "opener, groove, hook, pivot, lift, vocal_moment, texture_change, peak, resolution, closer" in _STAGE0_SYSTEM
+    assert "world_setter" not in _STAGE0_SYSTEM
+    assert "groove_locker" not in _STAGE0_SYSTEM
+    assert "weapon" not in _STAGE0_SYSTEM
+    assert "cleanser" not in _STAGE0_SYSTEM
+
+
+def test_stage0_parser_coerces_old_role_names_to_unknown() -> None:
+    """Stage 0 LLM responses with old vocab (e.g. 'weapon') should coerce to 'unknown' (#23)."""
+    from mixlab.llm import _parse_intent_brief
+
+    raw = """{
+      "overall_vibe": "test",
+      "energy_shape": "single_arc",
+      "risk_tolerance": "medium",
+      "is_coherent_set": true,
+      "missing_roles": [],
+      "seed_analyses": [
+        {"track_id": "1", "tier": "anchor", "inferred_role": "weapon"},
+        {"track_id": "2", "tier": "supporting", "inferred_role": "groove"}
+      ]
+    }"""
+    seed_tracks = [
+        Track(track_id="1", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB"),
+        Track(track_id="2", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB"),
+    ]
+    brief = _parse_intent_brief(raw, seed_tracks, (170.0, 178.0))
+    roles_by_id = {s.track_id: s.inferred_role for s in brief.seed_analyses}
+    assert roles_by_id["1"] == "unknown"  # 'weapon' coerced
+    assert roles_by_id["2"] == "groove"  # 'groove' kept
 
 
 def test_selection_system_playlist_variant_has_practical_balanced_adventurous() -> None:

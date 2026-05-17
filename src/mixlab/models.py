@@ -176,26 +176,23 @@ class MixCanvas:
 
 
 SeedTier = Literal["anchor", "supporting", "optional"]
+# Stage 2 set-role vocabulary. Sharpened from 19 → 10 roles in v0.11.0 (#23) to
+# remove semantic overlap (world-setter/early-hook subsumed by hook+opener;
+# groove-locker/builder/connector merged into groove; pressure/lift consolidated;
+# weapon merged into peak; post-peak/cleanser merged into resolution; risk merged
+# into pivot; utility removed). Old role strings emitted by upstream LLM responses
+# are coerced to "unknown" by the parser.
 SetRole = Literal[
     "opener",
-    "world_setter",
-    "groove_locker",
-    "early_hook",
-    "builder",
-    "connector",
+    "groove",
+    "hook",
     "pivot",
-    "pressure",
     "lift",
     "vocal_moment",
     "texture_change",
-    "cleanser",
-    "risk",
-    "weapon",
     "peak",
-    "post_peak",
     "resolution",
     "closer",
-    "utility",
     "unknown",
 ]
 EnergyShape = Literal["single_arc", "double_peak", "plateau", "flat", "unclear"]

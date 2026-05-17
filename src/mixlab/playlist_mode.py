@@ -119,7 +119,7 @@ def identify_missing_roles(
     """Identify missing set roles based on energy fields and track count.
 
     Only meaningful if >= 50% of seeds have energy data and seed count >= 5.
-    Returns a subset of ["opener", "peak", "builder"].
+    Returns a subset of ["opener", "peak", "groove"].
     """
     tracks = [tracks_by_id[tid] for tid in seed_track_ids if tid in tracks_by_id]
     if len(tracks) < 5:
@@ -139,7 +139,7 @@ def identify_missing_roles(
         missing.append("peak")
 
     if not any(4 <= e <= 6 for e in energies):
-        missing.append("builder")
+        missing.append("groove")
 
     return missing
 
@@ -369,9 +369,9 @@ def _score_candidate(
                 role_score = 0.15
         elif "peak" in missing_roles and track.energy >= 7:
             role_score = 0.8
-        elif "builder" in missing_roles and 4 <= track.energy <= 6:
+        elif "groove" in missing_roles and 4 <= track.energy <= 6:
             role_score = 0.5
-        elif "cleanser" in missing_roles and track.energy <= 4:
+        elif "resolution" in missing_roles and track.energy <= 4:
             role_score = 0.4
 
     unplayed_bonus = 0.3 if is_unplayed else 0.0

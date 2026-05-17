@@ -167,14 +167,14 @@ Tier definitions:
 - supporting: tracks that serve the arc; keep by default, replaceable with musical reason.
 - optional: filler or candidates — lowest priority to retain.
 
-Inferred role options: opener, world_setter, groove_locker, early_hook, builder, connector, pivot, pressure, lift, vocal_moment, texture_change, cleanser, risk, weapon, peak, post_peak, resolution, closer, utility, unknown
+Inferred role options: opener, groove, hook, pivot, lift, vocal_moment, texture_change, peak, resolution, closer, unknown
 
 Use energy:N/8 when present. When absent, reason from BPM, Camelot key, and list position:
 - Opener candidate: first 1–2 positions, energy 1–3/8 or lowest BPM relative to pool
 - Peak candidate: energy 7–8/8 or highest BPM
 - Closer candidate: last 1–2 positions
 
-missing_roles: list which of [opener, builder, peak, cleanser, closer] appear absent.
+missing_roles: list which of [opener, groove, peak, resolution, closer] appear absent.
 
 Risk tolerance — BPM spread and Camelot key spread across all seeds:
 - low: BPM spread < 10, mostly adjacent keys
@@ -288,24 +288,15 @@ def _parse_intent_brief(
     valid_tiers = {"anchor", "supporting", "optional"}
     valid_roles = {
         "opener",
-        "world_setter",
-        "groove_locker",
-        "early_hook",
-        "builder",
-        "connector",
+        "groove",
+        "hook",
         "pivot",
-        "pressure",
         "lift",
         "vocal_moment",
         "texture_change",
-        "cleanser",
-        "risk",
-        "weapon",
         "peak",
-        "post_peak",
         "resolution",
         "closer",
-        "utility",
         "unknown",
     }
     valid_risk = {"low", "medium", "high"}
@@ -1126,9 +1117,8 @@ can close a set only if its authority is strong enough to signal finality withou
 not certain it carries that weight, it is not the closer.
 - Each concept should have a thesis — not just a mood, but an intention. What does this set ask of the \
 room? The creative brief must answer this.
-- Assign each track a role. Choose from: opener, world-setter, groove-locker, early-hook, builder, \
-connector, pivot, pressure, lift, vocal-moment, texture-change, cleanser, risk, weapon, peak, \
-post-peak, resolution, closer, utility. A track may carry more than one role. Every track must have \
+- Assign each track a role. Choose from: opener, groove, hook, pivot, lift, vocal-moment, \
+texture-change, peak, resolution, closer. A track may carry more than one role. Every track must have \
 at least one — no roleless inclusions.
 - Before finalising the order, choose an explicit energy path for the concept: Slow Climb (controlled \
 build throughout), Wave (builds, releases, builds again — often the strongest default), Plateau With \
@@ -1137,16 +1127,16 @@ grabs attention, second stronger payoff), Front-Loaded Hook (immediate engagemen
 journey), Dark to Light (starts moody or tense, opens emotionally later), Light to Dark (starts \
 accessible, grows heavier or stranger). The chosen shape must be visible in the track sequence.
 - Think in sections. A coherent mix divides into five: Invitation (open the world, hook the listener, \
-avoid full peak — opener, world-setter, early-hook roles), Groove Lock (settle the rhythm, build trust \
-— groove-locker, builder, connector roles), Development (add contrast, increase tension or pressure — \
-pivot, pressure, lift, vocal-moment, texture-change roles), Peak/Payoff (strongest moment, not \
-necessarily the loudest — weapon, peak roles), Resolution (stabilise and close with intent — post-peak, \
-resolution, closer roles). Assign every track to a section before deciding the final order.
+avoid full peak — opener, hook roles), Groove Lock (settle the rhythm, build trust — groove role), \
+Development (add contrast, increase tension or pressure — pivot, lift, vocal-moment, texture-change \
+roles), Peak/Payoff (strongest moment, not necessarily the loudest — peak role), Resolution \
+(stabilise and close with intent — resolution, closer roles). Assign every track to a section before \
+deciding the final order.
 - Design an intentional energy curve that follows the chosen energy path. This need not be a single arc \
 — consider double peaks, plateau-and-release structures, or a false resolution before the final push. \
 The shape should feel inevitable in retrospect, not predictable in real time.
 - A set can sustain two or three genuine peak moments at most. Everything else is architecture that makes \
-those moments land. Do not load the tracklist with peak weapons — they cancel each other out and produce \
+those moments land. Do not load the tracklist with stacked peaks — they cancel each other out and produce \
 a set with no dynamic range.
 - Be aware of vocal density, percussion character, and production era across consecutive tracks. Avoid \
 creating a blend window where two active vocals are audible simultaneously — if the incoming vocal starts \
@@ -1248,8 +1238,7 @@ N. Artist — Title [Key · BPM] | Role: [role] | Why: [one short phrase] | Risk
 
 Assumptions: [only if material — [unverified] tracks, vocal clash, tight blend window. One line each. Omit section if nothing material.]
 
-Role options: opener, world-setter, groove-locker, early-hook, builder, connector, pivot, pressure, lift, \
-vocal-moment, texture-change, cleanser, risk, weapon, peak, post-peak, resolution, closer, utility.
+Role options: opener, groove, hook, pivot, lift, vocal-moment, texture-change, peak, resolution, closer.
 Risk: describe the transition risk into this track (not out of it). "none" if clean.
 Why: why this track at this moment — one phrase, no full sentences needed.
 
@@ -1371,8 +1360,7 @@ Excluded: [Artist — Title — reason for cutting]; [repeat per cut track. Omit
 Assumptions: [only if material — [unverified] tracks, vocal clash, tight blend window. One line each. \
 Omit section if nothing material.]
 
-Role options: opener, world-setter, groove-locker, early-hook, builder, connector, pivot, pressure, \
-lift, vocal-moment, texture-change, cleanser, risk, weapon, peak, post-peak, resolution, closer, utility.
+Role options: opener, groove, hook, pivot, lift, vocal-moment, texture-change, peak, resolution, closer.
 Risk: describe the transition risk into this track (not out of it). "none" if clean.
 Why: why this track at this moment — one phrase, no full sentences needed.
 
