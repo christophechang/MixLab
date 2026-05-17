@@ -50,6 +50,7 @@ from mixlab.models import (
     SeedTier,
     SetRole,
     Track,
+    TrackMode,
     Transition,
 )
 
@@ -770,6 +771,31 @@ _STAGE2_CANVAS_RULES = """\
 - Harmonic and BPM compatibility are helpers, not constraints.\n\
 - For transitions involving bridge or wildcard tracks, state the specific mechanism that makes it survivable.\
 """
+
+
+# Mode-specific Stage 2 framing fragments (#18). Appended to the genre-mode system prompt
+# (NOT playlist mode — that has its own Stage 0 intent brief). Each fragment is short,
+# additive creative direction — it does not replace any core prompt instruction.
+_STAGE2_MODE_FRAGMENT_UNPLAYED = """\
+\nMODE: UNPLAYED\n\
+The candidate pool consists of tracks the user has NOT played live. Your job is to surface material worth introducing into their sets — concepts that justify a debut. Prefer concepts that frame the unplayed tracks as discoveries rather than safe additions to a familiar mix. A concept here is most successful when the user finishes reading and thinks "I should have been playing these."\
+"""
+
+_STAGE2_MODE_FRAGMENT_PLAYED = """\
+\nMODE: PLAYED\n\
+The candidate pool consists of tracks the user has played live before. Familiarity is an asset — make sequencing moves you would not try with unknown material. Bolder Camelot jumps, sharper energy contrasts, and chapter pivots are more readily justified here. A concept here is most successful when the user finishes reading and thinks "I never put these together that way."\
+"""
+
+_STAGE2_MODE_FRAGMENT_ALL = """\
+\nMODE: ALL\n\
+The candidate pool contains both played and unplayed tracks. Tracks marked `unplayed` have never been performed live. Concepts that interleave played and unplayed material in deliberate combinations are most valuable — a known weapon supported by unplayed texture, or an unplayed peak earned by familiar groove-locks. Identify whether each concept leans played-anchored, unplayed-anchored, or balanced, and note this in the report's thesis line.\
+"""
+
+_STAGE2_MODE_FRAGMENTS: dict[TrackMode, str] = {
+    "unplayed": _STAGE2_MODE_FRAGMENT_UNPLAYED,
+    "played": _STAGE2_MODE_FRAGMENT_PLAYED,
+    "all": _STAGE2_MODE_FRAGMENT_ALL,
+}
 
 
 def select_shortlists_for_stage2(shortlists: list[MixConcept]) -> list[MixConcept]:
@@ -1913,6 +1939,7 @@ async def stage2_curate_and_report(
     canvases: list[MixCanvas] | None = None,
     concept_history: ConceptHistory | None = None,
     genre_intent: str | None = None,
+    mode: TrackMode | None = None,
     debug: bool = False,
 ) -> tuple[list[MixConcept], str]:
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -2078,6 +2105,10 @@ async def stage2_curate_and_report(
     stage2_system = _STAGE2_SYSTEM_PLAYLIST_SELECTION if playlist_name is not None else _STAGE2_SYSTEM_SELECTION
     if canvases is not None and playlist_name is None:
         stage2_system = stage2_system + _STAGE2_CANVAS_RULES
+    # Mode-specific Stage 2 fragment (#18). Playlist mode has its own Stage 0 intent brief
+    # path, so the mode-fragment is genre-mode only.
+    if playlist_name is None and mode is not None:
+        stage2_system = stage2_system + _STAGE2_MODE_FRAGMENTS[mode]
     _name_dedup_sentinel = 'The name should make someone curious, not nod in recognition. Add a "name_reason" field'
     if used_mix_names:
         assert _name_dedup_sentinel in stage2_system, (

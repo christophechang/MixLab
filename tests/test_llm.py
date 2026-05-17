@@ -997,6 +997,134 @@ async def test_stage2_genre_intent_blank_string_emits_no_block(monkeypatch: pyte
 
 
 @respx.mock
+async def test_stage2_mode_fragment_unplayed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mode='unplayed' must append the unplayed framing to the genre-mode system prompt."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, mode="unplayed")
+
+    body = json.loads(route.calls[0].request.content)
+    system_prompt: str = body["system"]
+    assert "MODE: UNPLAYED" in system_prompt
+    assert "tracks the user has NOT played live" in system_prompt
+    assert "MODE: PLAYED" not in system_prompt
+    assert "MODE: ALL" not in system_prompt
+
+
+@respx.mock
+async def test_stage2_mode_fragment_played(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, mode="played")
+
+    body = json.loads(route.calls[0].request.content)
+    system_prompt: str = body["system"]
+    assert "MODE: PLAYED" in system_prompt
+    assert "Familiarity is an asset" in system_prompt
+    assert "MODE: UNPLAYED" not in system_prompt
+    assert "MODE: ALL" not in system_prompt
+
+
+@respx.mock
+async def test_stage2_mode_fragment_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, mode="all")
+
+    body = json.loads(route.calls[0].request.content)
+    system_prompt: str = body["system"]
+    assert "MODE: ALL" in system_prompt
+    assert "interleave played and unplayed material" in system_prompt
+    assert "MODE: UNPLAYED" not in system_prompt
+    assert "MODE: PLAYED" not in system_prompt
+
+
+@respx.mock
+async def test_stage2_mode_fragment_absent_when_mode_not_supplied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default (mode=None) leaves the system prompt without any MODE: fragment."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    body = json.loads(route.calls[0].request.content)
+    system_prompt: str = body["system"]
+    assert "MODE: UNPLAYED" not in system_prompt
+    assert "MODE: PLAYED" not in system_prompt
+    assert "MODE: ALL" not in system_prompt
+
+
+@respx.mock
+async def test_stage2_mode_fragment_not_injected_in_playlist_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Playlist mode has its own Stage 0 intent path — mode fragment must not leak in."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset({"1"}),
+        seed_track_ids=["1"],
+        mode="played",
+    )
+
+    body = json.loads(route.calls[0].request.content)
+    system_prompt: str = body["system"]
+    assert "MODE: PLAYED" not in system_prompt
+    assert "MODE: UNPLAYED" not in system_prompt
+    assert "MODE: ALL" not in system_prompt
+
+
+@respx.mock
 async def test_stage2_marks_only_unplayed_tracks_when_unplayed_ids_provided(monkeypatch: pytest.MonkeyPatch) -> None:
     """When unplayed_ids is provided, only those tracks get the 'unplayed' marker — not all tracks."""
     from mixlab.llm import stage2_curate_and_report

@@ -667,6 +667,7 @@ async def run(
         unplayed_ids=unplayed_ids_for_stage2,
         concept_history=history,
         genre_intent=intent,
+        mode=mode,
         debug=debug,
     )
     if not all_concepts:
