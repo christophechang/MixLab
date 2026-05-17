@@ -2563,6 +2563,102 @@ def test_validate_stage2_output_camelot_jump_warning() -> None:
     assert any("Camelot jump" in w for w in warnings)
 
 
+def test_validate_stage2_output_bpm_jump_suppressed_when_transition_is_risky_and_justified() -> None:
+    from mixlab.llm import validate_stage2_output
+    from mixlab.models import Transition
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=200.0, camelot_key="8A", genre="DnB"),  # jump=26
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=200.0, camelot_key="8A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(
+        title="T",
+        mood="dark",
+        track_ids=ids,
+        transitions=[Transition(from_id="1", to_id="2", is_risky=True, risk_type="chapter_pivot")],
+    )
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert not any("BPM jump" in w for w in warnings)
+
+
+def test_validate_stage2_output_camelot_jump_suppressed_when_transition_is_risky_and_justified() -> None:
+    from mixlab.llm import validate_stage2_output
+    from mixlab.models import Transition
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="1A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=174.0, camelot_key="8B", genre="DnB"),  # dist=6
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=174.0, camelot_key="8B", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(
+        title="T",
+        mood="dark",
+        track_ids=ids,
+        transitions=[Transition(from_id="1", to_id="2", is_risky=True, risk_type="chapter_pivot")],
+    )
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert not any("Camelot jump" in w for w in warnings)
+
+
+def test_validate_stage2_output_bpm_jump_still_warns_when_is_risky_but_risk_type_empty() -> None:
+    from mixlab.llm import validate_stage2_output
+    from mixlab.models import Transition
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=200.0, camelot_key="8A", genre="DnB"),  # jump=26
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=200.0, camelot_key="8A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(
+        title="T",
+        mood="dark",
+        track_ids=ids,
+        transitions=[Transition(from_id="1", to_id="2", is_risky=True, risk_type="")],
+    )
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("BPM jump" in w for w in warnings)
+
+
+def test_validate_stage2_output_camelot_jump_still_warns_when_is_risky_but_risk_type_empty() -> None:
+    from mixlab.llm import validate_stage2_output
+    from mixlab.models import Transition
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="1A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=174.0, camelot_key="8B", genre="DnB"),  # dist=6
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=174.0, camelot_key="8B", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(
+        title="T",
+        mood="dark",
+        track_ids=ids,
+        transitions=[Transition(from_id="1", to_id="2", is_risky=True, risk_type="")],
+    )
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("Camelot jump" in w for w in warnings)
+
+
 def test_validate_stage2_output_artist_repeat_warning() -> None:
     from mixlab.llm import validate_stage2_output
 

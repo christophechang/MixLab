@@ -993,19 +993,24 @@ def validate_stage2_output(
             if count >= 3:
                 warnings.append(f"{label} artist '{artist}' appears {count} times")
 
+        # Suppress BPM/Camelot jump warnings when the corresponding transition is annotated
+        # as a justified risk (is_risky=True with non-empty risk_type). Mirrors the
+        # bridge/wildcard role-check pattern below.
+        transition_map = {(t.from_id, t.to_id): t for t in concept.transitions}
         for i in range(len(seq) - 1):
             a, b = seq[i], seq[i + 1]
+            tr = transition_map.get((a.track_id, b.track_id))
+            justified_risk = tr is not None and tr.is_risky and tr.risk_type != ""
             bpm_jump = abs(a.bpm - b.bpm)
-            if bpm_jump > 15:
+            if bpm_jump > 15 and not justified_risk:
                 warnings.append(
                     f"{label} BPM jump {bpm_jump:.1f} between {a.artist} — {a.title} and {b.artist} — {b.title}"
                 )
             cam_dist = camelot_distance(a.camelot_key, b.camelot_key)
-            if cam_dist > 4:
+            if cam_dist > 4 and not justified_risk:
                 warnings.append(f"{label} Camelot jump {cam_dist} between {a.camelot_key} and {b.camelot_key}")
 
         # Bridge/wildcard tracks used without is_risky flag
-        transition_map = {(t.from_id, t.to_id): t for t in concept.transitions}
         for i in range(len(seq) - 1):
             to_id = seq[i + 1].track_id
             if to_id in bridge_ids or to_id in wildcard_ids:
