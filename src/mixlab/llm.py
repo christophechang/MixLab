@@ -721,6 +721,10 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
             f"(share: {canvas.label_share:.2f}, label_coherence: {canvas.score.label_coherence:.2f})"
         )
 
+    if canvas.concept_anchor_candidates:
+        anchor_parts = " ".join(f"ID:{a.track_id} [{a.anchor_type}]" for a in canvas.concept_anchor_candidates)
+        lines.append(f"Concept anchors (structural exceptions): {anchor_parts}")
+
     contrast_parts = []
     if c.vocal_moments:
         contrast_parts.append(f"Vocal: {ids_block(c.vocal_moments)}")
@@ -782,7 +786,8 @@ _STAGE2_CANVAS_RULES = """\
 - Not every mix needs every role.\n\
 - Harmonic and BPM compatibility are helpers, not constraints.\n\
 - For transitions involving bridge or wildcard tracks, state the specific mechanism that makes it survivable.\n\
-- Anchor candidates shown on the canvas header (Anchors:) are tracks the system has identified as distinctive or identity-defining based on provenance, library rarity, and pool centrality. Prefer including one anchor in each concept's tracklist — the concept will feel more rooted. This is preference, not requirement; a concept built entirely from non-anchor tracks is acceptable if the narrative is stronger without anchor inclusion.\
+- Anchor candidates shown on the canvas header (Anchors:) are tracks the system has identified as distinctive or identity-defining based on provenance, library rarity, and pool centrality. Prefer including one anchor in each concept's tracklist — the concept will feel more rooted. This is preference, not requirement; a concept built entirely from non-anchor tracks is acceptable if the narrative is stronger without anchor inclusion.\n\
+- Concept anchor candidates (Concept anchors: line) are bridge/wildcard tracks flagged as structurally interesting exceptions, tagged [peak], [identity], or [structural-exception]. If you use one in a structural role (opener, closer, pivot, reset, peak), name the specific role and why this track earns it. If you use a bridge/wildcard track that is not in this list, the bar for justification is higher — explain explicitly what concept-defining function it serves.\
 """
 
 
@@ -1065,6 +1070,17 @@ def validate_stage2_output(
                 pool = "bridge" if to_id in bridge_ids else "wildcard"
                 if tr is None or (not tr.is_risky and tr.risk_type == ""):
                     warnings.append(f"{label} {pool} track ID {to_id} used without a justified transition")
+
+        # Wildcard used in any role but not flagged as a concept-anchor candidate (#10).
+        # Wildcard inclusion outside the anchor list raises the bar for justification.
+        canvas_for_concept_anchors = _match_canvas_for_concept(concept, canvases)
+        if canvas_for_concept_anchors is not None:
+            anchor_track_ids = {a.track_id for a in canvas_for_concept_anchors.concept_anchor_candidates}
+            for tid in concept.track_ids:
+                if tid in wildcard_ids and tid not in anchor_track_ids:
+                    warnings.append(
+                        f"{label} wildcard track ID {tid} used but not flagged as a concept-anchor candidate"
+                    )
 
         # DJ-structural warnings: opener/closer presence, peak, wind-down, role-family runs,
         # energy bands. Genre-aware and arc_type-aware softening for soft-tier checks.

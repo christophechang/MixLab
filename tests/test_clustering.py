@@ -948,6 +948,93 @@ def test_build_mix_canvas_dominant_label_above_share_threshold() -> None:
     assert s.label_coherence > 0.0
 
 
+# ---------------------------------------------------------------------------
+# Concept-anchor candidates (#10)
+# ---------------------------------------------------------------------------
+
+
+def _wildcard_track(
+    track_id: str,
+    *,
+    bpm: float = 195.0,
+    camelot: str = "12A",
+    label: str = "",
+    artist: str = "Artist",
+    energy: int | None = None,
+) -> Track:
+    """Build a track far enough from 172 BPM to land in the wildcard tier."""
+    return Track(
+        track_id=track_id,
+        artist=artist,
+        title=f"Wild {track_id}",
+        bpm=bpm,
+        camelot_key=camelot,
+        genre="Drum & Bass",
+        label=label,
+        energy=energy,
+    )
+
+
+def test_concept_anchor_identity_anchor_from_distinctive_label() -> None:
+    from mixlab.models import MixCanvas
+
+    # 12 core tracks on common label + 1 wildcard on a unique label → identity anchor.
+    core = [_anchor_track(f"c{i:02d}", bpm=172.0 + (i * 0.05), label="Common") for i in range(12)]
+    wild = _wildcard_track("wild1", bpm=200.0, camelot="9B", label="Rare Imprint", artist="Solo Artist")
+    tracks = core + [wild]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    ids = {a.track_id: a.anchor_type for a in canvas.concept_anchor_candidates}
+    assert "wild1" in ids
+    assert ids["wild1"] == "identity"
+
+
+def test_concept_anchor_peak_anchor_from_high_energy_wildcard() -> None:
+    from mixlab.models import MixCanvas
+
+    core = [_anchor_track(f"c{i:02d}", bpm=172.0 + (i * 0.05), label="Common") for i in range(12)]
+    wild = _wildcard_track("wildPeak", bpm=200.0, camelot="4A", label="Common", energy=7)
+    tracks = core + [wild]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    ids = {a.track_id: a.anchor_type for a in canvas.concept_anchor_candidates}
+    assert "wildPeak" in ids
+    assert ids["wildPeak"] == "peak"
+
+
+def test_concept_anchor_empty_when_no_exceptional_tracks() -> None:
+    from mixlab.models import MixCanvas
+
+    # All-core canvas with no bridge/wildcard tracks → no anchor candidates.
+    tracks = [_anchor_track(f"c{i:02d}", bpm=172.0 + (i * 0.05), label="Common") for i in range(12)]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    assert canvas.concept_anchor_candidates == []
+
+
+def test_concept_anchor_canvas_label_rarity_is_primary() -> None:
+    """Within-canvas rarity drives identity flag even when the label is common in the collection."""
+    from mixlab.models import MixCanvas
+
+    # Wildcard label appears once in canvas. Same label appears many times in the wider
+    # collection — within-canvas rarity should still be the dominant identity signal.
+    core = [_anchor_track(f"c{i:02d}", bpm=172.0 + (i * 0.05), label="HouseLabel") for i in range(12)]
+    wild = _wildcard_track("wild_loner", bpm=200.0, camelot="9B", label="SoloIn", artist="SoloArtist")
+    canvas_tracks = core + [wild]
+    # Wider collection adds many tracks on "SoloIn" so collection-level rarity is low.
+    collection = {t.track_id: t for t in canvas_tracks}
+    for i in range(40):
+        collection[f"coll_{i}"] = _anchor_track(f"coll_{i}", label="SoloIn", artist="SoloArtist")
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in canvas_tracks])
+    canvas = build_mix_canvas(concept, collection)
+    assert isinstance(canvas, MixCanvas)
+    ids = {a.track_id: a.anchor_type for a in canvas.concept_anchor_candidates}
+    assert ids.get("wild_loner") == "identity"
+
+
 def test_build_mix_canvas_no_dominant_label_when_scattered() -> None:
     from mixlab.models import MixCanvas
 

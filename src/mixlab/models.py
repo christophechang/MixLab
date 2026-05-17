@@ -110,6 +110,22 @@ class CanvasScore:
     overall: float = 0.0
 
 
+ConceptAnchorType = Literal["peak", "identity", "structural-exception"]
+
+
+@dataclass(frozen=True)
+class ConceptAnchorCandidate:
+    """A bridge/wildcard track flagged as a structurally exceptional pick (#10).
+
+    The category indicates the dominant reason the system flagged the track —
+    Stage 2 still chooses whether and how to use it, but the tag lets the model
+    skip rederiving the signal from per-track metadata.
+    """
+
+    track_id: str
+    anchor_type: ConceptAnchorType
+
+
 @dataclass(frozen=True)
 class ConceptShape:
     """Deterministic shape fingerprint of a concept for shape-novelty scoring (#7).
@@ -153,6 +169,10 @@ class MixCanvas:
     era_window: tuple[int, int] | None = None
     dominant_label: str | None = None
     label_share: float = 0.0
+    # Bridge/wildcard tracks flagged as structurally exceptional (#10). Surfaces in
+    # the Stage 2 canvas header so the model can deliberately use them in structural
+    # roles. Empty when no off-core track crosses the multi-signal threshold.
+    concept_anchor_candidates: list[ConceptAnchorCandidate] = field(default_factory=list)
 
 
 SeedTier = Literal["anchor", "supporting", "optional"]

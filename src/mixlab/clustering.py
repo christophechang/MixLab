@@ -30,6 +30,8 @@ from mixlab.models import (
     BpmPools,
     CanvasRoleCandidates,
     CanvasScore,
+    ConceptAnchorCandidate,
+    ConceptAnchorType,
     ContrastAssets,
     MixCanvas,
     MixConcept,
@@ -452,6 +454,107 @@ def _compute_dominant_label(core: list[Track]) -> tuple[str | None, float, float
     return top_label, round(share, 4), round(coherence, 4)
 
 
+# Concept-anchor candidate detection (#10). Multi-signal scoring over bridge/wildcard
+# tracks to surface structurally exceptional picks that Stage 2 might otherwise
+# overlook. Three categories — peak, identity, structural-exception — driven by
+# different signals so the tag tells Stage 2 *why* the track was flagged.
+_CONCEPT_ANCHOR_THRESHOLD = 0.40
+_CONCEPT_ANCHOR_PEAK_ENERGY = 6
+_CONCEPT_ANCHOR_LOW_ENERGY = 3
+_CONCEPT_ANCHOR_COLLECTION_RARITY_FLOOR = 20
+
+
+def _concept_anchor_signals(
+    track: Track,
+    canvas_tracks: list[Track],
+    collection: dict[str, Track],
+    roles: CanvasRoleCandidates,
+    dominant_camelot: str,
+) -> tuple[float, ConceptAnchorType]:
+    """Score a bridge/wildcard track and pick the dominant anchor category.
+
+    Composite score in [0, 1] aggregates role-fit, within-canvas label/artist rarity,
+    collection-level rarity, harmonic contrast vs the dominant key, and energy-role
+    fit. Category is determined by which signal cluster is dominant — peak when the
+    track sits at the top of the energy band, identity when label/artist distinctiveness
+    leads, structural-exception when role-fit leads (default).
+    """
+    role_fit = 0.0
+    if track.track_id in roles.opener:
+        role_fit = max(role_fit, 0.40)
+    if track.track_id in roles.closer:
+        role_fit = max(role_fit, 0.40)
+    if track.track_id in roles.pivot:
+        role_fit = max(role_fit, 0.30)
+    if track.track_id in roles.peak:
+        role_fit = max(role_fit, 0.30)
+
+    from collections import Counter
+
+    canvas_label_counts = Counter(t.label for t in canvas_tracks if t.label)
+    canvas_artist_counts = Counter(t.artist for t in canvas_tracks if t.artist)
+    canvas_label_n = canvas_label_counts.get(track.label, 0)
+    canvas_artist_n = canvas_artist_counts.get(track.artist, 0)
+    canvas_label_rarity = max(0.0, 1.0 - max(0, canvas_label_n - 1) / 4.0) if track.label else 0.0
+    canvas_artist_rarity = max(0.0, 1.0 - max(0, canvas_artist_n - 1) / 4.0) if track.artist else 0.0
+
+    coll_label_n = sum(1 for t in collection.values() if track.label and t.label == track.label)
+    coll_artist_n = sum(1 for t in collection.values() if track.artist and t.artist == track.artist)
+    coll_label_rarity = max(0.0, 1.0 - max(0, coll_label_n - 1) / _CONCEPT_ANCHOR_COLLECTION_RARITY_FLOOR)
+    coll_artist_rarity = max(0.0, 1.0 - max(0, coll_artist_n - 1) / _CONCEPT_ANCHOR_COLLECTION_RARITY_FLOOR)
+
+    contrast = 0.0
+    if dominant_camelot and camelot_distance(track.camelot_key, dominant_camelot) >= 3:
+        contrast = 0.5
+
+    energy_peak_signal = 0.0
+    energy_low_signal = 0.0
+    if track.energy is not None:
+        if track.energy >= _CONCEPT_ANCHOR_PEAK_ENERGY:
+            energy_peak_signal = 0.4
+        elif track.energy <= _CONCEPT_ANCHOR_LOW_ENERGY:
+            energy_low_signal = 0.3
+
+    # Identity score: within-canvas rarity primary, collection rarity additive bonus.
+    identity_signal = 0.7 * max(canvas_label_rarity, canvas_artist_rarity) + 0.3 * max(
+        coll_label_rarity, coll_artist_rarity
+    )
+
+    composite = min(
+        1.0,
+        max(role_fit, identity_signal, energy_peak_signal, energy_low_signal, contrast),
+    )
+
+    # Category: pick the dominant cluster. Peak energy and identity beat plain role-fit
+    # so the tag stays informative for Stage 2.
+    if energy_peak_signal > 0 and energy_peak_signal >= identity_signal:
+        category: ConceptAnchorType = "peak"
+    elif identity_signal >= max(role_fit, contrast):
+        category = "identity"
+    else:
+        category = "structural-exception"
+    return composite, category
+
+
+def _detect_concept_anchors(
+    pools: BpmPools,
+    tracks_by_id: dict[str, Track],
+    roles: CanvasRoleCandidates,
+    dominant_camelot: str,
+) -> list[ConceptAnchorCandidate]:
+    """Score every bridge/wildcard track and return those clearing the threshold."""
+    off_core = list(pools.bridge) + list(pools.wildcard)
+    if not off_core:
+        return []
+    canvas_tracks = list(pools.core) + off_core
+    candidates: list[ConceptAnchorCandidate] = []
+    for track in off_core:
+        score, category = _concept_anchor_signals(track, canvas_tracks, tracks_by_id, roles, dominant_camelot)
+        if score >= _CONCEPT_ANCHOR_THRESHOLD:
+            candidates.append(ConceptAnchorCandidate(track_id=track.track_id, anchor_type=category))
+    return candidates
+
+
 def _era_coherence_from_window(window: tuple[int, int] | None) -> float:
     """Coherence value for a precomputed (min_year, max_year) tuple."""
     if window is None:
@@ -615,6 +718,7 @@ def build_mix_canvas(
 
     era_window, _ = _compute_era_window(pools.core)
     dominant_label, label_share, _ = _compute_dominant_label(pools.core)
+    concept_anchor_candidates = _detect_concept_anchors(pools, tracks_by_id, roles, dominant_camelot)
 
     genre = tracks[0].genre if tracks else ""
 
@@ -636,6 +740,7 @@ def build_mix_canvas(
         era_window=era_window,
         dominant_label=dominant_label,
         label_share=label_share,
+        concept_anchor_candidates=concept_anchor_candidates,
     )
 
 
