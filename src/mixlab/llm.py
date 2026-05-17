@@ -1,3 +1,24 @@
+"""Stage 0, Stage 1, and Stage 2 LLM orchestration.
+
+Stage 0 (playlist mode only) extracts a DJ intent brief from the seed playlist using a
+free-provider cascade.
+
+Stage 1 pre-screens tracks into shortlists of 15–25 candidates per concept. Cheap and
+high-volume — runs through the free-provider cascade (Groq → Gemini → Mistral) with
+graceful fallback.
+
+Stage 2 is the creative curation pass. It receives Mix Canvases (or, in playlist mode,
+zone shortlists), selects and orders 8–14 tracks, assigns per-track roles, picks an
+energy arc, and writes the prose mix report. Runs on Claude Sonnet 4.6 in two passes:
+``_call_stage2_raw`` for the selection JSON, then ``_call_stage2_reports`` for the
+per-concept prose. The split keeps each JSON output under 8K tokens and lets the
+report pass run at higher temperature.
+
+``validate_stage2_output`` runs after Stage 2 to surface warn-only structural and
+technical issues. It never aborts a run. See ``docs/architecture/mix-canvas.md`` §11
+for the validation philosophy.
+"""
+
 from __future__ import annotations
 
 import asyncio

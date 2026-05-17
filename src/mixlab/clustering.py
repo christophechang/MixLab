@@ -1,3 +1,22 @@
+"""Mix Canvas pipeline — pool partitioning, role inference, scoring, and selection.
+
+This module turns a Stage 1 shortlist into a structured Mix Canvas: a deterministic
+post-processing layer that gives Stage 2 a vocabulary of materials (BPM tiers, role
+candidate pools, contrast assets, risk notes) rather than raw track lists.
+
+Key entry points:
+- ``partition_bpm_pools`` splits tracks into core/bridge/wildcard tiers around the
+  cluster median BPM.
+- ``build_mix_canvas`` wraps a Stage 1 ``MixConcept`` into a ``MixCanvas`` with role
+  candidates, contrast assets, and risk notes attached.
+- ``score_canvas`` produces a weighted scalar score across six dimensions plus two
+  penalty terms (weakness_penalty, floor_multiplier).
+- ``select_canvases`` greedily picks the top-N canvases with overlap-aware re-scoring.
+
+See ``docs/architecture/mix-canvas.md`` for the full design rationale, weight
+provenance, and pipeline overview.
+"""
+
 from __future__ import annotations
 
 import math
