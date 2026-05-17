@@ -41,6 +41,8 @@ from mixlab.history import ConceptHistory, format_recent_concepts
 from mixlab.models import (
     ArcType,
     CompletionVariant,
+    Critique,
+    CritiqueVerdict,
     DJPracticalityScore,
     IntentBrief,
     MixCanvas,
@@ -167,14 +169,14 @@ Tier definitions:
 - supporting: tracks that serve the arc; keep by default, replaceable with musical reason.
 - optional: filler or candidates — lowest priority to retain.
 
-Inferred role options: opener, world_setter, groove_locker, early_hook, builder, connector, pivot, pressure, lift, vocal_moment, texture_change, cleanser, risk, weapon, peak, post_peak, resolution, closer, utility, unknown
+Inferred role options: opener, groove, hook, pivot, lift, vocal_moment, texture_change, peak, resolution, closer, unknown
 
 Use energy:N/8 when present. When absent, reason from BPM, Camelot key, and list position:
 - Opener candidate: first 1–2 positions, energy 1–3/8 or lowest BPM relative to pool
 - Peak candidate: energy 7–8/8 or highest BPM
 - Closer candidate: last 1–2 positions
 
-missing_roles: list which of [opener, builder, peak, cleanser, closer] appear absent.
+missing_roles: list which of [opener, groove, peak, resolution, closer] appear absent.
 
 Risk tolerance — BPM spread and Camelot key spread across all seeds:
 - low: BPM spread < 10, mostly adjacent keys
@@ -288,24 +290,15 @@ def _parse_intent_brief(
     valid_tiers = {"anchor", "supporting", "optional"}
     valid_roles = {
         "opener",
-        "world_setter",
-        "groove_locker",
-        "early_hook",
-        "builder",
-        "connector",
+        "groove",
+        "hook",
         "pivot",
-        "pressure",
         "lift",
         "vocal_moment",
         "texture_change",
-        "cleanser",
-        "risk",
-        "weapon",
         "peak",
-        "post_peak",
         "resolution",
         "closer",
-        "utility",
         "unknown",
     }
     valid_risk = {"low", "medium", "high"}
@@ -846,13 +839,17 @@ def select_shortlists_for_playlist_stage2(
 _DNB_GENRES = frozenset({"drum_and_bass", "jungle", "dnb", "170"})
 _UK_GENRES = frozenset({"uk_bass", "uk_garage", "breakbeat", "140"})
 _ELECTRONICA_GENRES = frozenset({"electronica"})
+# 4/4 sustained-groove genres (#27). House and techno sets routinely hold energy 5–7
+# across many tracks without dropping — that's the form, not a structural problem.
+# Suppresses the no-peak, no-wind-down, and all-high-energy soft-tier warnings the
+# way DnB does for sustained pressure.
+_SUSTAINED_GROOVE_GENRES = frozenset({"house", "techno", "4x4"})
 
 # arc_type values that justify specific structural absences. Soft-tier warnings are
 # suppressed when the concept's arc_type explicitly declares the structure.
 _ARC_TYPES_NO_PEAK_OK = frozenset({"plateau", "sustained-pressure"})
 _ARC_TYPES_NO_WIND_DOWN_OK = frozenset({"plateau", "sustained-pressure"})
 _ARC_TYPES_ALL_HIGH_ENERGY_OK = frozenset({"plateau", "sustained-pressure"})
-_ARC_TYPES_ROLE_FAMILY_RUN_OK = frozenset({"plateau"})
 
 # Regex catching generic [Adjective][Noun] mix titles that the Stage 2 prompt
 # explicitly forbids (e.g. "Warm Gravity", "Orbital Descent"). Triggers a
@@ -868,27 +865,6 @@ _GENERIC_NAME_RE = re.compile(
 )
 
 
-def _classify_track_roles(track_ids: list[str], canvas: MixCanvas) -> list[str]:
-    """Assign each concept track a role label based on canvas role-candidate pools."""
-    role_pools: dict[str, set[str]] = {
-        "opener": set(canvas.roles.opener),
-        "closer": set(canvas.roles.closer),
-        "peak": set(canvas.roles.peak),
-        "builder": set(canvas.roles.builder),
-        "groove_locker": set(canvas.roles.groove_locker),
-        "pivot": set(canvas.roles.pivot),
-    }
-    classified: list[str] = []
-    for tid in track_ids:
-        for role in ("opener", "closer", "peak", "builder", "groove_locker", "pivot"):
-            if tid in role_pools[role]:
-                classified.append(role)
-                break
-        else:
-            classified.append("unknown")
-    return classified
-
-
 def _structural_warnings(
     concept: MixConcept,
     canvas: MixCanvas,
@@ -897,51 +873,33 @@ def _structural_warnings(
 ) -> list[str]:
     """DJ-structural quality checks. Warn-only; suppresses warnings when genre or
     concept.arc_type explicitly justifies the structure.
+
+    Note (#27): the previous canvas-pool-based opener/closer/peak/role-family-run
+    checks fired on virtually every real-run concept because Stage 2's creative role
+    picks routinely disagree with the energy-band heuristic ``_infer_roles`` uses to
+    populate ``canvas.roles``. Those checks have been demoted to advisory and removed
+    from warning output. Energy-band checks (all-high / all-low) remain because they
+    are independent of role classification.
     """
     warnings: list[str] = []
     if not concept.track_ids:
         return warnings
     label = f"[{concept.title}]"
 
-    # Skip all structural checks when the canvas has no role data at all. This shows up
-    # in legacy fixtures and in cases where role inference produced nothing useful — we
-    # do not want to fire false positives on every track when there is no signal to
-    # check against.
-    if not any(
-        (
-            canvas.roles.opener,
-            canvas.roles.closer,
-            canvas.roles.peak,
-            canvas.roles.builder,
-            canvas.roles.groove_locker,
-            canvas.roles.pivot,
-        )
-    ):
-        return warnings
-
     is_dnb = genre in _DNB_GENRES
-    is_uk = genre in _UK_GENRES
     is_electronica = genre in _ELECTRONICA_GENRES
+    is_sustained_groove = genre in _SUSTAINED_GROOVE_GENRES
     arc_type = concept.arc_type  # may be None
-    role_seq = _classify_track_roles(concept.track_ids, canvas)
     concept_id_set = set(concept.track_ids)
 
-    # STRONG tier — always fires regardless of genre/arc_type.
-    # Check 1: opener role in first 1-2 positions.
-    if "opener" not in role_seq[:2]:
-        warnings.append(f"{label} no opener-role track in first 2 positions")
-    # Check 2: closer role in last 1-2 positions.
-    if "closer" not in role_seq[-2:]:
-        warnings.append(f"{label} no closer-role track in last 2 positions")
-
     # SOFT tier — softened by genre and arc_type.
-    # Check 3: no peak in sequence (only when peak pool exists — empty pool is no signal).
+    # No peak in sequence (only when peak pool exists — empty pool is no signal).
     if canvas.roles.peak:
         has_peak = bool(concept_id_set & set(canvas.roles.peak))
-        if not has_peak and arc_type not in _ARC_TYPES_NO_PEAK_OK and not is_electronica:
+        if not has_peak and arc_type not in _ARC_TYPES_NO_PEAK_OK and not is_electronica and not is_sustained_groove:
             warnings.append(f"{label} no peak-role track in sequence")
 
-    # Check 4: no wind-down before closer. Approximated as final three tracks all energy > 4.
+    # No wind-down before closer. Approximated as final three tracks all energy > 4.
     last_three_tracks = [tracks_by_id.get(tid) for tid in concept.track_ids[-3:]]
     last_three_energies = [t.energy for t in last_three_tracks if t and t.energy is not None]
     if (
@@ -949,32 +907,17 @@ def _structural_warnings(
         and all(e > 4 for e in last_three_energies)
         and arc_type not in _ARC_TYPES_NO_WIND_DOWN_OK
         and not is_dnb
+        and not is_sustained_groove
     ):
         warnings.append(f"{label} no wind-down in final 3 tracks (all energy >4/8)")
 
-    # Check 5: three or more consecutive tracks from the same role family.
-    if arc_type not in _ARC_TYPES_ROLE_FAMILY_RUN_OK and not is_uk:
-        run_start = 0
-        for i in range(1, len(role_seq) + 1):
-            if i == len(role_seq) or role_seq[i] != role_seq[run_start]:
-                run_len = i - run_start
-                if run_len >= 3 and role_seq[run_start] not in ("unknown", "opener", "closer"):
-                    warnings.append(
-                        f"{label} {run_len} consecutive {role_seq[run_start]} tracks (positions "
-                        f"{run_start + 1}-{run_start + run_len})"
-                    )
-                    break
-                run_start = i
-
-    # Check 6 — already covered by check 2 (closer in last 1-2 positions).
-
-    # Check 7: all tracks in the same energy band (no dynamic range).
+    # All tracks in the same energy band (no dynamic range).
     energies = [
         t.energy for t in (tracks_by_id.get(tid) for tid in concept.track_ids) if t is not None and t.energy is not None
     ]
     if energies:
         if all(e >= 6 for e in energies):
-            if arc_type not in _ARC_TYPES_ALL_HIGH_ENERGY_OK and not is_dnb:
+            if arc_type not in _ARC_TYPES_ALL_HIGH_ENERGY_OK and not is_dnb and not is_sustained_groove:
                 warnings.append(f"{label} all tracks high-energy (≥6/8) — no dynamic range")
         elif all(e <= 3 for e in energies) and arc_type not in ("plateau",):
             warnings.append(f"{label} all tracks low-energy (≤3/8) — no dynamic range")
@@ -1126,9 +1069,8 @@ can close a set only if its authority is strong enough to signal finality withou
 not certain it carries that weight, it is not the closer.
 - Each concept should have a thesis — not just a mood, but an intention. What does this set ask of the \
 room? The creative brief must answer this.
-- Assign each track a role. Choose from: opener, world-setter, groove-locker, early-hook, builder, \
-connector, pivot, pressure, lift, vocal-moment, texture-change, cleanser, risk, weapon, peak, \
-post-peak, resolution, closer, utility. A track may carry more than one role. Every track must have \
+- Assign each track a role. Choose from: opener, groove, hook, pivot, lift, vocal-moment, \
+texture-change, peak, resolution, closer. A track may carry more than one role. Every track must have \
 at least one — no roleless inclusions.
 - Before finalising the order, choose an explicit energy path for the concept: Slow Climb (controlled \
 build throughout), Wave (builds, releases, builds again — often the strongest default), Plateau With \
@@ -1137,16 +1079,16 @@ grabs attention, second stronger payoff), Front-Loaded Hook (immediate engagemen
 journey), Dark to Light (starts moody or tense, opens emotionally later), Light to Dark (starts \
 accessible, grows heavier or stranger). The chosen shape must be visible in the track sequence.
 - Think in sections. A coherent mix divides into five: Invitation (open the world, hook the listener, \
-avoid full peak — opener, world-setter, early-hook roles), Groove Lock (settle the rhythm, build trust \
-— groove-locker, builder, connector roles), Development (add contrast, increase tension or pressure — \
-pivot, pressure, lift, vocal-moment, texture-change roles), Peak/Payoff (strongest moment, not \
-necessarily the loudest — weapon, peak roles), Resolution (stabilise and close with intent — post-peak, \
-resolution, closer roles). Assign every track to a section before deciding the final order.
+avoid full peak — opener, hook roles), Groove Lock (settle the rhythm, build trust — groove role), \
+Development (add contrast, increase tension or pressure — pivot, lift, vocal-moment, texture-change \
+roles), Peak/Payoff (strongest moment, not necessarily the loudest — peak role), Resolution \
+(stabilise and close with intent — resolution, closer roles). Assign every track to a section before \
+deciding the final order.
 - Design an intentional energy curve that follows the chosen energy path. This need not be a single arc \
 — consider double peaks, plateau-and-release structures, or a false resolution before the final push. \
 The shape should feel inevitable in retrospect, not predictable in real time.
 - A set can sustain two or three genuine peak moments at most. Everything else is architecture that makes \
-those moments land. Do not load the tracklist with peak weapons — they cancel each other out and produce \
+those moments land. Do not load the tracklist with stacked peaks — they cancel each other out and produce \
 a set with no dynamic range.
 - Be aware of vocal density, percussion character, and production era across consecutive tracks. Avoid \
 creating a blend window where two active vocals are audible simultaneously — if the incoming vocal starts \
@@ -1248,8 +1190,7 @@ N. Artist — Title [Key · BPM] | Role: [role] | Why: [one short phrase] | Risk
 
 Assumptions: [only if material — [unverified] tracks, vocal clash, tight blend window. One line each. Omit section if nothing material.]
 
-Role options: opener, world-setter, groove-locker, early-hook, builder, connector, pivot, pressure, lift, \
-vocal-moment, texture-change, cleanser, risk, weapon, peak, post-peak, resolution, closer, utility.
+Role options: opener, groove, hook, pivot, lift, vocal-moment, texture-change, peak, resolution, closer.
 Risk: describe the transition risk into this track (not out of it). "none" if clean.
 Why: why this track at this moment — one phrase, no full sentences needed.
 
@@ -1371,8 +1312,7 @@ Excluded: [Artist — Title — reason for cutting]; [repeat per cut track. Omit
 Assumptions: [only if material — [unverified] tracks, vocal clash, tight blend window. One line each. \
 Omit section if nothing material.]
 
-Role options: opener, world-setter, groove-locker, early-hook, builder, connector, pivot, pressure, \
-lift, vocal-moment, texture-change, cleanser, risk, weapon, peak, post-peak, resolution, closer, utility.
+Role options: opener, groove, hook, pivot, lift, vocal-moment, texture-change, peak, resolution, closer.
 Risk: describe the transition risk into this track (not out of it). "none" if clean.
 Why: why this track at this moment — one phrase, no full sentences needed.
 
@@ -1380,6 +1320,50 @@ Be opinionated, musical, and honest. Peer-to-peer, no marketing language, no fil
 
 Return ONLY the report text. No JSON, no markdown fences, no preamble.\
 """
+
+
+# Stage 2 self-critique (opt-in via --deep, #22). Runs between the selection pass and
+# the report pass. Output is surfaced in the report — never auto-applied — so the
+# user sees the critique alongside the original concept and decides whether to ship
+# as-is or revise.
+_STAGE2_CRITIQUE_SYSTEM = """\
+You curated this concept moments ago. Review it as a peer DJ would.
+
+Check the following honestly. Be peer-to-peer. No marketing language. No filler. \
+If a check passes, do not mention it.
+
+- Does the opener actually satisfy the opener specification ("rewards attention without \
+requiring it; no track demanding full engagement in its first 32 bars")? Or is it too \
+hot too early?
+- Does the closer actually signal finality? Could you mix out of it cleanly?
+- Does the stated energy path match the actual sequence? Trace the energy values \
+track-by-track and check it traces the named shape.
+- Are the transitions marked risky actually justified by the mechanism named? Re-read \
+each — is the mechanism real, or is it boilerplate?
+- Is the thesis verifiable from the tracklist? Could you defend it to a knowledgeable \
+listener who only saw the track list, not the prose?
+
+If the concept is solid, say so briefly and identify the single weakest moment — every \
+concept has one. If the concept has structural issues, name them specifically: which \
+track is the problem, what role is mis-cast, which transition cannot survive a real blend.
+
+Return ONLY a single JSON object — no markdown fences, no preamble, no trailing text:
+
+{
+  "verdict": "solid" | "needs_attention" | "weak",
+  "single_weakest_moment": "track N: ...specific issue...",
+  "structural_issues": ["...", "..."],
+  "suggested_substitution": null
+}
+
+Rules:
+- "structural_issues" must be an empty array when verdict is "solid".
+- "suggested_substitution" is null unless a specific replacement is obvious — and when \
+non-null, must name the position and the canvas-pool track that would slot in (e.g. \
+"track 5 → ID:t094 from canvas bridge pool: instrumental intro avoids vocal clash").
+- Keep every string under 200 characters.\
+"""
+
 
 _PLAYLIST_MINIMUM_SEED_RATIO = 0.6
 
@@ -1970,6 +1954,155 @@ async def _call_stage2_report_single(
         raise RuntimeError(f"Stage 2 report generation failed: {exc}") from exc
 
 
+def _parse_critique(raw: str) -> Critique:
+    """Tolerant parser for the Stage 2 critique JSON.
+
+    Accepts code-fenced or trailing-text responses. Falls back to a
+    verdict='needs_attention' critique with the raw payload as the weakest-moment
+    string when the JSON is malformed — never raises. This keeps a --deep run
+    surviving a single bad response without aborting.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        first = text.find("\n")
+        if first != -1:
+            text = text[first + 1 :]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    # Trim anything before the first { or after the last } to tolerate prose preamble.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start : end + 1]
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return Critique(
+            verdict="needs_attention",
+            single_weakest_moment=f"critique parse failed: {raw[:160]}",
+        )
+    verdict_raw = str(data.get("verdict", "needs_attention"))
+    valid: frozenset[str] = frozenset({"solid", "needs_attention", "weak"})
+    verdict = cast("CritiqueVerdict", verdict_raw if verdict_raw in valid else "needs_attention")
+    issues_raw = data.get("structural_issues", [])
+    issues = [str(x) for x in issues_raw] if isinstance(issues_raw, list) else []
+    sub_raw = data.get("suggested_substitution")
+    sub: str | None = str(sub_raw) if isinstance(sub_raw, str) and sub_raw.strip() else None
+    return Critique(
+        verdict=verdict,
+        single_weakest_moment=str(data.get("single_weakest_moment", "")),
+        structural_issues=issues,
+        suggested_substitution=sub,
+    )
+
+
+async def _call_stage2_critique_single(
+    concept: MixConcept,
+    canvas: MixCanvas | None,
+    tracks_by_id: dict[str, Track],
+    stage2_key: str,
+) -> Critique:
+    """Run one critique pass for a single concept. Returns a Critique (never raises)."""
+    track_lines: list[str] = []
+    for i, tid in enumerate(concept.track_ids, 1):
+        t = tracks_by_id.get(tid)
+        if t is None:
+            continue
+        energy = f"energy:{t.energy}/8" if t.energy is not None else "energy:?"
+        track_lines.append(f"{i}. ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {energy}")
+
+    transition_lines: list[str] = []
+    for tr in concept.transitions:
+        flag = "RISKY" if tr.is_risky else "ok"
+        risk_type = tr.risk_type or "—"
+        transition_lines.append(f"  {tr.from_id} → {tr.to_id} [{flag}, risk_type={risk_type}]")
+
+    canvas_pool_lines: list[str] = []
+    if canvas is not None:
+        pool_ids = sorted(set(canvas.core_track_ids) | set(canvas.bridge_track_ids) | set(canvas.wildcard_track_ids))
+        for tid in pool_ids[:30]:
+            t = tracks_by_id.get(tid)
+            if t is None:
+                continue
+            energy = f"energy:{t.energy}/8" if t.energy is not None else "energy:?"
+            tier = "core"
+            if tid in canvas.bridge_track_ids:
+                tier = "bridge"
+            elif tid in canvas.wildcard_track_ids:
+                tier = "wildcard"
+            canvas_pool_lines.append(
+                f"  ID:{tid} [{tier}] {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {energy}"
+            )
+
+    prompt = (
+        f"Concept: {concept.title}\n"
+        f"Stated thesis (name_reason): {concept.name_reason or '(none)'}\n"
+        f"Stated mood: {concept.mood}\n"
+        f"Stated arc_type: {concept.arc_type or '(none)'}\n\n"
+        f"Track order:\n" + "\n".join(track_lines) + "\n\n"
+        "Transitions:\n" + ("\n".join(transition_lines) if transition_lines else "  (none declared)\n") + "\n"
+    )
+    if canvas_pool_lines:
+        prompt += "Canvas pool (substitution candidates):\n" + "\n".join(canvas_pool_lines) + "\n"
+
+    try:
+        raw = await _call_anthropic_http(
+            stage2_key, "claude-sonnet-4-6", _STAGE2_CRITIQUE_SYSTEM, prompt, max_tokens=1024, timeout=120
+        )
+    except Exception as exc:
+        # Critique failure never aborts a --deep run; surface the issue as a critique note.
+        return Critique(
+            verdict="needs_attention",
+            single_weakest_moment=f"critique call failed: {exc}",
+        )
+    return _parse_critique(raw)
+
+
+async def _call_stage2_critiques(
+    concepts: list[MixConcept],
+    canvases: list[MixCanvas] | None,
+    tracks_by_id: dict[str, Track],
+    stage2_key: str,
+) -> list[Critique]:
+    """Run critique passes for every concept in parallel."""
+    canvas_by_concept: list[MixCanvas | None] = (
+        [_match_canvas_for_concept(c, canvases) for c in concepts] if canvases else [None] * len(concepts)
+    )
+    return list(
+        await asyncio.gather(
+            *[
+                _call_stage2_critique_single(c, canvas, tracks_by_id, stage2_key)
+                for c, canvas in zip(concepts, canvas_by_concept, strict=True)
+            ]
+        )
+    )
+
+
+def _format_critique_block(critique: Critique) -> str:
+    """Render a Critique as the report-appended ── CRITIQUE (DEEP MODE) ── section."""
+    lines = [
+        "─── CRITIQUE (DEEP MODE) ───",
+        f"Verdict: {critique.verdict}",
+    ]
+    if critique.single_weakest_moment:
+        lines.append(f"Weakest moment: {critique.single_weakest_moment}")
+    if critique.structural_issues:
+        lines.append("Structural issues:")
+        for issue in critique.structural_issues:
+            lines.append(f"  - {issue}")
+    if critique.suggested_substitution:
+        lines.append(f"Suggested substitution: {critique.suggested_substitution}")
+    lines.append("─── END CRITIQUE ───")
+    return "\n".join(lines)
+
+
+def _append_critique_to_report(report: str, concept: MixConcept) -> str:
+    """Append the critique block to a concept report when present (#22)."""
+    if concept.critique is None:
+        return report
+    return f"{report.rstrip()}\n\n{_format_critique_block(concept.critique)}"
+
+
 async def _call_stage2_reports(
     concepts: list[MixConcept],
     tracks_by_id: dict[str, Track],
@@ -2000,6 +2133,7 @@ async def stage2_curate_and_report(
     concept_history: ConceptHistory | None = None,
     genre_intent: str | None = None,
     mode: TrackMode | None = None,
+    deep: bool = False,
     debug: bool = False,
 ) -> tuple[list[MixConcept], str]:
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -2197,13 +2331,28 @@ async def stage2_curate_and_report(
     )
     report = ""
 
+    # Optional Stage 2 critique pass (#22, --deep). Runs between selection and report
+    # so the per-concept report can carry the critique inline. Genre-mode only —
+    # playlist mode has its own variant-scoring path and a critique loop there would
+    # require coordination with WINNER selection (future work).
+    if deep and curated and playlist_name is None:
+        print(f"Stage 2 critique pass (--deep): {len(curated)} concept(s)...", file=sys.stderr)
+        critiques = await _call_stage2_critiques(curated, canvases, tracks_by_id, stage2_key)
+        for concept, critique in zip(curated, critiques, strict=True):
+            concept.critique = critique
+        verdicts = [c.critique.verdict for c in curated if c.critique is not None]
+        print(f"Stage 2 critique verdicts: {verdicts}", file=sys.stderr)
+
     if playlist_name is None:
         reports = await _call_stage2_reports(curated, tracks_by_id, seed_ids, unplayed_ids, stage2_key)
         annotated_reports = [
-            _append_practicality_to_report(
-                _append_bold_moves_to_report(r, c, canvases, tracks_by_id),
+            _append_critique_to_report(
+                _append_practicality_to_report(
+                    _append_bold_moves_to_report(r, c, canvases, tracks_by_id),
+                    c,
+                    tracks_by_id,
+                ),
                 c,
-                tracks_by_id,
             )
             for r, c in zip(reports, curated, strict=True)
         ]

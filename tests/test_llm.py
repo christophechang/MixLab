@@ -1175,6 +1175,132 @@ async def test_stage2_mode_fragment_not_injected_in_playlist_mode(monkeypatch: p
     assert "MODE: ALL" not in system_prompt
 
 
+def _critique_payload(verdict: str = "needs_attention") -> str:
+    return json.dumps(
+        {
+            "verdict": verdict,
+            "single_weakest_moment": "track 3: vocal clash at 0:30",
+            "structural_issues": ["energy path drift", "transition 4→5 mechanism boilerplate"],
+            "suggested_substitution": "track 3 → ID:2 from canvas bridge pool: instrumental intro",
+        }
+    )
+
+
+@respx.mock
+async def test_stage2_deep_mode_runs_critique_and_surfaces_in_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--deep triggers a critique pass per concept; output appears in the report."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_critique_payload("needs_attention"))),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    concepts, report = await stage2_curate_and_report(shortlists, tracks_by_id, deep=True)
+
+    assert len(concepts) == 1
+    assert concepts[0].critique is not None
+    assert concepts[0].critique.verdict == "needs_attention"
+    assert "CRITIQUE (DEEP MODE)" in report
+    assert "Verdict: needs_attention" in report
+    assert "vocal clash at 0:30" in report
+
+
+@respx.mock
+async def test_stage2_no_deep_makes_no_critique_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without --deep, the critique HTTP call must not fire and critique stays None."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    concepts, report = await stage2_curate_and_report(shortlists, tracks_by_id, deep=False)
+
+    assert concepts[0].critique is None
+    assert "CRITIQUE (DEEP MODE)" not in report
+    # Exactly 2 Anthropic calls: selection + report. No third call for critique.
+    assert len(route.calls) == 2
+
+
+@respx.mock
+async def test_stage2_deep_ignored_in_playlist_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Playlist mode runs variant scoring instead of the genre-mode critique loop."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool", mood="practical", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    concepts, report = await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset({"1"}),
+        seed_track_ids=["1"],
+        deep=True,
+    )
+    assert "CRITIQUE (DEEP MODE)" not in report
+    assert concepts[0].critique is None
+
+
+def test_parse_critique_tolerates_code_fences() -> None:
+    from mixlab.llm import _parse_critique
+
+    raw = '```json\n{"verdict": "solid", "single_weakest_moment": "track 4 transition", "structural_issues": [], "suggested_substitution": null}\n```'
+    critique = _parse_critique(raw)
+    assert critique.verdict == "solid"
+    assert critique.structural_issues == []
+    assert critique.suggested_substitution is None
+
+
+def test_parse_critique_malformed_json_returns_needs_attention() -> None:
+    """Bad JSON falls back to a needs_attention critique with the raw payload."""
+    from mixlab.llm import _parse_critique
+
+    critique = _parse_critique("not json at all")
+    assert critique.verdict == "needs_attention"
+    assert "critique parse failed" in critique.single_weakest_moment
+
+
+def test_parse_critique_coerces_invalid_verdict() -> None:
+    from mixlab.llm import _parse_critique
+
+    raw = '{"verdict": "AMAZING", "single_weakest_moment": "", "structural_issues": []}'
+    critique = _parse_critique(raw)
+    assert critique.verdict == "needs_attention"
+
+
 @respx.mock
 async def test_stage2_marks_only_unplayed_tracks_when_unplayed_ids_provided(monkeypatch: pytest.MonkeyPatch) -> None:
     """When unplayed_ids is provided, only those tracks get the 'unplayed' marker — not all tracks."""
@@ -1936,9 +2062,83 @@ def test_make_selection_system_preserves_curation_instructions() -> None:
 
     result = _make_selection_system(_STAGE2_SYSTEM)
     # Key curation guidance must survive
-    assert "peak weapons" in result
+    assert "stacked peaks" in result
     assert "name_reason" in result
     assert "chapter_pivot" in result
+
+
+def test_stage2_system_role_vocabulary_trimmed_to_ten_roles() -> None:
+    """Stage 2 prompts must reference the new 10-role vocabulary, not the old 19-role list (#23)."""
+    from mixlab.llm import _STAGE2_REPORT_SYSTEM, _STAGE2_SYSTEM
+
+    new_roles = {
+        "opener",
+        "groove",
+        "hook",
+        "pivot",
+        "lift",
+        "vocal-moment",
+        "texture-change",
+        "peak",
+        "resolution",
+        "closer",
+    }
+    old_only = {
+        "world-setter",
+        "early-hook",
+        "groove-locker",
+        "builder",
+        "connector",
+        "pressure",
+        "cleanser",
+        "weapon",
+        "post-peak",
+        "utility",
+    }
+    for prompt in (_STAGE2_SYSTEM, _STAGE2_REPORT_SYSTEM):
+        for role in new_roles:
+            assert role in prompt, f"new role '{role}' missing from prompt"
+        for role in old_only:
+            # Old role tokens must not appear as standalone role labels in the prompt.
+            assert f", {role}," not in prompt and f", {role}." not in prompt, (
+                f"old role '{role}' still listed in prompt"
+            )
+
+
+def test_stage0_system_role_vocabulary_trimmed() -> None:
+    """Stage 0 (playlist mode) inferred-role options match the new vocabulary."""
+    from mixlab.llm import _STAGE0_SYSTEM
+
+    assert "opener, groove, hook, pivot, lift, vocal_moment, texture_change, peak, resolution, closer" in _STAGE0_SYSTEM
+    assert "world_setter" not in _STAGE0_SYSTEM
+    assert "groove_locker" not in _STAGE0_SYSTEM
+    assert "weapon" not in _STAGE0_SYSTEM
+    assert "cleanser" not in _STAGE0_SYSTEM
+
+
+def test_stage0_parser_coerces_old_role_names_to_unknown() -> None:
+    """Stage 0 LLM responses with old vocab (e.g. 'weapon') should coerce to 'unknown' (#23)."""
+    from mixlab.llm import _parse_intent_brief
+
+    raw = """{
+      "overall_vibe": "test",
+      "energy_shape": "single_arc",
+      "risk_tolerance": "medium",
+      "is_coherent_set": true,
+      "missing_roles": [],
+      "seed_analyses": [
+        {"track_id": "1", "tier": "anchor", "inferred_role": "weapon"},
+        {"track_id": "2", "tier": "supporting", "inferred_role": "groove"}
+      ]
+    }"""
+    seed_tracks = [
+        Track(track_id="1", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB"),
+        Track(track_id="2", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB"),
+    ]
+    brief = _parse_intent_brief(raw, seed_tracks, (170.0, 178.0))
+    roles_by_id = {s.track_id: s.inferred_role for s in brief.seed_analyses}
+    assert roles_by_id["1"] == "unknown"  # 'weapon' coerced
+    assert roles_by_id["2"] == "groove"  # 'groove' kept
 
 
 def test_selection_system_playlist_variant_has_practical_balanced_adventurous() -> None:
@@ -2420,26 +2620,19 @@ def _canvas_with_roles(
     )
 
 
-def test_validate_stage2_output_warns_when_no_opener_in_first_two_positions() -> None:
-    """Strong-tier check: opener role must appear in positions 1 or 2 (fires regardless of genre)."""
+def test_validate_stage2_output_does_not_warn_about_role_pool_opener_or_closer() -> None:
+    """Removed in #27 — canvas-pool-based opener/closer classification disagreed with
+    Stage 2's textual role picks too often. These warnings no longer fire."""
     from mixlab.llm import validate_stage2_output
 
     ids = [str(i) for i in range(1, 9)]
-    canvas = _canvas_with_roles(ids, opener=["8"], closer=["8"])  # opener only at end
+    canvas_no_opener = _canvas_with_roles(ids, opener=["8"], closer=["8"])
+    canvas_no_closer = _canvas_with_roles(ids, opener=["1"], closer=["1"])
     concept = MixConcept(title="T", mood="dark", track_ids=ids)
-    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
-    assert any("no opener-role track in first 2 positions" in w for w in warnings)
-
-
-def test_validate_stage2_output_warns_when_no_closer_in_last_two_positions() -> None:
-    """Strong-tier check: closer role must appear in positions N or N-1."""
-    from mixlab.llm import validate_stage2_output
-
-    ids = [str(i) for i in range(1, 9)]
-    canvas = _canvas_with_roles(ids, opener=["1"], closer=["1"])  # closer only at start
-    concept = MixConcept(title="T", mood="dark", track_ids=ids)
-    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
-    assert any("no closer-role track in last 2 positions" in w for w in warnings)
+    warnings_a = validate_stage2_output([concept], [canvas_no_opener], _lib(ids), set(), set())
+    warnings_b = validate_stage2_output([concept], [canvas_no_closer], _lib(ids), set(), set())
+    assert not any("no opener-role track in first 2 positions" in w for w in warnings_a)
+    assert not any("no closer-role track in last 2 positions" in w for w in warnings_b)
 
 
 def test_validate_stage2_output_no_peak_warning_softened_by_plateau_arc() -> None:
@@ -2454,19 +2647,36 @@ def test_validate_stage2_output_no_peak_warning_softened_by_plateau_arc() -> Non
     assert not any("no peak-role" in w for w in warnings)
 
 
-def test_validate_stage2_output_warns_about_consecutive_builder_run() -> None:
-    """Three consecutive builder-role tracks fires the role-family-run warning."""
+def test_validate_stage2_output_does_not_warn_about_role_family_run() -> None:
+    """Removed in #27 — role-family-run check relied on the same canvas-pool
+    classification as the dropped opener/closer warnings."""
     from mixlab.llm import validate_stage2_output
 
     ids = [str(i) for i in range(1, 9)]
     canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], builder=["3", "4", "5"], peak=["6"])
     concept = MixConcept(title="T", mood="dark", track_ids=ids)
     warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
-    assert any("consecutive builder tracks" in w for w in warnings)
+    assert not any("consecutive builder tracks" in w for w in warnings)
 
 
 def test_validate_stage2_output_warns_all_high_energy_no_dynamic_range() -> None:
     """Concept where every track is energy ≥6/8 fires the high-energy band warning."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    lib = {
+        tid: Track(track_id=tid, artist="A", title="T", bpm=124.0, camelot_key="8A", genre="HipHop", energy=7)
+        for tid in ids
+    }
+    canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    # Use a genre outside the soft-tier softening families so the warning fires.
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="hip_hop")
+    assert any("all tracks high-energy" in w for w in warnings)
+
+
+def test_validate_stage2_output_high_energy_warning_softened_for_house() -> None:
+    """House and techno are sustained-groove genres — all-high-energy warning suppressed (#27)."""
     from mixlab.llm import validate_stage2_output
 
     ids = [str(i) for i in range(1, 9)]
@@ -2476,8 +2686,10 @@ def test_validate_stage2_output_warns_all_high_energy_no_dynamic_range() -> None
     }
     canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
     concept = MixConcept(title="T", mood="dark", track_ids=ids)
-    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="house")
-    assert any("all tracks high-energy" in w for w in warnings)
+    warnings_house = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="house")
+    warnings_techno = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="techno")
+    assert not any("all tracks high-energy" in w for w in warnings_house)
+    assert not any("all tracks high-energy" in w for w in warnings_techno)
 
 
 def test_validate_stage2_output_high_energy_warning_softened_for_dnb() -> None:
@@ -2517,13 +2729,30 @@ def test_validate_stage2_output_wind_down_warning_fires_when_final_three_all_hig
     # First five tracks low-energy, last three high — fires "no wind-down" warning.
     energies = [2, 3, 3, 4, 4, 7, 7, 8]
     lib = {
+        tid: Track(track_id=tid, artist="A", title="T", bpm=124.0, camelot_key="8A", genre="HipHop", energy=e)
+        for tid, e in zip(ids, energies, strict=True)
+    }
+    canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    # Use a non-soft-tier genre so the warning fires.
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="hip_hop")
+    assert any("no wind-down" in w for w in warnings)
+
+
+def test_validate_stage2_output_wind_down_warning_softened_for_house() -> None:
+    """House sustained-groove sets don't owe a wind-down ramp (#27)."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    energies = [2, 3, 3, 4, 4, 7, 7, 8]
+    lib = {
         tid: Track(track_id=tid, artist="A", title="T", bpm=124.0, camelot_key="8A", genre="House", energy=e)
         for tid, e in zip(ids, energies, strict=True)
     }
     canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
     concept = MixConcept(title="T", mood="dark", track_ids=ids)
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="house")
-    assert any("no wind-down" in w for w in warnings)
+    assert not any("no wind-down" in w for w in warnings)
 
 
 def test_validate_stage2_output_skips_structural_checks_when_canvas_has_no_role_data() -> None:
@@ -2731,11 +2960,13 @@ def test_generic_name_regex_classification(title: str, should_flag: bool) -> Non
 @pytest.mark.parametrize(
     "genre,arc_type,should_warn",
     [
-        ("house", None, True),  # default genre, no arc → warns
+        ("hip_hop", None, True),  # default genre, no arc → warns
         ("drum_and_bass", None, False),  # DnB suppresses high-energy warning
-        ("house", "plateau", False),  # arc_type suppresses
-        ("house", "sustained-pressure", False),  # arc_type suppresses
+        ("hip_hop", "plateau", False),  # arc_type suppresses
+        ("hip_hop", "sustained-pressure", False),  # arc_type suppresses
         ("electronica", None, True),  # electronica does NOT suppress high-energy specifically
+        ("house", None, False),  # house is sustained-groove — suppresses (#27)
+        ("techno", None, False),  # techno is sustained-groove — suppresses (#27)
     ],
 )
 def test_structural_high_energy_warning_softening(genre: str, arc_type: str | None, should_warn: bool) -> None:

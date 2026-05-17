@@ -58,6 +58,23 @@ ArcType = Literal[
 ]
 
 
+CritiqueVerdict = Literal["solid", "needs_attention", "weak"]
+
+
+class Critique(BaseModel):
+    """Stage 2 self-critique result (#22, opt-in via --deep).
+
+    Generated in a separate Anthropic call between curation and the prose report.
+    The output is never applied automatically — it surfaces in the report so the
+    user can decide whether to accept the concept as shipped or revise.
+    """
+
+    verdict: CritiqueVerdict
+    single_weakest_moment: str = ""
+    structural_issues: list[str] = Field(default_factory=list)
+    suggested_substitution: str | None = None
+
+
 class MixConcept(BaseModel):
     title: str
     mood: str
@@ -65,6 +82,7 @@ class MixConcept(BaseModel):
     transitions: list[Transition] = Field(default_factory=list)
     name_reason: str = ""
     arc_type: ArcType | None = None
+    critique: Critique | None = None
 
 
 @dataclass
@@ -91,6 +109,39 @@ class ContrastAssets:
     darker_turns: list[str]
     brighter_lifts: list[str]
     lower_pressure_resets: list[str]
+
+
+@dataclass(frozen=True)
+class CanvasScoreWeights:
+    """Per-mode weights for the canvas score components (#24).
+
+    All weights must sum to 1.0. Validated by ``__post_init__``. The eight fields
+    line up with the eight :class:`CanvasScore` scoring components — penalty terms
+    (weakness_penalty, floor_multiplier) are separate and not weighted.
+    """
+
+    technical_viability: float
+    role_coverage: float
+    anchor_strength: float
+    contrast_potential: float
+    distinctiveness: float
+    era_coherence: float
+    label_coherence: float
+    novelty: float
+
+    def __post_init__(self) -> None:
+        total = (
+            self.technical_viability
+            + self.role_coverage
+            + self.anchor_strength
+            + self.contrast_potential
+            + self.distinctiveness
+            + self.era_coherence
+            + self.label_coherence
+            + self.novelty
+        )
+        if abs(total - 1.0) > 1e-9:
+            raise ValueError(f"CanvasScoreWeights must sum to 1.0; got {total:.6f}")
 
 
 @dataclass
@@ -176,26 +227,23 @@ class MixCanvas:
 
 
 SeedTier = Literal["anchor", "supporting", "optional"]
+# Stage 2 set-role vocabulary. Sharpened from 19 → 10 roles in v0.11.0 (#23) to
+# remove semantic overlap (world-setter/early-hook subsumed by hook+opener;
+# groove-locker/builder/connector merged into groove; pressure/lift consolidated;
+# weapon merged into peak; post-peak/cleanser merged into resolution; risk merged
+# into pivot; utility removed). Old role strings emitted by upstream LLM responses
+# are coerced to "unknown" by the parser.
 SetRole = Literal[
     "opener",
-    "world_setter",
-    "groove_locker",
-    "early_hook",
-    "builder",
-    "connector",
+    "groove",
+    "hook",
     "pivot",
-    "pressure",
     "lift",
     "vocal_moment",
     "texture_change",
-    "cleanser",
-    "risk",
-    "weapon",
     "peak",
-    "post_peak",
     "resolution",
     "closer",
-    "utility",
     "unknown",
 ]
 EnergyShape = Literal["single_arc", "double_peak", "plateau", "flat", "unclear"]

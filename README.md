@@ -36,7 +36,7 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY + at least one Stage 1 key
 1. Parses your exported Rekordbox XML collection
 2. If `CATALOG_API_URL` is set, fetches your play history and applies `--mode` filtering (`unplayed` by default, or `played` to restrict to battle-tested tracks); without the catalog API the full collection is used
 3. Prints a crate availability table (no LLM cost)
-4. If `--genre` is specified, scopes the collection to that genre (or custom cross-genre pool), runs Stage 1 shortlisting, then writes a full Stage 2 mix planning report
+4. If `--genre` is specified, scopes the collection to that genre (or custom cross-genre pool), runs Stage 1 shortlisting, wraps each shortlist into a Mix Canvas (BPM tiers, role candidates, contrast assets, anchors, era/label coherence, risk notes), then writes a full Stage 2 mix planning report — optionally steered with `--intent "..."`
 5. If `--playlist` is specified, uses that Rekordbox playlist as the seed, infers the set's intent, builds natural BPM-zone shortlists around the seed tracks, generates three completion variants, then writes the best playlist-completion report
 6. Optionally exports a Rekordbox-compatible merged XML file
 7. Sends the report and any XML attachment to a Discord channel
@@ -205,13 +205,13 @@ Prints unplayed vs total counts per genre, sorted by availability. Only the cata
 
 Runs the full genre pipeline: parse → fetch played history (based on `--mode`) → scope to the requested genre → Stage 1 shortlist generation → Stage 2 report → Discord/stdout.
 
-`--mode` controls which tracks are eligible for concepts:
+`--mode` controls which tracks are eligible for concepts. Each mode also tunes the canvas scoring weights (boost novelty for `unplayed`, anchor strength for `played`, cross-canvas distinctiveness for `all`) and adds mode-specific creative direction to the Stage 2 prompt:
 
 | Mode | Behaviour |
 |------|-----------|
-| `unplayed` (default) | Only tracks never played live. Requires `CATALOG_API_URL`. |
-| `played` | Only tracks that have appeared in your play history — battle-tested and SoundCloud-proven. Requires `CATALOG_API_URL`. |
-| `all` | Full collection, ignoring play history entirely. |
+| `unplayed` (default) | Only tracks never played live. Stage 2 framed as discovery — surface debuts worth introducing. Requires `CATALOG_API_URL`. |
+| `played` | Only tracks that have appeared in your play history — battle-tested and SoundCloud-proven. Stage 2 framed as reassembly — bolder Camelot jumps and chapter pivots since familiarity is an asset. Requires `CATALOG_API_URL`. |
+| `all` | Full collection, ignoring play history entirely. Stage 2 framed as interleave — concepts that combine played and unplayed material in deliberate ways; notes the lean (played-anchored / unplayed-anchored / balanced) in the thesis. |
 
 The report starts with a context header so you can see exactly what kind of run produced it, for example:
 
@@ -312,6 +312,15 @@ Compares your full Rekordbox collection against your play history and exports ev
 - Requires `CATALOG_API_URL` — without play history there is nothing to compare against
 - Respects the `DO NOT RECOMMEND` exclusion list
 - No LLM calls — fast and cheap
+
+### Inspect canvas scoring with --debug
+
+```bash
+./mixlab --genre house --debug
+# or: MIXLAB_DEBUG_SCORE=1 ./mixlab --genre house
+```
+
+Emits per-canvas scoring diagnostics to stderr: every weighted component, weakness penalty, floor multiplier, overlap penalty against already-picked canvases, novelty breakdown (track-overlap component + shape-similarity component + closest history match), era/label coherence values, and risk notes. Normal stdout output and Discord delivery are unchanged.
 
 ### View cached genre counts from the last run (no API calls at all)
 
@@ -417,20 +426,20 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 - **Standard genres:** clusters larger than 40 tracks are chunked; each chunk is called independently and concepts merged
 - **Custom genres:** a random 120-track window is selected from the BPM-sorted pool each run (see [Why random selection?](#why-random-selection)); 60 tracks per call, 2 calls maximum; shortlist target is 20–25 tracks per concept (vs 15–25 for standard)
 - Track IDs are aliased to short positional keys (`T001`, `T002`, …) in the prompt; hallucinated IDs are structurally impossible and concepts with fewer than 4 resolvable aliases are discarded
-- Stage 1 concepts are wrapped into **Mix Canvases** — structured objects that add role candidates (opener, groove-locker, builder, pivot, peak, closer), contrast assets (vocal moments, texture changes, darker/brighter turns), and deterministic risk notes (weak opener/closer pool, BPM spread, artist repetition). Up to 6 canvases are forwarded to Stage 2, selected by a weighted scoring model covering technical viability, role coverage, anchor strength, contrast potential, cross-canvas distinctiveness, and novelty against recent run history. Selection is deterministic given the same input — no random sampling.
+- Stage 1 concepts are wrapped into **Mix Canvases** — structured objects that add role candidates (opener, groove-locker, builder, pivot, peak, closer), contrast assets (vocal moments, texture changes, darker/brighter turns), deterministic risk notes (weak opener/closer pool, BPM spread, artist repetition), an era window and dominant label when the core pool supports them, identity-defining `Anchors` from the core pool (provenance + library rarity + pool centrality), and `Concept anchors` tagging bridge/wildcard tracks as `peak`, `identity`, or `structural-exception`. Up to 6 canvases are forwarded to Stage 2, selected by a weighted scoring model covering technical viability, role coverage, anchor strength, contrast potential, cross-canvas distinctiveness, era coherence, label coherence, and novelty against recent run history. Weights are mode-aware — `unplayed` mode prioritises novelty, `played` mode prioritises anchor strength, `all` mode prioritises cross-canvas distinctiveness. Selection is deterministic given the same input — no random sampling.
 
 ### LLM Stage 2 — report generation
 
 - Uses Claude Sonnet 4.6 (Anthropic-only, no fallback provider)
 - Before sequencing, chooses an explicit energy path (Slow Climb, Wave, Plateau With Detail, Double Peak, Front-Loaded Hook, Dark to Light, Light to Dark) and assigns every track to one of five sections: Invitation, Groove Lock, Development, Peak/Payoff, Resolution
-- Assigns each track a role from an extended vocabulary: opener, world-setter, groove-locker, early-hook, builder, connector, pivot, pressure, lift, vocal-moment, texture-change, cleanser, risk, weapon, peak, post-peak, resolution, closer, utility
-- Each report includes: named energy path, section breakdown with track numbers, per-track role and transition risk, dedicated opener and closer rationale, and excluded tracks with reasons
+- Assigns each track a role from a focused 10-role vocabulary: opener, groove, hook, pivot, lift, vocal-moment, texture-change, peak, resolution, closer (a track may carry more than one)
+- Each report includes: named energy path, structured `arc_type` field, section breakdown with track numbers, per-track role and transition risk, dedicated opener and closer rationale, excluded tracks with reasons, a `Bold moves:` summary of bridge/wildcard usage with the mechanism that justified each pick, and a one-line `Practicality:` score (bpm_smoothness, harmonic_ratio, risk_justified, overall) for triage
 - If the catalog API returns existing mix names, Stage 2 is instructed to avoid reusing any words, tropes, or phrasing from them; each concept also includes a `name_reason` tying the name to the set's thesis
 - Playlist mode generates three variants (`practical`, `balanced`, `adventurous`) and auto-selects the strongest; seed retention is enforced with a floor of 75% of anchor tracks and 40% of supporting tracks
 - Appends shortfall warnings for concepts significantly below the recommended track count for their genre
 - Appends the active report context and elapsed generation time to the final output
-- After each successful run, concept history is written to `.mixlab/concept-history.json`. On subsequent runs, canvases whose track IDs heavily overlap recent selections receive a novelty penalty (Jaccard similarity over a 10-run recency window, decaying at 0.8^age per run). This compounds with Stage 1's random window sampling to push each run toward different corners of the collection.
-- Post-Stage-2 validation warns on: track IDs not found in the library, denylist or played-track violations, Camelot jumps greater than 4 between consecutive tracks, BPM jumps greater than 15, and artist repeats of 3 or more. Warnings appear in the Discord report under **⚠ Validation Notes** and never abort the run.
+- After each successful run, concept history is written to `.mixlab/concept-history.json`. On subsequent runs, canvases are penalised on a combined novelty score: 65% track-overlap Jaccard plus 35% concept-shape similarity (BPM band, dominant Camelot zone, role pattern, `arc_type`). Both components decay at 0.8^age across a 10-run recency window. Catches "different tracks, same shape" repetition the old track-only signal missed. Stage 2 also sees a `RECENT CONCEPTS` block listing recent titles/arcs/moods so it can deliberately diverge.
+- Post-Stage-2 validation is warn-only. Strong-tier checks (always fire): track IDs not found in the library, denylist or played-track violations, Camelot jumps greater than 4, BPM jumps greater than 15, artist repeats of 3 or more, opener/closer absent in expected positions, bridge/wildcard tracks used without a justified `risk_type`, and wildcard tracks used outside the canvas's concept-anchor list. Soft-tier checks (softened by genre family and `arc_type`): no peak in sequence, no wind-down before closer, three-or-more consecutive same-role-family tracks, all tracks high-energy, cross-concept track overlap above 50%, generic `[Adjective][Noun]` concept titles. Warnings appear under **⚠ Validation Notes** and never abort the run.
 
 ### Shortfall thresholds (tracks per set)
 

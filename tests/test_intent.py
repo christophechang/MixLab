@@ -105,9 +105,7 @@ def test_parse_intent_brief_invalid_json_returns_fallback() -> None:
 def _make_brief_with_tiers(anchor_ids: list[str], supporting_ids: list[str]) -> IntentBrief:
     analyses = [
         SeedAnalysis(track_id=tid, tier="anchor", inferred_role="peak", drop_cost=0.1) for tid in anchor_ids
-    ] + [
-        SeedAnalysis(track_id=tid, tier="supporting", inferred_role="builder", drop_cost=0.5) for tid in supporting_ids
-    ]
+    ] + [SeedAnalysis(track_id=tid, tier="supporting", inferred_role="groove", drop_cost=0.5) for tid in supporting_ids]
     return IntentBrief(
         overall_vibe="Test",
         energy_shape="unclear",
@@ -390,11 +388,11 @@ _VALID_INTENT_RESPONSE = """{
   "missing_roles": ["closer"],
   "seed_analyses": [
     {"track_id": "1", "tier": "anchor", "inferred_role": "peak"},
-    {"track_id": "2", "tier": "supporting", "inferred_role": "builder"},
+    {"track_id": "2", "tier": "supporting", "inferred_role": "groove"},
     {"track_id": "3", "tier": "optional", "inferred_role": "opener"},
     {"track_id": "4", "tier": "anchor", "inferred_role": "pivot"},
-    {"track_id": "5", "tier": "supporting", "inferred_role": "builder"},
-    {"track_id": "6", "tier": "optional", "inferred_role": "cleanser"}
+    {"track_id": "5", "tier": "supporting", "inferred_role": "groove"},
+    {"track_id": "6", "tier": "optional", "inferred_role": "resolution"}
   ]
 }"""
 
