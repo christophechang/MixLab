@@ -1622,6 +1622,37 @@ def _append_bold_moves_to_report(
     return f"{report.rstrip()}\n\n{annotation}"
 
 
+def _format_practicality_line(score: DJPracticalityScore) -> str:
+    """One-line practicality summary appended to genre-mode reports (#21).
+
+    In genre mode there are no seed adjacencies, so ``fragment_preserved`` is always
+    1.0 — overall is slightly inflated relative to playlist-mode scores. Decorative
+    for now; intentionally not used for ranking.
+    """
+    return (
+        "**Practicality**: "
+        f"bpm_smoothness {score.bpm_smoothness:.2f}, "
+        f"harmonic_ratio {score.harmonic_ratio:.2f}, "
+        f"risk_justified {score.risk_justified:.2f}, "
+        f"overall {score.overall:.2f}"
+    )
+
+
+def _append_practicality_to_report(
+    report: str,
+    concept: MixConcept,
+    tracks_by_id: dict[str, Track],
+) -> str:
+    """Compute DJPracticalityScore and append it to the concept report (genre mode).
+
+    Playlist mode uses ``CompletionVariant.practicality_score`` via the variant
+    scoring path and embeds the value in WINNER labelling — this helper is the
+    genre-mode counterpart.
+    """
+    score = _compute_practicality_score(concept, tracks_by_id, intent_brief=None)
+    return f"{report.rstrip()}\n\n{_format_practicality_line(score)}"
+
+
 def _playlist_retention_stats(
     concept: MixConcept,
     seed_track_ids: list[str],
@@ -2144,7 +2175,12 @@ async def stage2_curate_and_report(
     if playlist_name is None:
         reports = await _call_stage2_reports(curated, tracks_by_id, seed_ids, unplayed_ids, stage2_key)
         annotated_reports = [
-            _append_bold_moves_to_report(r, c, canvases, tracks_by_id) for r, c in zip(reports, curated, strict=True)
+            _append_practicality_to_report(
+                _append_bold_moves_to_report(r, c, canvases, tracks_by_id),
+                c,
+                tracks_by_id,
+            )
+            for r, c in zip(reports, curated, strict=True)
         ]
         report = "\n\n---\n\n".join(annotated_reports)
 

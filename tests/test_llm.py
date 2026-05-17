@@ -246,6 +246,57 @@ async def test_stage2_returns_curated_concepts_and_report(monkeypatch: pytest.Mo
     assert concepts[0].track_ids == ["1", "2", "3", "4"]
     assert "CONCEPT: Dark Rollers" in report
     assert "Claude Sonnet 4.6" in report
+    # Practicality line surfaces in genre-mode reports (#21).
+    assert "Practicality" in report
+    assert "bpm_smoothness" in report
+    assert "overall" in report
+
+
+def test_format_practicality_line_renders_all_components() -> None:
+    """Per-concept practicality summary contains all four labelled components."""
+    from mixlab.llm import _format_practicality_line
+
+    score = DJPracticalityScore(
+        bpm_smoothness=0.82,
+        harmonic_ratio=0.71,
+        risk_justified=0.50,
+        fragment_preserved=1.0,
+    )
+    line = _format_practicality_line(score)
+    assert "bpm_smoothness 0.82" in line
+    assert "harmonic_ratio 0.71" in line
+    assert "risk_justified 0.50" in line
+    assert "overall" in line
+
+
+@respx.mock
+async def test_stage2_practicality_not_in_playlist_mode_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Playlist mode surfaces practicality via WINNER labelling; do not double-append."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool", mood="practical", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    _, report = await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset({"1"}),
+        seed_track_ids=["1"],
+    )
+    # Playlist-mode report does not get the genre-mode practicality-line append.
+    assert "**Practicality**: bpm_smoothness" not in report
 
 
 @respx.mock
