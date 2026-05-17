@@ -465,6 +465,7 @@ async def run(
     min_year: int | None = None,
     max_year: int | None = None,
     intent: str | None = None,
+    deep: bool = False,
     debug: bool = False,
 ) -> None:
     # 1. Parse collection.
@@ -668,6 +669,7 @@ async def run(
         concept_history=history,
         genre_intent=intent,
         mode=mode,
+        deep=deep,
         debug=debug,
     )
     if not all_concepts:
@@ -822,6 +824,7 @@ examples:
   mixlab --genre house --min-bpm 122 --max-bpm 128  narrow pool by BPM range
   mixlab --genre drum_and_bass --min-year 2020       tracks from 2020 onwards only
   mixlab --genre house --intent "warmup, melodic, outdoor afternoon"  creative direction
+  mixlab --genre house --deep          opt-in critique pass per concept (2x Stage 2 cost)
   mixlab --genres                     show cached counts from last run (no API)
   mixlab --export-unplayed            export all unplayed tracks as Rekordbox XML + post to Discord
 """,
@@ -912,6 +915,15 @@ examples:
         ),
     )
     parser.add_argument(
+        "--deep",
+        action="store_true",
+        help=(
+            "Run a Stage 2 self-critique pass between selection and report (opt-in, "
+            "doubles Stage 2 cost). Each concept gets a peer-DJ review surfaced inline "
+            "as a CRITIQUE block. Genre mode only — ignored for --playlist runs."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Emit verbose canvas scoring diagnostics to stderr. Also enabled by MIXLAB_DEBUG_SCORE=1.",
@@ -944,6 +956,11 @@ examples:
                 "--intent ignored in playlist mode — playlist runs use Stage 0 intent extraction from the seed.",
                 file=sys.stderr,
             )
+        if args.deep:
+            print(
+                "--deep ignored in playlist mode — critique pass not yet supported on the variant-scoring path.",
+                file=sys.stderr,
+            )
         asyncio.run(
             run_playlist_mode(
                 args.playlist,
@@ -969,6 +986,7 @@ examples:
             min_year=args.min_year,
             max_year=args.max_year,
             intent=args.intent,
+            deep=args.deep,
             debug=debug,
         )
     )

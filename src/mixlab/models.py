@@ -58,6 +58,23 @@ ArcType = Literal[
 ]
 
 
+CritiqueVerdict = Literal["solid", "needs_attention", "weak"]
+
+
+class Critique(BaseModel):
+    """Stage 2 self-critique result (#22, opt-in via --deep).
+
+    Generated in a separate Anthropic call between curation and the prose report.
+    The output is never applied automatically — it surfaces in the report so the
+    user can decide whether to accept the concept as shipped or revise.
+    """
+
+    verdict: CritiqueVerdict
+    single_weakest_moment: str = ""
+    structural_issues: list[str] = Field(default_factory=list)
+    suggested_substitution: str | None = None
+
+
 class MixConcept(BaseModel):
     title: str
     mood: str
@@ -65,6 +82,7 @@ class MixConcept(BaseModel):
     transitions: list[Transition] = Field(default_factory=list)
     name_reason: str = ""
     arc_type: ArcType | None = None
+    critique: Critique | None = None
 
 
 @dataclass

@@ -41,6 +41,8 @@ from mixlab.history import ConceptHistory, format_recent_concepts
 from mixlab.models import (
     ArcType,
     CompletionVariant,
+    Critique,
+    CritiqueVerdict,
     DJPracticalityScore,
     IntentBrief,
     MixCanvas,
@@ -1369,6 +1371,50 @@ Be opinionated, musical, and honest. Peer-to-peer, no marketing language, no fil
 Return ONLY the report text. No JSON, no markdown fences, no preamble.\
 """
 
+
+# Stage 2 self-critique (opt-in via --deep, #22). Runs between the selection pass and
+# the report pass. Output is surfaced in the report — never auto-applied — so the
+# user sees the critique alongside the original concept and decides whether to ship
+# as-is or revise.
+_STAGE2_CRITIQUE_SYSTEM = """\
+You curated this concept moments ago. Review it as a peer DJ would.
+
+Check the following honestly. Be peer-to-peer. No marketing language. No filler. \
+If a check passes, do not mention it.
+
+- Does the opener actually satisfy the opener specification ("rewards attention without \
+requiring it; no track demanding full engagement in its first 32 bars")? Or is it too \
+hot too early?
+- Does the closer actually signal finality? Could you mix out of it cleanly?
+- Does the stated energy path match the actual sequence? Trace the energy values \
+track-by-track and check it traces the named shape.
+- Are the transitions marked risky actually justified by the mechanism named? Re-read \
+each — is the mechanism real, or is it boilerplate?
+- Is the thesis verifiable from the tracklist? Could you defend it to a knowledgeable \
+listener who only saw the track list, not the prose?
+
+If the concept is solid, say so briefly and identify the single weakest moment — every \
+concept has one. If the concept has structural issues, name them specifically: which \
+track is the problem, what role is mis-cast, which transition cannot survive a real blend.
+
+Return ONLY a single JSON object — no markdown fences, no preamble, no trailing text:
+
+{
+  "verdict": "solid" | "needs_attention" | "weak",
+  "single_weakest_moment": "track N: ...specific issue...",
+  "structural_issues": ["...", "..."],
+  "suggested_substitution": null
+}
+
+Rules:
+- "structural_issues" must be an empty array when verdict is "solid".
+- "suggested_substitution" is null unless a specific replacement is obvious — and when \
+non-null, must name the position and the canvas-pool track that would slot in (e.g. \
+"track 5 → ID:t094 from canvas bridge pool: instrumental intro avoids vocal clash").
+- Keep every string under 200 characters.\
+"""
+
+
 _PLAYLIST_MINIMUM_SEED_RATIO = 0.6
 
 
@@ -1958,6 +2004,155 @@ async def _call_stage2_report_single(
         raise RuntimeError(f"Stage 2 report generation failed: {exc}") from exc
 
 
+def _parse_critique(raw: str) -> Critique:
+    """Tolerant parser for the Stage 2 critique JSON.
+
+    Accepts code-fenced or trailing-text responses. Falls back to a
+    verdict='needs_attention' critique with the raw payload as the weakest-moment
+    string when the JSON is malformed — never raises. This keeps a --deep run
+    surviving a single bad response without aborting.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        first = text.find("\n")
+        if first != -1:
+            text = text[first + 1 :]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    # Trim anything before the first { or after the last } to tolerate prose preamble.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start : end + 1]
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return Critique(
+            verdict="needs_attention",
+            single_weakest_moment=f"critique parse failed: {raw[:160]}",
+        )
+    verdict_raw = str(data.get("verdict", "needs_attention"))
+    valid: frozenset[str] = frozenset({"solid", "needs_attention", "weak"})
+    verdict = cast("CritiqueVerdict", verdict_raw if verdict_raw in valid else "needs_attention")
+    issues_raw = data.get("structural_issues", [])
+    issues = [str(x) for x in issues_raw] if isinstance(issues_raw, list) else []
+    sub_raw = data.get("suggested_substitution")
+    sub: str | None = str(sub_raw) if isinstance(sub_raw, str) and sub_raw.strip() else None
+    return Critique(
+        verdict=verdict,
+        single_weakest_moment=str(data.get("single_weakest_moment", "")),
+        structural_issues=issues,
+        suggested_substitution=sub,
+    )
+
+
+async def _call_stage2_critique_single(
+    concept: MixConcept,
+    canvas: MixCanvas | None,
+    tracks_by_id: dict[str, Track],
+    stage2_key: str,
+) -> Critique:
+    """Run one critique pass for a single concept. Returns a Critique (never raises)."""
+    track_lines: list[str] = []
+    for i, tid in enumerate(concept.track_ids, 1):
+        t = tracks_by_id.get(tid)
+        if t is None:
+            continue
+        energy = f"energy:{t.energy}/8" if t.energy is not None else "energy:?"
+        track_lines.append(f"{i}. ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {energy}")
+
+    transition_lines: list[str] = []
+    for tr in concept.transitions:
+        flag = "RISKY" if tr.is_risky else "ok"
+        risk_type = tr.risk_type or "—"
+        transition_lines.append(f"  {tr.from_id} → {tr.to_id} [{flag}, risk_type={risk_type}]")
+
+    canvas_pool_lines: list[str] = []
+    if canvas is not None:
+        pool_ids = sorted(set(canvas.core_track_ids) | set(canvas.bridge_track_ids) | set(canvas.wildcard_track_ids))
+        for tid in pool_ids[:30]:
+            t = tracks_by_id.get(tid)
+            if t is None:
+                continue
+            energy = f"energy:{t.energy}/8" if t.energy is not None else "energy:?"
+            tier = "core"
+            if tid in canvas.bridge_track_ids:
+                tier = "bridge"
+            elif tid in canvas.wildcard_track_ids:
+                tier = "wildcard"
+            canvas_pool_lines.append(
+                f"  ID:{tid} [{tier}] {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {energy}"
+            )
+
+    prompt = (
+        f"Concept: {concept.title}\n"
+        f"Stated thesis (name_reason): {concept.name_reason or '(none)'}\n"
+        f"Stated mood: {concept.mood}\n"
+        f"Stated arc_type: {concept.arc_type or '(none)'}\n\n"
+        f"Track order:\n" + "\n".join(track_lines) + "\n\n"
+        "Transitions:\n" + ("\n".join(transition_lines) if transition_lines else "  (none declared)\n") + "\n"
+    )
+    if canvas_pool_lines:
+        prompt += "Canvas pool (substitution candidates):\n" + "\n".join(canvas_pool_lines) + "\n"
+
+    try:
+        raw = await _call_anthropic_http(
+            stage2_key, "claude-sonnet-4-6", _STAGE2_CRITIQUE_SYSTEM, prompt, max_tokens=1024, timeout=120
+        )
+    except Exception as exc:
+        # Critique failure never aborts a --deep run; surface the issue as a critique note.
+        return Critique(
+            verdict="needs_attention",
+            single_weakest_moment=f"critique call failed: {exc}",
+        )
+    return _parse_critique(raw)
+
+
+async def _call_stage2_critiques(
+    concepts: list[MixConcept],
+    canvases: list[MixCanvas] | None,
+    tracks_by_id: dict[str, Track],
+    stage2_key: str,
+) -> list[Critique]:
+    """Run critique passes for every concept in parallel."""
+    canvas_by_concept: list[MixCanvas | None] = (
+        [_match_canvas_for_concept(c, canvases) for c in concepts] if canvases else [None] * len(concepts)
+    )
+    return list(
+        await asyncio.gather(
+            *[
+                _call_stage2_critique_single(c, canvas, tracks_by_id, stage2_key)
+                for c, canvas in zip(concepts, canvas_by_concept, strict=True)
+            ]
+        )
+    )
+
+
+def _format_critique_block(critique: Critique) -> str:
+    """Render a Critique as the report-appended ── CRITIQUE (DEEP MODE) ── section."""
+    lines = [
+        "─── CRITIQUE (DEEP MODE) ───",
+        f"Verdict: {critique.verdict}",
+    ]
+    if critique.single_weakest_moment:
+        lines.append(f"Weakest moment: {critique.single_weakest_moment}")
+    if critique.structural_issues:
+        lines.append("Structural issues:")
+        for issue in critique.structural_issues:
+            lines.append(f"  - {issue}")
+    if critique.suggested_substitution:
+        lines.append(f"Suggested substitution: {critique.suggested_substitution}")
+    lines.append("─── END CRITIQUE ───")
+    return "\n".join(lines)
+
+
+def _append_critique_to_report(report: str, concept: MixConcept) -> str:
+    """Append the critique block to a concept report when present (#22)."""
+    if concept.critique is None:
+        return report
+    return f"{report.rstrip()}\n\n{_format_critique_block(concept.critique)}"
+
+
 async def _call_stage2_reports(
     concepts: list[MixConcept],
     tracks_by_id: dict[str, Track],
@@ -1988,6 +2183,7 @@ async def stage2_curate_and_report(
     concept_history: ConceptHistory | None = None,
     genre_intent: str | None = None,
     mode: TrackMode | None = None,
+    deep: bool = False,
     debug: bool = False,
 ) -> tuple[list[MixConcept], str]:
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -2185,13 +2381,28 @@ async def stage2_curate_and_report(
     )
     report = ""
 
+    # Optional Stage 2 critique pass (#22, --deep). Runs between selection and report
+    # so the per-concept report can carry the critique inline. Genre-mode only —
+    # playlist mode has its own variant-scoring path and a critique loop there would
+    # require coordination with WINNER selection (future work).
+    if deep and curated and playlist_name is None:
+        print(f"Stage 2 critique pass (--deep): {len(curated)} concept(s)...", file=sys.stderr)
+        critiques = await _call_stage2_critiques(curated, canvases, tracks_by_id, stage2_key)
+        for concept, critique in zip(curated, critiques, strict=True):
+            concept.critique = critique
+        verdicts = [c.critique.verdict for c in curated if c.critique is not None]
+        print(f"Stage 2 critique verdicts: {verdicts}", file=sys.stderr)
+
     if playlist_name is None:
         reports = await _call_stage2_reports(curated, tracks_by_id, seed_ids, unplayed_ids, stage2_key)
         annotated_reports = [
-            _append_practicality_to_report(
-                _append_bold_moves_to_report(r, c, canvases, tracks_by_id),
+            _append_critique_to_report(
+                _append_practicality_to_report(
+                    _append_bold_moves_to_report(r, c, canvases, tracks_by_id),
+                    c,
+                    tracks_by_id,
+                ),
                 c,
-                tracks_by_id,
             )
             for r, c in zip(reports, curated, strict=True)
         ]

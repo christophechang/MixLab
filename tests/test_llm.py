@@ -1175,6 +1175,132 @@ async def test_stage2_mode_fragment_not_injected_in_playlist_mode(monkeypatch: p
     assert "MODE: ALL" not in system_prompt
 
 
+def _critique_payload(verdict: str = "needs_attention") -> str:
+    return json.dumps(
+        {
+            "verdict": verdict,
+            "single_weakest_moment": "track 3: vocal clash at 0:30",
+            "structural_issues": ["energy path drift", "transition 4→5 mechanism boilerplate"],
+            "suggested_substitution": "track 3 → ID:2 from canvas bridge pool: instrumental intro",
+        }
+    )
+
+
+@respx.mock
+async def test_stage2_deep_mode_runs_critique_and_surfaces_in_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--deep triggers a critique pass per concept; output appears in the report."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_critique_payload("needs_attention"))),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    concepts, report = await stage2_curate_and_report(shortlists, tracks_by_id, deep=True)
+
+    assert len(concepts) == 1
+    assert concepts[0].critique is not None
+    assert concepts[0].critique.verdict == "needs_attention"
+    assert "CRITIQUE (DEEP MODE)" in report
+    assert "Verdict: needs_attention" in report
+    assert "vocal clash at 0:30" in report
+
+
+@respx.mock
+async def test_stage2_no_deep_makes_no_critique_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without --deep, the critique HTTP call must not fire and critique stays None."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    concepts, report = await stage2_curate_and_report(shortlists, tracks_by_id, deep=False)
+
+    assert concepts[0].critique is None
+    assert "CRITIQUE (DEEP MODE)" not in report
+    # Exactly 2 Anthropic calls: selection + report. No third call for critique.
+    assert len(route.calls) == 2
+
+
+@respx.mock
+async def test_stage2_deep_ignored_in_playlist_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Playlist mode runs variant scoring instead of the genre-mode critique loop."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool", mood="practical", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    concepts, report = await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset({"1"}),
+        seed_track_ids=["1"],
+        deep=True,
+    )
+    assert "CRITIQUE (DEEP MODE)" not in report
+    assert concepts[0].critique is None
+
+
+def test_parse_critique_tolerates_code_fences() -> None:
+    from mixlab.llm import _parse_critique
+
+    raw = '```json\n{"verdict": "solid", "single_weakest_moment": "track 4 transition", "structural_issues": [], "suggested_substitution": null}\n```'
+    critique = _parse_critique(raw)
+    assert critique.verdict == "solid"
+    assert critique.structural_issues == []
+    assert critique.suggested_substitution is None
+
+
+def test_parse_critique_malformed_json_returns_needs_attention() -> None:
+    """Bad JSON falls back to a needs_attention critique with the raw payload."""
+    from mixlab.llm import _parse_critique
+
+    critique = _parse_critique("not json at all")
+    assert critique.verdict == "needs_attention"
+    assert "critique parse failed" in critique.single_weakest_moment
+
+
+def test_parse_critique_coerces_invalid_verdict() -> None:
+    from mixlab.llm import _parse_critique
+
+    raw = '{"verdict": "AMAZING", "single_weakest_moment": "", "structural_issues": []}'
+    critique = _parse_critique(raw)
+    assert critique.verdict == "needs_attention"
+
+
 @respx.mock
 async def test_stage2_marks_only_unplayed_tracks_when_unplayed_ids_provided(monkeypatch: pytest.MonkeyPatch) -> None:
     """When unplayed_ids is provided, only those tracks get the 'unplayed' marker — not all tracks."""
