@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import get_args
+from typing import cast, get_args
 
 import pytest
 import respx
@@ -2032,6 +2032,68 @@ def test_stage2_playlist_system_caps_tracks_at_fourteen() -> None:
     assert "10–12 tracks" not in _STAGE2_SYSTEM_PLAYLIST
     assert "10–14 tracks" in _STAGE2_SYSTEM_PLAYLIST
     assert "Do not exceed 14" in _STAGE2_SYSTEM_PLAYLIST
+
+
+def test_stage2_report_prompt_enforces_prose_and_json_risk_consistency() -> None:
+    """The prose `Risk:` line and JSON is_risky/risk_type must agree (#29).
+
+    Without this rule the LLM writes rich prose risk descriptions while leaving JSON
+    is_risky=False, defeating the validator's justified-risk suppression (#28). The
+    consistency rule lives in the report-pass prompt because that is where prose risk
+    is authored against the selection pass's structured annotations.
+    """
+    from mixlab.llm import _STAGE2_REPORT_SYSTEM
+
+    assert "CONSISTENCY" in _STAGE2_REPORT_SYSTEM
+    assert "is_risky" in _STAGE2_REPORT_SYSTEM
+    assert "Risk:" in _STAGE2_REPORT_SYSTEM and "must agree" in _STAGE2_REPORT_SYSTEM
+    assert "Risk: none" in _STAGE2_REPORT_SYSTEM
+
+
+@respx.mock
+async def test_stage2_report_prompt_includes_transition_annotations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Report-pass prompt must include the selection pass's transitions annotations (#29).
+
+    Without this, the report writer cannot align its prose `Risk:` lines with the
+    structured `is_risky`/`risk_type` flags set during selection.
+    """
+    from mixlab.llm import _call_stage2_reports
+    from mixlab.models import Transition
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    captured: list[dict[str, object]] = []
+
+    def capture(request: object) -> Response:
+        body = json.loads(request.content)  # type: ignore[attr-defined]
+        captured.append(body)
+        return Response(200, json={"content": [{"text": "report"}], "stop_reason": "end_turn"})
+
+    respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
+
+    concept = MixConcept(
+        title="Test",
+        mood="dark",
+        track_ids=["1", "2", "3"],
+        transitions=[
+            Transition(from_id="1", to_id="2", is_risky=False, risk_type=""),
+            Transition(from_id="2", to_id="3", is_risky=True, risk_type="chapter_pivot"),
+        ],
+    )
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 4)
+    }
+
+    await _call_stage2_reports([concept], tracks_by_id, None, None, "test-key")
+
+    assert len(captured) == 1
+    messages = cast(list[dict[str, str]], captured[0]["messages"])
+    user_msg = next(m["content"] for m in messages if m["role"] == "user")
+    assert "chapter_pivot" in user_msg
+    assert "is_risky" in user_msg
 
 
 # ---------------------------------------------------------------------------

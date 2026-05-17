@@ -1321,6 +1321,13 @@ Role options: opener, groove, hook, pivot, lift, vocal-moment, texture-change, p
 Risk: describe the transition risk into this track (not out of it). "none" if clean.
 Why: why this track at this moment — one phrase, no full sentences needed.
 
+CONSISTENCY: the prose Risk: line for each track and the structured transition annotations \
+supplied in the input must agree. The input lists is_risky and risk_type per transition; mirror \
+them in prose. If a transition's is_risky=true, the destination track's Risk: line must name a \
+real risk (harmonic jump, BPM gap, energy shift, etc.) consistent with the risk_type. If a \
+transition's is_risky=false, the destination track's Risk: line must be "none". Do not write \
+"Risk: none" when is_risky=true, and do not describe a risk in prose when is_risky=false.
+
 Be opinionated, musical, and honest. Peer-to-peer, no marketing language, no filler.
 
 Return ONLY the report text. No JSON, no markdown fences, no preamble.\
@@ -1944,11 +1951,22 @@ async def _call_stage2_report_single(
             f"{i}. ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {t.genre}{extra_str}"
         )
 
+    transition_lines: list[str] = []
+    for tr in concept.transitions:
+        flag = "true" if tr.is_risky else "false"
+        rtype = tr.risk_type or '""'
+        transition_lines.append(f"{tr.from_id} → {tr.to_id}: is_risky={flag}, risk_type={rtype}")
+    transitions_block = (
+        "\n\nTransition annotations from selection (mirror these in prose Risk: lines):\n" + "\n".join(transition_lines)
+        if transition_lines
+        else ""
+    )
+
     prompt = (
         f"Concept title: {concept.title}\n"
         f"Strategy/mood: {concept.mood}\n"
         f"Thesis: {concept.name_reason}\n\n"
-        f"Tracks in play order:\n" + "\n".join(track_lines)
+        f"Tracks in play order:\n" + "\n".join(track_lines) + transitions_block
     )
 
     try:
