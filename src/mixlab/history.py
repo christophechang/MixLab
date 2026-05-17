@@ -9,13 +9,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from mixlab.models import MixCanvas, MixConcept
+from mixlab.models import ConceptShape, MixCanvas, MixConcept
 
 logger = logging.getLogger(__name__)
 
 _MAX_HISTORY = 50
 _RECENCY_WINDOW = 10
 _DECAY = 0.8
+
+# Combined-novelty weights (#7). Track-overlap stays primary; concept-shape is the
+# secondary signal that catches "same shape, different tracks" repetition.
+_NOVELTY_TRACK_WEIGHT = 0.65
+_NOVELTY_SHAPE_WEIGHT = 0.35
+_BPM_BUCKET = 10.0  # 10-BPM band buckets for shape comparison
 
 
 def _match_concept_to_canvas(concept: MixConcept, canvases: list[MixCanvas]) -> MixCanvas | None:
@@ -133,6 +139,8 @@ class HistoryEntry:
                 "contrast_potential": statistics.mean(c.score.contrast_potential for c in canvases),
                 "distinctiveness": statistics.mean(c.score.distinctiveness for c in canvases),
                 "novelty": statistics.mean(c.score.novelty for c in canvases),
+                "era_coherence": statistics.mean(c.score.era_coherence for c in canvases),
+                "label_coherence": statistics.mean(c.score.label_coherence for c in canvases),
                 "weakness_penalty": statistics.mean(c.score.weakness_penalty for c in canvases),
                 "overall": statistics.mean(c.score.overall for c in canvases),
             }
@@ -245,27 +253,127 @@ def format_recent_concepts(history: ConceptHistory, limit: int = _RECENT_CONCEPT
     return "\n".join(lines)
 
 
+def _bpm_band_label(bpm: float) -> str:
+    """Bucket a BPM into a 10-BPM band label like '170-180'. Returns '' when bpm <= 0."""
+    if bpm <= 0:
+        return ""
+    lo = int(bpm // _BPM_BUCKET) * int(_BPM_BUCKET)
+    return f"{lo}-{lo + int(_BPM_BUCKET)}"
+
+
+def concept_shape_from_canvas(canvas: MixCanvas) -> ConceptShape:
+    """Extract the deterministic concept-shape fingerprint from a candidate canvas."""
+    return ConceptShape(
+        bpm_band=_bpm_band_label(canvas.dominant_bpm),
+        camelot_zone=canvas.dominant_camelot or "",
+        # Canvas-side shape has no arc_type yet (Stage 2 hasn't run). Always "" so the
+        # field is excluded from comparison until Stage 2 result is in history.
+        energy_path="",
+        has_opener=bool(canvas.roles.opener),
+        has_closer=bool(canvas.roles.closer),
+        has_peak=bool(canvas.roles.peak),
+    )
+
+
+def concept_shape_from_entry(entry: HistoryEntry) -> ConceptShape:
+    """Extract the concept-shape fingerprint from a stored history entry."""
+    dominant_bpm = entry.dominant_bpm_clusters[0] if entry.dominant_bpm_clusters else 0.0
+    camelot = entry.dominant_camelot_keys[0] if entry.dominant_camelot_keys else ""
+    role_pattern = entry.role_pattern
+    return ConceptShape(
+        bpm_band=_bpm_band_label(dominant_bpm),
+        camelot_zone=camelot,
+        energy_path=entry.energy_path or "",
+        has_opener="opener" in role_pattern or bool(entry.opener_candidates),
+        has_closer="closer" in role_pattern or bool(entry.closer_candidates),
+        has_peak="peak" in role_pattern,
+    )
+
+
+def concept_shape_similarity(a: ConceptShape, b: ConceptShape) -> float:
+    """Similarity over reliably-populated shape fields.
+
+    Empty ``energy_path`` is excluded from comparison (Option A — unknown ≠ same).
+    Other fields always participate; equal bools count as a match. Returns 0.0 when
+    no field can be meaningfully compared.
+    """
+    matches = 0
+    total = 0
+    if a.bpm_band and b.bpm_band:
+        matches += int(a.bpm_band == b.bpm_band)
+        total += 1
+    if a.camelot_zone and b.camelot_zone:
+        matches += int(a.camelot_zone == b.camelot_zone)
+        total += 1
+    # energy_path: only compared when both sides populated (Option A).
+    if a.energy_path and b.energy_path:
+        matches += int(a.energy_path == b.energy_path)
+        total += 1
+    # Role-presence flags are always defined — compare unconditionally.
+    matches += int(a.has_opener == b.has_opener)
+    matches += int(a.has_closer == b.has_closer)
+    matches += int(a.has_peak == b.has_peak)
+    total += 3
+    if total == 0:
+        return 0.0
+    return matches / total
+
+
+@dataclass(frozen=True)
+class NoveltyBreakdown:
+    """Diagnostic breakdown of the similarity-to-history penalty (#7 / --debug)."""
+
+    track_similarity: float
+    shape_similarity: float
+    combined: float
+    age_of_top_match: int  # 0 = most recent run; -1 when no comparable history
+
+
+def similarity_breakdown_to_history(
+    canvas: MixCanvas,
+    history: ConceptHistory,
+    recency_window: int = _RECENCY_WINDOW,
+) -> NoveltyBreakdown:
+    """Combined track + shape similarity vs recent history, with age decay.
+
+    Combines a track-overlap Jaccard with a deterministic concept-shape similarity
+    (BPM band, dominant Camelot zone, role pattern, optional energy_path). The two
+    components are weighted (0.65 / 0.35) and decayed jointly per recency age before
+    taking the max across the recent window. Track-overlap remains primary; the shape
+    component catches "same shape, different tracks" repetition.
+    """
+    empty = NoveltyBreakdown(track_similarity=0.0, shape_similarity=0.0, combined=0.0, age_of_top_match=-1)
+    if not history.runs:
+        return empty
+    canvas_ids = frozenset(canvas.core_track_ids)
+    canvas_shape = concept_shape_from_canvas(canvas)
+    recent = history.runs[-recency_window:]
+    best = empty
+    for age, entry in enumerate(reversed(recent)):
+        hist_ids = frozenset(entry.core_track_ids)
+        union = canvas_ids | hist_ids
+        track_sim = len(canvas_ids & hist_ids) / len(union) if union else 0.0
+        shape_sim = concept_shape_similarity(canvas_shape, concept_shape_from_entry(entry))
+        combined = _NOVELTY_TRACK_WEIGHT * track_sim + _NOVELTY_SHAPE_WEIGHT * shape_sim
+        decayed = combined * (_DECAY**age)
+        if decayed > best.combined:
+            best = NoveltyBreakdown(
+                track_similarity=track_sim * (_DECAY**age),
+                shape_similarity=shape_sim * (_DECAY**age),
+                combined=decayed,
+                age_of_top_match=age,
+            )
+    return best
+
+
 def similarity_to_history(
     canvas: MixCanvas,
     history: ConceptHistory,
     recency_window: int = _RECENCY_WINDOW,
 ) -> float:
-    """Jaccard similarity of canvas core track IDs vs recent history entries, with age decay."""
-    if not history.runs:
-        return 0.0
-    canvas_ids = frozenset(canvas.core_track_ids)
-    if not canvas_ids:
-        return 0.0
-    recent = history.runs[-recency_window:]
-    max_sim = 0.0
-    for age, entry in enumerate(reversed(recent)):
-        hist_ids = frozenset(entry.core_track_ids)
-        if not hist_ids:
-            continue
-        union = canvas_ids | hist_ids
-        intersection = canvas_ids & hist_ids
-        jaccard = len(intersection) / len(union)
-        decayed = jaccard * (_DECAY**age)
-        if decayed > max_sim:
-            max_sim = decayed
-    return max_sim
+    """Combined track + shape similarity vs recent history, with age decay (#7).
+
+    Thin wrapper over :func:`similarity_breakdown_to_history` that returns just the
+    combined value for use in :func:`score_canvas`.
+    """
+    return similarity_breakdown_to_history(canvas, history, recency_window).combined

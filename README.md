@@ -223,6 +223,18 @@ Report context: 140 (custom genre, All Tracks)
 
 For standard and custom genre runs, a Rekordbox-compatible merged XML file can be attached to the Discord message or written to disk. It contains one playlist per concept plus an **All Unplayed Tunes** playlist with the full scoped unplayed pool when played-track history was used.
 
+### Steer genre mode with a free-text intent
+
+```bash
+./mixlab --genre house --intent "warmup set for an outdoor afternoon, low pressure, melodic"
+./mixlab --genre 4x4 --intent "peak time main-room, no warmup, hit hard fast"
+./mixlab --genre techno --mode played --intent "tools-only set, no melody, sustained pressure"
+```
+
+`--intent` accepts a free-text creative direction that is injected verbatim into the Stage 2 prompt for genre mode. There is no parsing or LLM extraction — the model reads it as guidance and fills in everything you did not specify. If the intent conflicts with the candidate pool, Stage 2 picks the closest viable interpretation and notes the gap.
+
+`--intent` is ignored in playlist mode (`--playlist`), which already runs its own Stage 0 intent-extraction pass over the seed playlist.
+
 ### Complete a mix from an existing Rekordbox playlist
 
 ```bash

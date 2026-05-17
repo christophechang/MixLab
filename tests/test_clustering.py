@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import pytest
 
 from mixlab.clustering import (
@@ -11,6 +13,7 @@ from mixlab.clustering import (
     group_by_genre,
     partition_bpm_pools,
     partition_outliers,
+    score_anchors,
     score_canvas,
     select_canvases,
     sort_by_camelot,
@@ -482,11 +485,13 @@ def test_score_canvas_weights_sum_to_one() -> None:
     s = score_canvas(canvas, ConceptHistory(), frozenset())
     # Weighted sum minus weakness_penalty, multiplied by floor_multiplier. Weights total 1.0.
     weighted = (
-        s.technical_viability * 0.20
+        s.technical_viability * 0.10
         + s.role_coverage * 0.25
         + s.anchor_strength * 0.15
         + s.contrast_potential * 0.15
         + s.distinctiveness * 0.15
+        + s.era_coherence * 0.05
+        + s.label_coherence * 0.05
         + s.novelty * 0.10
     )
     expected = max(0.0, (weighted - s.weakness_penalty) * s.floor_multiplier)
@@ -778,3 +783,265 @@ def test_select_canvases_debug_does_not_change_selection() -> None:
     selected_no_debug = [c.canvas_id for c in select_canvases(canvases_a, ConceptHistory(), n=3)]  # type: ignore[arg-type]
     selected_debug = [c.canvas_id for c in select_canvases(canvases_b, ConceptHistory(), n=3, debug=True)]  # type: ignore[arg-type]
     assert selected_no_debug == selected_debug
+
+
+# ---------------------------------------------------------------------------
+# Anchor detection (#19)
+# ---------------------------------------------------------------------------
+
+
+def _anchor_track(
+    track_id: str,
+    *,
+    bpm: float = 172.0,
+    camelot: str = "4A",
+    label: str = "",
+    artist: str = "Artist",
+    remixer: str = "",
+    enrichment: Literal["high", "medium", "low", ""] = "",
+    energy: int | None = None,
+    year: int | None = None,
+) -> Track:
+    return Track(
+        track_id=track_id,
+        artist=artist,
+        title=f"Title {track_id}",
+        bpm=bpm,
+        camelot_key=camelot,
+        genre="Drum & Bass",
+        label=label,
+        remixer=remixer,
+        enrichment_confidence=enrichment,
+        energy=energy,
+        year=year,
+    )
+
+
+def test_score_anchors_returns_value_per_track_in_unit_range() -> None:
+    pool = [_anchor_track(f"T{i}", bpm=170.0 + i) for i in range(5)]
+    scores = score_anchors(pool, {t.track_id: t for t in pool})
+    assert set(scores.keys()) == {t.track_id for t in pool}
+    assert all(0.0 <= s <= 1.0 for s in scores.values())
+
+
+def test_score_anchors_provenance_boosts_score() -> None:
+    bare = _anchor_track("T1")
+    rich = _anchor_track(
+        "T2",
+        remixer="Famous Remixer",
+        enrichment="high",
+        label="Rare Label",
+    )
+    pool = [bare, rich]
+    scores = score_anchors(pool, {t.track_id: t for t in pool})
+    assert scores["T2"] > scores["T1"]
+
+
+def test_score_anchors_rarity_rewards_unseen_label() -> None:
+    rare_label = _anchor_track("T_rare", label="OneOff")
+    common_label = _anchor_track("T_common", label="Bigname")
+    # Build a fake collection where Bigname appears 10 times.
+    collection: dict[str, Track] = {"T_rare": rare_label, "T_common": common_label}
+    for i in range(10):
+        collection[f"filler_{i}"] = _anchor_track(f"filler_{i}", label="Bigname")
+    scores = score_anchors([rare_label, common_label], collection)
+    assert scores["T_rare"] > scores["T_common"]
+
+
+def test_score_anchors_empty_pool_returns_empty_dict() -> None:
+    assert score_anchors([], {}) == {}
+
+
+def test_build_mix_canvas_populates_core_anchor_ids() -> None:
+    from mixlab.models import MixCanvas
+
+    # Mix a strongly-anchor track with weak filler tracks. Anchor: rare label, high
+    # enrichment, remixer set, year recent, energy in peak band. Filler: nothing.
+    tracks = [
+        _anchor_track(
+            "anchor",
+            remixer="X",
+            enrichment="high",
+            label="UniqueLabel",
+            energy=6,
+            year=2025,
+        ),
+    ]
+    for i in range(11):
+        tracks.append(_anchor_track(f"f{i:02d}", bpm=171.0 + (i * 0.1)))
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    # core pool size ~12; top 20% ≈ 2–3 anchors with floor 0.55.
+    assert canvas.core_anchor_ids, "expected at least one anchor"
+    assert "anchor" in canvas.core_anchor_ids
+
+
+def test_build_mix_canvas_no_anchors_when_pool_uniformly_weak() -> None:
+    from mixlab.models import MixCanvas
+
+    # All tracks identical & bare — none should clear the anchor threshold.
+    tracks = [_anchor_track(f"flat{i:02d}", bpm=172.0 + (i * 0.05), artist=f"A{i}", label="") for i in range(12)]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    assert canvas.core_anchor_ids == []
+
+
+# ---------------------------------------------------------------------------
+# Era and label canvas dimensions (#20)
+# ---------------------------------------------------------------------------
+
+
+def test_build_mix_canvas_tight_era_window_sets_high_coherence() -> None:
+    from mixlab.models import MixCanvas
+
+    tracks = [_anchor_track(f"t{i:02d}", bpm=172.0 + (i * 0.05), year=1996 + (i % 3)) for i in range(12)]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    assert canvas.era_window == (1996, 1998)
+    s = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s.era_coherence == pytest.approx(1.0)
+
+
+def test_build_mix_canvas_wide_era_span_zero_coherence() -> None:
+    from mixlab.models import MixCanvas
+
+    # Span 1992–2024 = 32 years → well past the _ERA_SPAN_ZERO cap.
+    tracks = [_anchor_track(f"t{i:02d}", bpm=172.0 + (i * 0.05), year=1992 + (i * 3)) for i in range(11)]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    assert canvas.era_window is not None
+    s = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s.era_coherence == pytest.approx(0.0)
+
+
+def test_build_mix_canvas_patchy_year_data_yields_no_era_window() -> None:
+    from mixlab.models import MixCanvas
+
+    # Only 2/12 tracks have year — below the 60% coverage floor.
+    tracks = [_anchor_track(f"t{i:02d}", bpm=172.0 + (i * 0.05), year=None) for i in range(10)]
+    tracks.append(_anchor_track("d1", bpm=172.5, year=2020))
+    tracks.append(_anchor_track("d2", bpm=172.6, year=2021))
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    assert canvas.era_window is None
+    s = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s.era_coherence == pytest.approx(0.0)
+
+
+def test_build_mix_canvas_dominant_label_above_share_threshold() -> None:
+    from mixlab.models import MixCanvas
+
+    # 6 of 11 (~55%) labelled tracks are on Warp — clears 40% share + 5-count floor.
+    tracks = [_anchor_track(f"w{i:02d}", bpm=172.0 + (i * 0.05), label="Warp") for i in range(6)]
+    tracks += [_anchor_track(f"o{i:02d}", bpm=172.0 + ((i + 6) * 0.05), label=f"Other{i}") for i in range(5)]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    assert canvas.dominant_label == "Warp"
+    assert canvas.label_share == pytest.approx(6 / 11, abs=1e-3)
+    s = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s.label_coherence > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Concept-anchor candidates (#10)
+# ---------------------------------------------------------------------------
+
+
+def _wildcard_track(
+    track_id: str,
+    *,
+    bpm: float = 195.0,
+    camelot: str = "12A",
+    label: str = "",
+    artist: str = "Artist",
+    energy: int | None = None,
+) -> Track:
+    """Build a track far enough from 172 BPM to land in the wildcard tier."""
+    return Track(
+        track_id=track_id,
+        artist=artist,
+        title=f"Wild {track_id}",
+        bpm=bpm,
+        camelot_key=camelot,
+        genre="Drum & Bass",
+        label=label,
+        energy=energy,
+    )
+
+
+def test_concept_anchor_identity_anchor_from_distinctive_label() -> None:
+    from mixlab.models import MixCanvas
+
+    # 12 core tracks on common label + 1 wildcard on a unique label → identity anchor.
+    core = [_anchor_track(f"c{i:02d}", bpm=172.0 + (i * 0.05), label="Common") for i in range(12)]
+    wild = _wildcard_track("wild1", bpm=200.0, camelot="9B", label="Rare Imprint", artist="Solo Artist")
+    tracks = core + [wild]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    ids = {a.track_id: a.anchor_type for a in canvas.concept_anchor_candidates}
+    assert "wild1" in ids
+    assert ids["wild1"] == "identity"
+
+
+def test_concept_anchor_peak_anchor_from_high_energy_wildcard() -> None:
+    from mixlab.models import MixCanvas
+
+    core = [_anchor_track(f"c{i:02d}", bpm=172.0 + (i * 0.05), label="Common") for i in range(12)]
+    wild = _wildcard_track("wildPeak", bpm=200.0, camelot="4A", label="Common", energy=7)
+    tracks = core + [wild]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    ids = {a.track_id: a.anchor_type for a in canvas.concept_anchor_candidates}
+    assert "wildPeak" in ids
+    assert ids["wildPeak"] == "peak"
+
+
+def test_concept_anchor_empty_when_no_exceptional_tracks() -> None:
+    from mixlab.models import MixCanvas
+
+    # All-core canvas with no bridge/wildcard tracks → no anchor candidates.
+    tracks = [_anchor_track(f"c{i:02d}", bpm=172.0 + (i * 0.05), label="Common") for i in range(12)]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    assert canvas.concept_anchor_candidates == []
+
+
+def test_concept_anchor_canvas_label_rarity_is_primary() -> None:
+    """Within-canvas rarity drives identity flag even when the label is common in the collection."""
+    from mixlab.models import MixCanvas
+
+    # Wildcard label appears once in canvas. Same label appears many times in the wider
+    # collection — within-canvas rarity should still be the dominant identity signal.
+    core = [_anchor_track(f"c{i:02d}", bpm=172.0 + (i * 0.05), label="HouseLabel") for i in range(12)]
+    wild = _wildcard_track("wild_loner", bpm=200.0, camelot="9B", label="SoloIn", artist="SoloArtist")
+    canvas_tracks = core + [wild]
+    # Wider collection adds many tracks on "SoloIn" so collection-level rarity is low.
+    collection = {t.track_id: t for t in canvas_tracks}
+    for i in range(40):
+        collection[f"coll_{i}"] = _anchor_track(f"coll_{i}", label="SoloIn", artist="SoloArtist")
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in canvas_tracks])
+    canvas = build_mix_canvas(concept, collection)
+    assert isinstance(canvas, MixCanvas)
+    ids = {a.track_id: a.anchor_type for a in canvas.concept_anchor_candidates}
+    assert ids.get("wild_loner") == "identity"
+
+
+def test_build_mix_canvas_no_dominant_label_when_scattered() -> None:
+    from mixlab.models import MixCanvas
+
+    tracks = [_anchor_track(f"t{i:02d}", bpm=172.0 + (i * 0.05), label=f"Label{i}") for i in range(12)]
+    concept = MixConcept(title="P", mood="dark", track_ids=[t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, {t.track_id: t for t in tracks})
+    assert isinstance(canvas, MixCanvas)
+    assert canvas.dominant_label is None
+    s = score_canvas(canvas, ConceptHistory(), frozenset())
+    assert s.label_coherence == pytest.approx(0.0)

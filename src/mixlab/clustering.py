@@ -25,11 +25,13 @@ import statistics
 import sys
 
 from mixlab.config import CustomGenre
-from mixlab.history import ConceptHistory, similarity_to_history
+from mixlab.history import ConceptHistory, similarity_breakdown_to_history, similarity_to_history
 from mixlab.models import (
     BpmPools,
     CanvasRoleCandidates,
     CanvasScore,
+    ConceptAnchorCandidate,
+    ConceptAnchorType,
     ContrastAssets,
     MixCanvas,
     MixConcept,
@@ -398,6 +400,292 @@ def _generate_risk_notes(
     return notes
 
 
+# Era/label canvas dimensions (#20).
+_ERA_MIN_YEAR_COVERAGE = 0.60
+_ERA_SPAN_FULL = 3  # years — below this, era_coherence is 1.0
+_ERA_SPAN_ZERO = 18  # years — above this, era_coherence is 0.0
+_LABEL_SHARE_THRESHOLD = 0.40
+_LABEL_MIN_COUNT = 5
+_LABEL_SHARE_FLOOR_FOR_COHERENCE = 0.30  # coherence = (share - 0.30) / 0.40, clamped to [0, 1]
+_LABEL_SHARE_FLOOR_DIVISOR = 0.40
+
+
+def _compute_era_window(core: list[Track]) -> tuple[tuple[int, int] | None, float]:
+    """Compute (era_window, era_coherence) for a core pool. Empty window when patchy.
+
+    Coherence is 1.0 when the span is <= ``_ERA_SPAN_FULL`` years, decays linearly to
+    0.0 by ``_ERA_SPAN_ZERO`` years. Year-coverage floor at ``_ERA_MIN_YEAR_COVERAGE``
+    of the pool — below that the era signal is suppressed entirely.
+    """
+    if not core:
+        return None, 0.0
+    years = [t.year for t in core if t.year is not None and t.year > 0]
+    if len(years) < _ERA_MIN_YEAR_COVERAGE * len(core):
+        return None, 0.0
+    lo, hi = min(years), max(years)
+    span = hi - lo
+    if span <= _ERA_SPAN_FULL:
+        coherence = 1.0
+    elif span >= _ERA_SPAN_ZERO:
+        coherence = 0.0
+    else:
+        coherence = max(0.0, 1.0 - (span - _ERA_SPAN_FULL) / (_ERA_SPAN_ZERO - _ERA_SPAN_FULL))
+    return (lo, hi), round(coherence, 4)
+
+
+def _compute_dominant_label(core: list[Track]) -> tuple[str | None, float, float]:
+    """Compute (dominant_label, label_share, label_coherence) for a core pool.
+
+    Returns (None, 0.0, 0.0) when no label clears the share threshold or the absolute
+    minimum count. Coherence ramps from 0.0 at the threshold up to 1.0 around 0.70+
+    share so a near-monolithic canvas gets a stronger bonus than a barely-dominant one.
+    """
+    from collections import Counter
+
+    labelled = [t.label for t in core if t.label]
+    if not labelled:
+        return None, 0.0, 0.0
+    counts = Counter(labelled)
+    top_label, top_count = counts.most_common(1)[0]
+    share = top_count / len(labelled)
+    if share < _LABEL_SHARE_THRESHOLD or top_count < _LABEL_MIN_COUNT:
+        return None, 0.0, 0.0
+    coherence = min(1.0, max(0.0, (share - _LABEL_SHARE_FLOOR_FOR_COHERENCE) / _LABEL_SHARE_FLOOR_DIVISOR))
+    return top_label, round(share, 4), round(coherence, 4)
+
+
+# Concept-anchor candidate detection (#10). Multi-signal scoring over bridge/wildcard
+# tracks to surface structurally exceptional picks that Stage 2 might otherwise
+# overlook. Three categories — peak, identity, structural-exception — driven by
+# different signals so the tag tells Stage 2 *why* the track was flagged.
+_CONCEPT_ANCHOR_THRESHOLD = 0.40
+_CONCEPT_ANCHOR_PEAK_ENERGY = 6
+_CONCEPT_ANCHOR_LOW_ENERGY = 3
+_CONCEPT_ANCHOR_COLLECTION_RARITY_FLOOR = 20
+
+
+def _concept_anchor_signals(
+    track: Track,
+    canvas_tracks: list[Track],
+    collection: dict[str, Track],
+    roles: CanvasRoleCandidates,
+    dominant_camelot: str,
+) -> tuple[float, ConceptAnchorType]:
+    """Score a bridge/wildcard track and pick the dominant anchor category.
+
+    Composite score in [0, 1] aggregates role-fit, within-canvas label/artist rarity,
+    collection-level rarity, harmonic contrast vs the dominant key, and energy-role
+    fit. Category is determined by which signal cluster is dominant — peak when the
+    track sits at the top of the energy band, identity when label/artist distinctiveness
+    leads, structural-exception when role-fit leads (default).
+    """
+    role_fit = 0.0
+    if track.track_id in roles.opener:
+        role_fit = max(role_fit, 0.40)
+    if track.track_id in roles.closer:
+        role_fit = max(role_fit, 0.40)
+    if track.track_id in roles.pivot:
+        role_fit = max(role_fit, 0.30)
+    if track.track_id in roles.peak:
+        role_fit = max(role_fit, 0.30)
+
+    from collections import Counter
+
+    canvas_label_counts = Counter(t.label for t in canvas_tracks if t.label)
+    canvas_artist_counts = Counter(t.artist for t in canvas_tracks if t.artist)
+    canvas_label_n = canvas_label_counts.get(track.label, 0)
+    canvas_artist_n = canvas_artist_counts.get(track.artist, 0)
+    canvas_label_rarity = max(0.0, 1.0 - max(0, canvas_label_n - 1) / 4.0) if track.label else 0.0
+    canvas_artist_rarity = max(0.0, 1.0 - max(0, canvas_artist_n - 1) / 4.0) if track.artist else 0.0
+
+    coll_label_n = sum(1 for t in collection.values() if track.label and t.label == track.label)
+    coll_artist_n = sum(1 for t in collection.values() if track.artist and t.artist == track.artist)
+    coll_label_rarity = max(0.0, 1.0 - max(0, coll_label_n - 1) / _CONCEPT_ANCHOR_COLLECTION_RARITY_FLOOR)
+    coll_artist_rarity = max(0.0, 1.0 - max(0, coll_artist_n - 1) / _CONCEPT_ANCHOR_COLLECTION_RARITY_FLOOR)
+
+    contrast = 0.0
+    if dominant_camelot and camelot_distance(track.camelot_key, dominant_camelot) >= 3:
+        contrast = 0.5
+
+    energy_peak_signal = 0.0
+    energy_low_signal = 0.0
+    if track.energy is not None:
+        if track.energy >= _CONCEPT_ANCHOR_PEAK_ENERGY:
+            energy_peak_signal = 0.4
+        elif track.energy <= _CONCEPT_ANCHOR_LOW_ENERGY:
+            energy_low_signal = 0.3
+
+    # Identity score: within-canvas rarity primary, collection rarity additive bonus.
+    identity_signal = 0.7 * max(canvas_label_rarity, canvas_artist_rarity) + 0.3 * max(
+        coll_label_rarity, coll_artist_rarity
+    )
+
+    composite = min(
+        1.0,
+        max(role_fit, identity_signal, energy_peak_signal, energy_low_signal, contrast),
+    )
+
+    # Category: pick the dominant cluster. Peak energy and identity beat plain role-fit
+    # so the tag stays informative for Stage 2.
+    if energy_peak_signal > 0 and energy_peak_signal >= identity_signal:
+        category: ConceptAnchorType = "peak"
+    elif identity_signal >= max(role_fit, contrast):
+        category = "identity"
+    else:
+        category = "structural-exception"
+    return composite, category
+
+
+def _detect_concept_anchors(
+    pools: BpmPools,
+    tracks_by_id: dict[str, Track],
+    roles: CanvasRoleCandidates,
+    dominant_camelot: str,
+) -> list[ConceptAnchorCandidate]:
+    """Score every bridge/wildcard track and return those clearing the threshold."""
+    off_core = list(pools.bridge) + list(pools.wildcard)
+    if not off_core:
+        return []
+    canvas_tracks = list(pools.core) + off_core
+    candidates: list[ConceptAnchorCandidate] = []
+    for track in off_core:
+        score, category = _concept_anchor_signals(track, canvas_tracks, tracks_by_id, roles, dominant_camelot)
+        if score >= _CONCEPT_ANCHOR_THRESHOLD:
+            candidates.append(ConceptAnchorCandidate(track_id=track.track_id, anchor_type=category))
+    return candidates
+
+
+def _era_coherence_from_window(window: tuple[int, int] | None) -> float:
+    """Coherence value for a precomputed (min_year, max_year) tuple."""
+    if window is None:
+        return 0.0
+    span = window[1] - window[0]
+    if span <= _ERA_SPAN_FULL:
+        return 1.0
+    if span >= _ERA_SPAN_ZERO:
+        return 0.0
+    return round(max(0.0, 1.0 - (span - _ERA_SPAN_FULL) / (_ERA_SPAN_ZERO - _ERA_SPAN_FULL)), 4)
+
+
+def _label_coherence_from_share(share: float) -> float:
+    """Coherence ramp from the share threshold up to a near-monolithic canvas."""
+    if share < _LABEL_SHARE_THRESHOLD:
+        return 0.0
+    return round(
+        min(1.0, max(0.0, (share - _LABEL_SHARE_FLOOR_FOR_COHERENCE) / _LABEL_SHARE_FLOOR_DIVISOR)),
+        4,
+    )
+
+
+_ANCHOR_WEIGHT_PROVENANCE = 0.30
+_ANCHOR_WEIGHT_RARITY = 0.25
+_ANCHOR_WEIGHT_CENTRALITY = 0.20
+_ANCHOR_WEIGHT_ENERGY = 0.15
+_ANCHOR_WEIGHT_RECENCY = 0.10
+
+_ANCHOR_THRESHOLD = 0.55
+_ANCHOR_TOP_FRACTION = 0.20
+_ANCHOR_RARITY_FLOOR = 5
+_ANCHOR_CURRENT_YEAR = 2026
+
+
+def _provenance_signal(t: Track) -> float:
+    score = 0.0
+    if t.remixer:
+        score += 0.45
+    if t.enrichment_confidence == "high":
+        score += 0.35
+    elif t.enrichment_confidence == "medium":
+        score += 0.15
+    if t.label:
+        score += 0.20
+    return min(1.0, score)
+
+
+def _rarity_signal(t: Track, label_counts: dict[str, int], artist_counts: dict[str, int]) -> float:
+    """Library rarity: rare label/artist scores higher, saturating at <5 other tracks."""
+    label_total = label_counts.get(t.label, 0) if t.label else _ANCHOR_RARITY_FLOOR
+    artist_total = artist_counts.get(t.artist, 0) if t.artist else _ANCHOR_RARITY_FLOOR
+    label_rarity = max(0.0, 1.0 - max(0, label_total - 1) / _ANCHOR_RARITY_FLOOR)
+    artist_rarity = max(0.0, 1.0 - max(0, artist_total - 1) / _ANCHOR_RARITY_FLOOR)
+    return min(1.0, 0.5 * label_rarity + 0.5 * artist_rarity)
+
+
+def _centrality_signal(t: Track, median_bpm: float, dominant_camelot: str) -> float:
+    score = 0.0
+    if median_bpm > 0 and abs(t.bpm - median_bpm) <= 2.0:
+        score += 0.6
+    if dominant_camelot and t.camelot_key == dominant_camelot:
+        score += 0.4
+    return min(1.0, score)
+
+
+def _energy_signal(t: Track) -> float:
+    if t.energy is None:
+        return 0.0
+    if 6 <= t.energy <= 7:
+        return 0.8
+    if t.energy <= 2:
+        return 0.5
+    return 0.0
+
+
+def _recency_signal(t: Track) -> float:
+    if t.year is None or t.year <= 0:
+        return 0.0
+    age = _ANCHOR_CURRENT_YEAR - t.year
+    if age <= 3:
+        return 1.0
+    return 0.0
+
+
+def score_anchors(
+    pool: list[Track],
+    tracks_by_id: dict[str, Track],
+) -> dict[str, float]:
+    """Compute anchor scores for every track in ``pool`` (#19).
+
+    The score combines provenance, library rarity, pool centrality, energy
+    positioning, and recency — each normalised to [0, 1] and weighted-summed.
+    Library rarity uses ``tracks_by_id`` (the full collection) for label/artist
+    counts. Returns ``{track_id: score}`` covering every pool track.
+    """
+    if not pool:
+        return {}
+    from collections import Counter
+
+    label_counts: dict[str, int] = dict(Counter(t.label for t in tracks_by_id.values() if t.label))
+    artist_counts: dict[str, int] = dict(Counter(t.artist for t in tracks_by_id.values() if t.artist))
+
+    median_bpm = statistics.median(t.bpm for t in pool) if pool else 0.0
+    core_keys = [t.camelot_key for t in pool]
+    dominant_camelot = max(set(core_keys), key=core_keys.count) if core_keys else ""
+
+    scores: dict[str, float] = {}
+    for t in pool:
+        score = (
+            _provenance_signal(t) * _ANCHOR_WEIGHT_PROVENANCE
+            + _rarity_signal(t, label_counts, artist_counts) * _ANCHOR_WEIGHT_RARITY
+            + _centrality_signal(t, median_bpm, dominant_camelot) * _ANCHOR_WEIGHT_CENTRALITY
+            + _energy_signal(t) * _ANCHOR_WEIGHT_ENERGY
+            + _recency_signal(t) * _ANCHOR_WEIGHT_RECENCY
+        )
+        scores[t.track_id] = round(min(1.0, score), 4)
+    return scores
+
+
+def _select_anchor_ids(scores: dict[str, float]) -> list[str]:
+    """Pick top-20% of pool by anchor score, requiring ≥ _ANCHOR_THRESHOLD absolute."""
+    if not scores:
+        return []
+    eligible = [(tid, s) for tid, s in scores.items() if s >= _ANCHOR_THRESHOLD]
+    if not eligible:
+        return []
+    eligible.sort(key=lambda kv: kv[1], reverse=True)
+    cap = max(1, int(round(len(scores) * _ANCHOR_TOP_FRACTION)))
+    return [tid for tid, _ in eligible[:cap]]
+
+
 def _canvas_id(concept: MixConcept, tracks: list[Track]) -> str:
     genre = concept.mood[:8].replace(" ", "_") if concept.mood else "unknown"
     if not tracks:
@@ -425,6 +713,13 @@ def build_mix_canvas(
     contrast = _detect_contrast(tracks, dominant_camelot)
     risk_notes = _generate_risk_notes(tracks, pools, roles)
 
+    anchor_scores = score_anchors(pools.core, tracks_by_id)
+    core_anchor_ids = _select_anchor_ids(anchor_scores)
+
+    era_window, _ = _compute_era_window(pools.core)
+    dominant_label, label_share, _ = _compute_dominant_label(pools.core)
+    concept_anchor_candidates = _detect_concept_anchors(pools, tracks_by_id, roles, dominant_camelot)
+
     genre = tracks[0].genre if tracks else ""
 
     return MixCanvas(
@@ -441,6 +736,11 @@ def build_mix_canvas(
         risk_notes=risk_notes,
         score=CanvasScore(),
         source_concept=concept,
+        core_anchor_ids=core_anchor_ids,
+        era_window=era_window,
+        dominant_label=dominant_label,
+        label_share=label_share,
+        concept_anchor_candidates=concept_anchor_candidates,
     )
 
 
@@ -450,24 +750,22 @@ _HIST_DECAY = 0.8
 
 
 def _novelty_source(canvas: MixCanvas, history: ConceptHistory) -> str:
-    """Return a short description of the top history contributor to novelty penalty."""
-    if not history.runs or not canvas.core_track_ids:
+    """Return a short description of the top history contributor to novelty penalty.
+
+    Shows the combined value alongside its track/shape components so the user can see
+    when the penalty is driven by track overlap, by repeated concept shape, or both.
+    """
+    if not history.runs:
         return "no history"
-    canvas_ids = frozenset(canvas.core_track_ids)
-    recent = history.runs[-_HIST_RECENCY:]
-    best_sim = 0.0
-    best_label = "no overlap with history"
-    for age, entry in enumerate(reversed(recent)):
-        hist_ids = frozenset(entry.core_track_ids)
-        union = canvas_ids | hist_ids
-        if not union:
-            continue
-        jaccard = len(canvas_ids & hist_ids) / len(union)
-        decayed = jaccard * (_HIST_DECAY**age)
-        if decayed > best_sim:
-            best_sim = decayed
-            best_label = f"run[{entry.created_at[:10]} genre={entry.genre}] jaccard_decayed={decayed:.3f}"
-    return best_label
+    breakdown = similarity_breakdown_to_history(canvas, history, _HIST_RECENCY)
+    if breakdown.age_of_top_match < 0 or breakdown.combined == 0.0:
+        return "no overlap with history"
+    entry = list(reversed(history.runs[-_HIST_RECENCY:]))[breakdown.age_of_top_match]
+    return (
+        f"run[{entry.created_at[:10]} genre={entry.genre}] "
+        f"combined_decayed={breakdown.combined:.3f} "
+        f"(track={breakdown.track_similarity:.3f}, shape={breakdown.shape_similarity:.3f})"
+    )
 
 
 def _emit_canvas_score_debug(
@@ -498,6 +796,13 @@ def _emit_canvas_score_debug(
         f"novelty={score.novelty:.3f}  overall={score.overall:.3f}",
         file=sys.stderr,
     )
+    era_str = f"{canvas.era_window[0]}-{canvas.era_window[1]}" if canvas.era_window else "—"
+    label_str = f"{canvas.dominant_label} ({canvas.label_share:.2f})" if canvas.dominant_label else "—"
+    print(
+        f"  era_coherence={score.era_coherence:.3f} ({era_str})  "
+        f"label_coherence={score.label_coherence:.3f} ({label_str})",
+        file=sys.stderr,
+    )
     print(
         f"  weakness_penalty={score.weakness_penalty:.3f} ({len(canvas.risk_notes)} risk note(s))  "
         f"floor_multiplier={score.floor_multiplier:.2f}",
@@ -519,15 +824,24 @@ _WEAKNESS_PENALTY_CAP = 0.20
 _FLOOR_MULTIPLIER_BELOW_MIN_CORE = 0.5
 _MIN_CORE_FOR_FULL_SCORE = 8
 
-# Weights sum to 1.0. Tuned in v0.10 — distinctiveness raised from 0.10 to 0.15
-# at the cost of technical_viability (0.25 → 0.20). Technical viability is also
-# logarithmic with saturation at 15 tracks (was linear, saturating at 20), so a
-# 15-track distinctive canvas can outrank a 30-track generic one.
-_WEIGHT_TECHNICAL_VIABILITY = 0.20
+# Weights sum to 1.0. Tuned across v0.10 (#9) and v0.11 (#20):
+#  - #9 (v0.10): distinctiveness raised from 0.10 to 0.15 at the cost of
+#    technical_viability (0.25 → 0.20). Technical viability is also logarithmic
+#    with saturation at 15 tracks (was linear, saturating at 20), so a 15-track
+#    distinctive canvas can outrank a 30-track generic one.
+#  - #20 (v0.11): era_coherence and label_coherence introduced at 0.05 each,
+#    funded by halving technical_viability again (0.20 → 0.10). Canvases with a
+#    tight era window or a dominant label now get a small structural bonus that
+#    a uniformly-scattered pool does not — and missing year/label data is
+#    treated as no signal (no penalty), so libraries with patchy metadata are
+#    not punished.
+_WEIGHT_TECHNICAL_VIABILITY = 0.10
 _WEIGHT_ROLE_COVERAGE = 0.25
 _WEIGHT_ANCHOR_STRENGTH = 0.15
 _WEIGHT_CONTRAST_POTENTIAL = 0.15
 _WEIGHT_DISTINCTIVENESS = 0.15
+_WEIGHT_ERA_COHERENCE = 0.05
+_WEIGHT_LABEL_COHERENCE = 0.05
 _WEIGHT_NOVELTY = 0.10
 
 
@@ -579,12 +893,19 @@ def score_canvas(
 
     novelty = 1.0 - similarity_to_history(canvas, history)
 
+    # Era and label coherence (#20). era_window/dominant_label/label_share are populated
+    # by build_mix_canvas. Missing data → coherence 0.0 (no penalty, just no bonus).
+    era_coherence = _era_coherence_from_window(canvas.era_window)
+    label_coherence = _label_coherence_from_share(canvas.label_share) if canvas.dominant_label else 0.0
+
     weighted = (
         technical_viability * _WEIGHT_TECHNICAL_VIABILITY
         + role_coverage * _WEIGHT_ROLE_COVERAGE
         + anchor_strength * _WEIGHT_ANCHOR_STRENGTH
         + contrast_potential * _WEIGHT_CONTRAST_POTENTIAL
         + distinctiveness * _WEIGHT_DISTINCTIVENESS
+        + era_coherence * _WEIGHT_ERA_COHERENCE
+        + label_coherence * _WEIGHT_LABEL_COHERENCE
         + novelty * _WEIGHT_NOVELTY
     )
 
@@ -606,6 +927,8 @@ def score_canvas(
         contrast_potential=contrast_potential,
         distinctiveness=distinctiveness,
         novelty=novelty,
+        era_coherence=era_coherence,
+        label_coherence=label_coherence,
         weakness_penalty=weakness_penalty,
         floor_multiplier=floor_multiplier,
         overall=overall,

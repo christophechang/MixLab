@@ -464,6 +464,7 @@ async def run(
     max_bpm: float | None = None,
     min_year: int | None = None,
     max_year: int | None = None,
+    intent: str | None = None,
     debug: bool = False,
 ) -> None:
     # 1. Parse collection.
@@ -665,6 +666,8 @@ async def run(
         canvases=selected_canvases,
         unplayed_ids=unplayed_ids_for_stage2,
         concept_history=history,
+        genre_intent=intent,
+        mode=mode,
         debug=debug,
     )
     if not all_concepts:
@@ -818,6 +821,7 @@ examples:
   mixlab --genre house --mode played   house set from battle-tested played tracks
   mixlab --genre house --min-bpm 122 --max-bpm 128  narrow pool by BPM range
   mixlab --genre drum_and_bass --min-year 2020       tracks from 2020 onwards only
+  mixlab --genre house --intent "warmup, melodic, outdoor afternoon"  creative direction
   mixlab --genres                     show cached counts from last run (no API)
   mixlab --export-unplayed            export all unplayed tracks as Rekordbox XML + post to Discord
 """,
@@ -897,6 +901,17 @@ examples:
         help="Maximum release year (inclusive). Tracks with no year are excluded when this is set.",
     )
     parser.add_argument(
+        "--intent",
+        type=str,
+        default=None,
+        metavar="TEXT",
+        help=(
+            "Free-text creative direction for the Stage 2 model in genre mode "
+            "(e.g. 'warmup set, low pressure, melodic'). "
+            "Ignored in playlist mode, which runs its own Stage 0 intent extraction."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Emit verbose canvas scoring diagnostics to stderr. Also enabled by MIXLAB_DEBUG_SCORE=1.",
@@ -924,6 +939,11 @@ examples:
         export_dir = Path("output/playlists")
 
     if args.playlist:
+        if args.intent is not None:
+            print(
+                "--intent ignored in playlist mode — playlist runs use Stage 0 intent extraction from the seed.",
+                file=sys.stderr,
+            )
         asyncio.run(
             run_playlist_mode(
                 args.playlist,
@@ -948,6 +968,7 @@ examples:
             max_bpm=args.max_bpm,
             min_year=args.min_year,
             max_year=args.max_year,
+            intent=args.intent,
             debug=debug,
         )
     )

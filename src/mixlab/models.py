@@ -101,9 +101,45 @@ class CanvasScore:
     contrast_potential: float = 0.0
     distinctiveness: float = 1.0
     novelty: float = 1.0
+    # Era/label coherence (#20). 0.0 = no signal (missing data or scattered) — never a penalty,
+    # only a bonus when the canvas has a tight era window or a dominant label.
+    era_coherence: float = 0.0
+    label_coherence: float = 0.0
     weakness_penalty: float = 0.0  # subtracted from the weighted sum (max 0.20)
     floor_multiplier: float = 1.0  # 0.5 when core_n < 8, 1.0 otherwise
     overall: float = 0.0
+
+
+ConceptAnchorType = Literal["peak", "identity", "structural-exception"]
+
+
+@dataclass(frozen=True)
+class ConceptAnchorCandidate:
+    """A bridge/wildcard track flagged as a structurally exceptional pick (#10).
+
+    The category indicates the dominant reason the system flagged the track —
+    Stage 2 still chooses whether and how to use it, but the tag lets the model
+    skip rederiving the signal from per-track metadata.
+    """
+
+    track_id: str
+    anchor_type: ConceptAnchorType
+
+
+@dataclass(frozen=True)
+class ConceptShape:
+    """Deterministic shape fingerprint of a concept for shape-novelty scoring (#7).
+
+    Fields are deliberately reliable-or-omitted: ``energy_path`` is excluded from
+    similarity comparison when empty (Option A — unknown arc is not a match).
+    """
+
+    bpm_band: str  # e.g. "170-180" (10-BPM bucket). "" when unknown.
+    camelot_zone: str  # dominant Camelot key. "" when unknown.
+    energy_path: str  # arc_type from history. "" when unknown — excluded from comparison.
+    has_opener: bool
+    has_closer: bool
+    has_peak: bool
 
 
 @dataclass
@@ -121,6 +157,22 @@ class MixCanvas:
     risk_notes: list[str]
     score: CanvasScore
     source_concept: MixConcept
+    # Genre-mode anchor candidates from `score_anchors` (#19). Top-scoring core-pool
+    # tracks Stage 2 is nudged to prefer as identity-defining picks. Signal only —
+    # not enforced. Empty when no track clears the threshold (or for legacy canvases).
+    core_anchor_ids: list[str] = field(default_factory=list)
+    # Era and label canvas dimensions (#20). ``era_window`` is (min_year, max_year)
+    # over core tracks with year data; None when coverage is too patchy. ``dominant_label``
+    # is the most-frequent label name when its share clears the threshold; None otherwise.
+    # ``label_share`` is the share of that label across labelled core tracks (0.0 when no
+    # dominant label).
+    era_window: tuple[int, int] | None = None
+    dominant_label: str | None = None
+    label_share: float = 0.0
+    # Bridge/wildcard tracks flagged as structurally exceptional (#10). Surfaces in
+    # the Stage 2 canvas header so the model can deliberately use them in structural
+    # roles. Empty when no off-core track crosses the multi-signal threshold.
+    concept_anchor_candidates: list[ConceptAnchorCandidate] = field(default_factory=list)
 
 
 SeedTier = Literal["anchor", "supporting", "optional"]

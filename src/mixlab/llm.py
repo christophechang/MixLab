@@ -50,6 +50,7 @@ from mixlab.models import (
     SeedTier,
     SetRole,
     Track,
+    TrackMode,
     Transition,
 )
 
@@ -708,6 +709,22 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
     if role_parts:
         lines.append(" | ".join(role_parts))
 
+    if canvas.core_anchor_ids:
+        lines.append(f"Anchors: {ids_block(canvas.core_anchor_ids)}")
+
+    if canvas.era_window is not None:
+        lo, hi = canvas.era_window
+        lines.append(f"Era: {lo}-{hi} (era_coherence: {canvas.score.era_coherence:.2f})")
+    if canvas.dominant_label:
+        lines.append(
+            f"Dominant label: {canvas.dominant_label} "
+            f"(share: {canvas.label_share:.2f}, label_coherence: {canvas.score.label_coherence:.2f})"
+        )
+
+    if canvas.concept_anchor_candidates:
+        anchor_parts = " ".join(f"ID:{a.track_id} [{a.anchor_type}]" for a in canvas.concept_anchor_candidates)
+        lines.append(f"Concept anchors (structural exceptions): {anchor_parts}")
+
     contrast_parts = []
     if c.vocal_moments:
         contrast_parts.append(f"Vocal: {ids_block(c.vocal_moments)}")
@@ -768,8 +785,35 @@ _STAGE2_CANVAS_RULES = """\
 - If a canvas's risk notes describe structural problems you cannot overcome with track selection (e.g. weak closer pool with no resolution candidate, all-high-energy with no viable dynamic arc), you may skip that canvas rather than force a weak concept. You are not obligated to produce a concept from every canvas.\n\
 - Not every mix needs every role.\n\
 - Harmonic and BPM compatibility are helpers, not constraints.\n\
-- For transitions involving bridge or wildcard tracks, state the specific mechanism that makes it survivable.\
+- For transitions involving bridge or wildcard tracks, state the specific mechanism that makes it survivable.\n\
+- Anchor candidates shown on the canvas header (Anchors:) are tracks the system has identified as distinctive or identity-defining based on provenance, library rarity, and pool centrality. Prefer including one anchor in each concept's tracklist — the concept will feel more rooted. This is preference, not requirement; a concept built entirely from non-anchor tracks is acceptable if the narrative is stronger without anchor inclusion.\n\
+- Concept anchor candidates (Concept anchors: line) are bridge/wildcard tracks flagged as structurally interesting exceptions, tagged [peak], [identity], or [structural-exception]. If you use one in a structural role (opener, closer, pivot, reset, peak), name the specific role and why this track earns it. If you use a bridge/wildcard track that is not in this list, the bar for justification is higher — explain explicitly what concept-defining function it serves.\
 """
+
+
+# Mode-specific Stage 2 framing fragments (#18). Appended to the genre-mode system prompt
+# (NOT playlist mode — that has its own Stage 0 intent brief). Each fragment is short,
+# additive creative direction — it does not replace any core prompt instruction.
+_STAGE2_MODE_FRAGMENT_UNPLAYED = """\
+\nMODE: UNPLAYED\n\
+The candidate pool consists of tracks the user has NOT played live. Your job is to surface material worth introducing into their sets — concepts that justify a debut. Prefer concepts that frame the unplayed tracks as discoveries rather than safe additions to a familiar mix. A concept here is most successful when the user finishes reading and thinks "I should have been playing these."\
+"""
+
+_STAGE2_MODE_FRAGMENT_PLAYED = """\
+\nMODE: PLAYED\n\
+The candidate pool consists of tracks the user has played live before. Familiarity is an asset — make sequencing moves you would not try with unknown material. Bolder Camelot jumps, sharper energy contrasts, and chapter pivots are more readily justified here. A concept here is most successful when the user finishes reading and thinks "I never put these together that way."\
+"""
+
+_STAGE2_MODE_FRAGMENT_ALL = """\
+\nMODE: ALL\n\
+The candidate pool contains both played and unplayed tracks. Tracks marked `unplayed` have never been performed live. Concepts that interleave played and unplayed material in deliberate combinations are most valuable — a known weapon supported by unplayed texture, or an unplayed peak earned by familiar groove-locks. Identify whether each concept leans played-anchored, unplayed-anchored, or balanced, and note this in the report's thesis line.\
+"""
+
+_STAGE2_MODE_FRAGMENTS: dict[TrackMode, str] = {
+    "unplayed": _STAGE2_MODE_FRAGMENT_UNPLAYED,
+    "played": _STAGE2_MODE_FRAGMENT_PLAYED,
+    "all": _STAGE2_MODE_FRAGMENT_ALL,
+}
 
 
 def select_shortlists_for_stage2(shortlists: list[MixConcept]) -> list[MixConcept]:
@@ -1026,6 +1070,17 @@ def validate_stage2_output(
                 pool = "bridge" if to_id in bridge_ids else "wildcard"
                 if tr is None or (not tr.is_risky and tr.risk_type == ""):
                     warnings.append(f"{label} {pool} track ID {to_id} used without a justified transition")
+
+        # Wildcard used in any role but not flagged as a concept-anchor candidate (#10).
+        # Wildcard inclusion outside the anchor list raises the bar for justification.
+        canvas_for_concept_anchors = _match_canvas_for_concept(concept, canvases)
+        if canvas_for_concept_anchors is not None:
+            anchor_track_ids = {a.track_id for a in canvas_for_concept_anchors.concept_anchor_candidates}
+            for tid in concept.track_ids:
+                if tid in wildcard_ids and tid not in anchor_track_ids:
+                    warnings.append(
+                        f"{label} wildcard track ID {tid} used but not flagged as a concept-anchor candidate"
+                    )
 
         # DJ-structural warnings: opener/closer presence, peak, wind-down, role-family runs,
         # energy bands. Genre-aware and arc_type-aware softening for soft-tier checks.
@@ -1592,6 +1647,37 @@ def _append_bold_moves_to_report(
     return f"{report.rstrip()}\n\n{annotation}"
 
 
+def _format_practicality_line(score: DJPracticalityScore) -> str:
+    """One-line practicality summary appended to genre-mode reports (#21).
+
+    In genre mode there are no seed adjacencies, so ``fragment_preserved`` is always
+    1.0 — overall is slightly inflated relative to playlist-mode scores. Decorative
+    for now; intentionally not used for ranking.
+    """
+    return (
+        "**Practicality**: "
+        f"bpm_smoothness {score.bpm_smoothness:.2f}, "
+        f"harmonic_ratio {score.harmonic_ratio:.2f}, "
+        f"risk_justified {score.risk_justified:.2f}, "
+        f"overall {score.overall:.2f}"
+    )
+
+
+def _append_practicality_to_report(
+    report: str,
+    concept: MixConcept,
+    tracks_by_id: dict[str, Track],
+) -> str:
+    """Compute DJPracticalityScore and append it to the concept report (genre mode).
+
+    Playlist mode uses ``CompletionVariant.practicality_score`` via the variant
+    scoring path and embeds the value in WINNER labelling — this helper is the
+    genre-mode counterpart.
+    """
+    score = _compute_practicality_score(concept, tracks_by_id, intent_brief=None)
+    return f"{report.rstrip()}\n\n{_format_practicality_line(score)}"
+
+
 def _playlist_retention_stats(
     concept: MixConcept,
     seed_track_ids: list[str],
@@ -1912,6 +1998,8 @@ async def stage2_curate_and_report(
     used_mix_names: list[str] | None = None,
     canvases: list[MixCanvas] | None = None,
     concept_history: ConceptHistory | None = None,
+    genre_intent: str | None = None,
+    mode: TrackMode | None = None,
     debug: bool = False,
 ) -> tuple[list[MixConcept], str]:
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -1977,6 +2065,22 @@ async def stage2_curate_and_report(
         if block:
             recent_concepts_block = block + "\n\n"
 
+    # Genre-mode user intent block (#16). Pure free-text passthrough — no parsing.
+    # Ignored in playlist mode, which has its own Stage 0 intent brief.
+    genre_intent_block = ""
+    if genre_intent is not None and playlist_name is None:
+        intent_text = genre_intent.strip()
+        if intent_text:
+            genre_intent_block = (
+                "USER INTENT\n"
+                "The user has stated the following intent for this run:\n"
+                f'"{intent_text}"\n\n'
+                "Read this as creative direction. It is not exhaustive — fill in what the user did not "
+                "specify. If the intent conflicts with what the candidate pool can actually support, "
+                "prioritise honesty: pick the closest viable interpretation and note the gap in Assumptions.\n\n"
+                "---\n\n"
+            )
+
     if playlist_name is not None:
         playlist_seed_track_ids = seed_track_ids or sorted(seed_ids or [])
         minimum_seed_tracks = _minimum_playlist_seed_retention(len(playlist_seed_track_ids), intent_brief)
@@ -2032,6 +2136,7 @@ async def stage2_curate_and_report(
     else:
         if canvases is not None:
             prompt = (
+                f"{genre_intent_block}"
                 f"{recent_concepts_block}"
                 f"Curate a set of mix concepts from the following {n} candidate canvases. "
                 f"Produce between 3 and 6 distinct concepts total. Each concept must draw only from tracks within a single canvas.\n\n"
@@ -2039,6 +2144,7 @@ async def stage2_curate_and_report(
             )
         else:
             prompt = (
+                f"{genre_intent_block}"
                 f"{recent_concepts_block}"
                 f"Curate a set of mix concepts from the following {n} candidate shortlists. "
                 f"Produce between 3 and 6 distinct concepts total. A rich shortlist may yield more than one concept; "
@@ -2059,6 +2165,10 @@ async def stage2_curate_and_report(
     stage2_system = _STAGE2_SYSTEM_PLAYLIST_SELECTION if playlist_name is not None else _STAGE2_SYSTEM_SELECTION
     if canvases is not None and playlist_name is None:
         stage2_system = stage2_system + _STAGE2_CANVAS_RULES
+    # Mode-specific Stage 2 fragment (#18). Playlist mode has its own Stage 0 intent brief
+    # path, so the mode-fragment is genre-mode only.
+    if playlist_name is None and mode is not None:
+        stage2_system = stage2_system + _STAGE2_MODE_FRAGMENTS[mode]
     _name_dedup_sentinel = 'The name should make someone curious, not nod in recognition. Add a "name_reason" field'
     if used_mix_names:
         assert _name_dedup_sentinel in stage2_system, (
@@ -2090,7 +2200,12 @@ async def stage2_curate_and_report(
     if playlist_name is None:
         reports = await _call_stage2_reports(curated, tracks_by_id, seed_ids, unplayed_ids, stage2_key)
         annotated_reports = [
-            _append_bold_moves_to_report(r, c, canvases, tracks_by_id) for r, c in zip(reports, curated, strict=True)
+            _append_practicality_to_report(
+                _append_bold_moves_to_report(r, c, canvases, tracks_by_id),
+                c,
+                tracks_by_id,
+            )
+            for r, c in zip(reports, curated, strict=True)
         ]
         report = "\n\n---\n\n".join(annotated_reports)
 
