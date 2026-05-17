@@ -775,6 +775,176 @@ def select_shortlists_for_playlist_stage2(
     return ranked[:_STAGE2_CAP]
 
 
+# Genre groupings for structural-warning softening. DnB-like genres tolerate sustained
+# pressure and plateau structures; UK-bass-like genres tolerate rhythmic pivots and
+# role-family runs; electronica tolerates wide structural variation.
+_DNB_GENRES = frozenset({"drum_and_bass", "jungle", "dnb", "170"})
+_UK_GENRES = frozenset({"uk_bass", "uk_garage", "breakbeat", "140"})
+_ELECTRONICA_GENRES = frozenset({"electronica"})
+
+# arc_type values that justify specific structural absences. Soft-tier warnings are
+# suppressed when the concept's arc_type explicitly declares the structure.
+_ARC_TYPES_NO_PEAK_OK = frozenset({"plateau", "sustained-pressure"})
+_ARC_TYPES_NO_WIND_DOWN_OK = frozenset({"plateau", "sustained-pressure"})
+_ARC_TYPES_ALL_HIGH_ENERGY_OK = frozenset({"plateau", "sustained-pressure"})
+_ARC_TYPES_ROLE_FAMILY_RUN_OK = frozenset({"plateau"})
+
+# Regex catching generic [Adjective][Noun] mix titles that the Stage 2 prompt
+# explicitly forbids (e.g. "Warm Gravity", "Orbital Descent"). Triggers a
+# distinctiveness warning surfaced for user review — does not auto-retry.
+_GENERIC_NAME_RE = re.compile(
+    r"^\s*"
+    r"(warm|slow|deep|dark|cold|soft|hard|loud|quiet|sharp|low|high|orbital|committed|patient|"
+    r"silent|distant|hidden|broken|fading|rising|falling|moving|drifting|locked|sustained)\s+"
+    r"(gravity|descent|drift|tide|current|floor|pulse|orbit|signal|frequency|chamber|hour|hours|"
+    r"ground|surface|movement|motion|space|distance|height|depths|edge|line|tone|breath|weight)"
+    r"\s*$",
+    re.IGNORECASE,
+)
+
+
+def _classify_track_roles(track_ids: list[str], canvas: MixCanvas) -> list[str]:
+    """Assign each concept track a role label based on canvas role-candidate pools."""
+    role_pools: dict[str, set[str]] = {
+        "opener": set(canvas.roles.opener),
+        "closer": set(canvas.roles.closer),
+        "peak": set(canvas.roles.peak),
+        "builder": set(canvas.roles.builder),
+        "groove_locker": set(canvas.roles.groove_locker),
+        "pivot": set(canvas.roles.pivot),
+    }
+    classified: list[str] = []
+    for tid in track_ids:
+        for role in ("opener", "closer", "peak", "builder", "groove_locker", "pivot"):
+            if tid in role_pools[role]:
+                classified.append(role)
+                break
+        else:
+            classified.append("unknown")
+    return classified
+
+
+def _structural_warnings(
+    concept: MixConcept,
+    canvas: MixCanvas,
+    tracks_by_id: dict[str, Track],
+    genre: str,
+) -> list[str]:
+    """DJ-structural quality checks. Warn-only; suppresses warnings when genre or
+    concept.arc_type explicitly justifies the structure.
+    """
+    warnings: list[str] = []
+    if not concept.track_ids:
+        return warnings
+    label = f"[{concept.title}]"
+
+    # Skip all structural checks when the canvas has no role data at all. This shows up
+    # in legacy fixtures and in cases where role inference produced nothing useful — we
+    # do not want to fire false positives on every track when there is no signal to
+    # check against.
+    if not any(
+        (
+            canvas.roles.opener,
+            canvas.roles.closer,
+            canvas.roles.peak,
+            canvas.roles.builder,
+            canvas.roles.groove_locker,
+            canvas.roles.pivot,
+        )
+    ):
+        return warnings
+
+    is_dnb = genre in _DNB_GENRES
+    is_uk = genre in _UK_GENRES
+    is_electronica = genre in _ELECTRONICA_GENRES
+    arc_type = concept.arc_type  # may be None
+    role_seq = _classify_track_roles(concept.track_ids, canvas)
+    concept_id_set = set(concept.track_ids)
+
+    # STRONG tier — always fires regardless of genre/arc_type.
+    # Check 1: opener role in first 1-2 positions.
+    if "opener" not in role_seq[:2]:
+        warnings.append(f"{label} no opener-role track in first 2 positions")
+    # Check 2: closer role in last 1-2 positions.
+    if "closer" not in role_seq[-2:]:
+        warnings.append(f"{label} no closer-role track in last 2 positions")
+
+    # SOFT tier — softened by genre and arc_type.
+    # Check 3: no peak in sequence (only when peak pool exists — empty pool is no signal).
+    if canvas.roles.peak:
+        has_peak = bool(concept_id_set & set(canvas.roles.peak))
+        if not has_peak and arc_type not in _ARC_TYPES_NO_PEAK_OK and not is_electronica:
+            warnings.append(f"{label} no peak-role track in sequence")
+
+    # Check 4: no wind-down before closer. Approximated as final three tracks all energy > 4.
+    last_three_tracks = [tracks_by_id.get(tid) for tid in concept.track_ids[-3:]]
+    last_three_energies = [t.energy for t in last_three_tracks if t and t.energy is not None]
+    if (
+        len(last_three_energies) >= 3
+        and all(e > 4 for e in last_three_energies)
+        and arc_type not in _ARC_TYPES_NO_WIND_DOWN_OK
+        and not is_dnb
+    ):
+        warnings.append(f"{label} no wind-down in final 3 tracks (all energy >4/8)")
+
+    # Check 5: three or more consecutive tracks from the same role family.
+    if arc_type not in _ARC_TYPES_ROLE_FAMILY_RUN_OK and not is_uk:
+        run_start = 0
+        for i in range(1, len(role_seq) + 1):
+            if i == len(role_seq) or role_seq[i] != role_seq[run_start]:
+                run_len = i - run_start
+                if run_len >= 3 and role_seq[run_start] not in ("unknown", "opener", "closer"):
+                    warnings.append(
+                        f"{label} {run_len} consecutive {role_seq[run_start]} tracks (positions "
+                        f"{run_start + 1}-{run_start + run_len})"
+                    )
+                    break
+                run_start = i
+
+    # Check 6 — already covered by check 2 (closer in last 1-2 positions).
+
+    # Check 7: all tracks in the same energy band (no dynamic range).
+    energies = [
+        t.energy for t in (tracks_by_id.get(tid) for tid in concept.track_ids) if t is not None and t.energy is not None
+    ]
+    if energies:
+        if all(e >= 6 for e in energies):
+            if arc_type not in _ARC_TYPES_ALL_HIGH_ENERGY_OK and not is_dnb:
+                warnings.append(f"{label} all tracks high-energy (≥6/8) — no dynamic range")
+        elif all(e <= 3 for e in energies) and arc_type not in ("plateau",):
+            warnings.append(f"{label} all tracks low-energy (≤3/8) — no dynamic range")
+
+    return warnings
+
+
+def _generic_name_warning(concept: MixConcept) -> str | None:
+    """Flag titles matching the generic [Adjective][Noun] pattern Stage 2 forbids."""
+    if _GENERIC_NAME_RE.match(concept.title):
+        return f"Concept title '{concept.title}' matches generic [Adjective][Noun] pattern — review for distinctiveness"
+    return None
+
+
+def _cross_concept_distinctiveness_warnings(concepts: list[MixConcept]) -> list[str]:
+    """Warn when two concepts share >50% of tracks (against the prompt's distinctiveness rule)."""
+    warnings: list[str] = []
+    for i in range(len(concepts)):
+        for j in range(i + 1, len(concepts)):
+            a, b = concepts[i], concepts[j]
+            a_set = set(a.track_ids)
+            b_set = set(b.track_ids)
+            min_size = min(len(a_set), len(b_set))
+            if min_size == 0:
+                continue
+            overlap = len(a_set & b_set)
+            pct = overlap / min_size
+            if pct > 0.50:
+                warnings.append(
+                    f"Concepts '{a.title}' and '{b.title}' share {overlap}/{min_size} tracks "
+                    f"({pct:.0%}) — distinctiveness check"
+                )
+    return warnings
+
+
 def validate_stage2_output(
     concepts: list[MixConcept],
     canvases: list[MixCanvas],
@@ -835,6 +1005,21 @@ def validate_stage2_output(
                 pool = "bridge" if to_id in bridge_ids else "wildcard"
                 if tr is None or (not tr.is_risky and tr.risk_type == ""):
                     warnings.append(f"{label} {pool} track ID {to_id} used without a justified transition")
+
+        # DJ-structural warnings: opener/closer presence, peak, wind-down, role-family runs,
+        # energy bands. Genre-aware and arc_type-aware softening for soft-tier checks.
+        canvas_for_concept = _match_canvas_for_concept(concept, canvases)
+        if canvas_for_concept is not None:
+            warnings.extend(_structural_warnings(concept, canvas_for_concept, tracks_by_id, genre))
+
+        # Generic-name distinctiveness regex.
+        name_warning = _generic_name_warning(concept)
+        if name_warning is not None:
+            warnings.append(name_warning)
+
+    # Cross-concept distinctiveness — runs after per-concept checks so the warning surfaces
+    # alongside the per-concept ones, not as a separate report section.
+    warnings.extend(_cross_concept_distinctiveness_warnings(concepts))
 
     return warnings
 
