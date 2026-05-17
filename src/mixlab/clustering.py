@@ -1,5 +1,25 @@
+"""Mix Canvas pipeline — pool partitioning, role inference, scoring, and selection.
+
+This module turns a Stage 1 shortlist into a structured Mix Canvas: a deterministic
+post-processing layer that gives Stage 2 a vocabulary of materials (BPM tiers, role
+candidate pools, contrast assets, risk notes) rather than raw track lists.
+
+Key entry points:
+- ``partition_bpm_pools`` splits tracks into core/bridge/wildcard tiers around the
+  cluster median BPM.
+- ``build_mix_canvas`` wraps a Stage 1 ``MixConcept`` into a ``MixCanvas`` with role
+  candidates, contrast assets, and risk notes attached.
+- ``score_canvas`` produces a weighted scalar score across six dimensions plus two
+  penalty terms (weakness_penalty, floor_multiplier).
+- ``select_canvases`` greedily picks the top-N canvases with overlap-aware re-scoring.
+
+See ``docs/architecture/mix-canvas.md`` for the full design rationale, weight
+provenance, and pipeline overview.
+"""
+
 from __future__ import annotations
 
+import math
 import re
 import statistics
 import sys
@@ -479,6 +499,11 @@ def _emit_canvas_score_debug(
         file=sys.stderr,
     )
     print(
+        f"  weakness_penalty={score.weakness_penalty:.3f} ({len(canvas.risk_notes)} risk note(s))  "
+        f"floor_multiplier={score.floor_multiplier:.2f}",
+        file=sys.stderr,
+    )
+    print(
         f"  overlap_penalty={overlap_frac:.3f} ({overlap_count}/{core_n} core tracks shared with picked)",
         file=sys.stderr,
     )
@@ -489,6 +514,23 @@ def _emit_canvas_score_debug(
     print(f"  risk_notes: {risk_str}", file=sys.stderr)
 
 
+_WEAKNESS_PENALTY_PER_NOTE = 0.04
+_WEAKNESS_PENALTY_CAP = 0.20
+_FLOOR_MULTIPLIER_BELOW_MIN_CORE = 0.5
+_MIN_CORE_FOR_FULL_SCORE = 8
+
+# Weights sum to 1.0. Tuned in v0.10 — distinctiveness raised from 0.10 to 0.15
+# at the cost of technical_viability (0.25 → 0.20). Technical viability is also
+# logarithmic with saturation at 15 tracks (was linear, saturating at 20), so a
+# 15-track distinctive canvas can outrank a 30-track generic one.
+_WEIGHT_TECHNICAL_VIABILITY = 0.20
+_WEIGHT_ROLE_COVERAGE = 0.25
+_WEIGHT_ANCHOR_STRENGTH = 0.15
+_WEIGHT_CONTRAST_POTENTIAL = 0.15
+_WEIGHT_DISTINCTIVENESS = 0.15
+_WEIGHT_NOVELTY = 0.10
+
+
 def score_canvas(
     canvas: MixCanvas,
     history: ConceptHistory,
@@ -497,7 +539,9 @@ def score_canvas(
     debug: bool = False,
 ) -> CanvasScore:
     core_n = len(canvas.core_track_ids)
-    technical_viability = min(1.0, core_n / 20.0)
+    # Logarithmic saturation: 1.0 at 15 tracks, ~0.79 at 8, ~0.5 at 3, 0.0 at 0.
+    # A 30-track pool no longer outranks a 15-track pool on this dimension.
+    technical_viability = min(1.0, math.log(core_n + 1) / math.log(16)) if core_n > 0 else 0.0
 
     roles = canvas.roles
     roles_filled = sum(
@@ -514,8 +558,9 @@ def score_canvas(
     )
     role_coverage = roles_filled / 6.0
 
-    anchor_pool = len(roles.opener) + len(roles.closer)
-    anchor_strength = min(1.0, anchor_pool / 8.0)
+    # Anchor strength: presence-based, not volume-based. Rewards canvases that have
+    # BOTH an opener and a closer candidate equally over canvases with only one.
+    anchor_strength = (0.5 if roles.opener else 0.0) + (0.5 if roles.closer else 0.0)
 
     contrast_n = (
         len(canvas.contrast.vocal_moments)
@@ -534,14 +579,25 @@ def score_canvas(
 
     novelty = 1.0 - similarity_to_history(canvas, history)
 
-    overall = (
-        technical_viability * 0.25
-        + role_coverage * 0.25
-        + anchor_strength * 0.15
-        + contrast_potential * 0.15
-        + distinctiveness * 0.10
-        + novelty * 0.10
+    weighted = (
+        technical_viability * _WEIGHT_TECHNICAL_VIABILITY
+        + role_coverage * _WEIGHT_ROLE_COVERAGE
+        + anchor_strength * _WEIGHT_ANCHOR_STRENGTH
+        + contrast_potential * _WEIGHT_CONTRAST_POTENTIAL
+        + distinctiveness * _WEIGHT_DISTINCTIVENESS
+        + novelty * _WEIGHT_NOVELTY
     )
+
+    # Weakness penalty: each flagged risk note shaves 0.04 off the weighted sum, capped at 0.20.
+    # Pairs with the existing risk-note diagnostics so canvases with structural problems lose
+    # ground to clean canvases of similar size.
+    weakness_penalty = min(_WEAKNESS_PENALTY_CAP, len(canvas.risk_notes) * _WEAKNESS_PENALTY_PER_NOTE)
+
+    # Floor multiplier: canvases with fewer than 8 core tracks are heavily deprioritised,
+    # not just proportionally smaller. They survive only when every other dimension is strong.
+    floor_multiplier = _FLOOR_MULTIPLIER_BELOW_MIN_CORE if core_n < _MIN_CORE_FOR_FULL_SCORE else 1.0
+
+    overall = max(0.0, (weighted - weakness_penalty) * floor_multiplier)
 
     score = CanvasScore(
         technical_viability=technical_viability,
@@ -550,6 +606,8 @@ def score_canvas(
         contrast_potential=contrast_potential,
         distinctiveness=distinctiveness,
         novelty=novelty,
+        weakness_penalty=weakness_penalty,
+        floor_multiplier=floor_multiplier,
         overall=overall,
     )
     if debug:

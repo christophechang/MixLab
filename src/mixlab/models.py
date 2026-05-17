@@ -101,6 +101,8 @@ class CanvasScore:
     contrast_potential: float = 0.0
     distinctiveness: float = 1.0
     novelty: float = 1.0
+    weakness_penalty: float = 0.0  # subtracted from the weighted sum (max 0.20)
+    floor_multiplier: float = 1.0  # 0.5 when core_n < 8, 1.0 otherwise
     overall: float = 0.0
 
 

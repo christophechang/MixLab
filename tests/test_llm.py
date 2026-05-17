@@ -803,6 +803,99 @@ async def test_stage2_prompt_omits_unverified_flag_for_high_confidence(monkeypat
 
 
 @respx.mock
+async def test_stage2_prompt_includes_recent_concepts_block_when_history_provided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When concept_history has entries, Stage 2 sees a RECENT CONCEPTS block listing prior titles."""
+    from mixlab.history import ConceptHistory, HistoryEntry
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+    history = ConceptHistory(
+        runs=[
+            HistoryEntry(
+                run_id="r1",
+                created_at="2026-05-10T12:00:00+00:00",
+                mode="standard",
+                genre="dnb",
+                selected_canvas_ids=["c1"],
+                dominant_bpm_clusters=[174.0],
+                dominant_camelot_keys=["8A"],
+                core_track_ids=["X1"],
+                anchor_track_ids=["X1"],
+                opener_candidates=["X1"],
+                closer_candidates=["X1"],
+                concept_title="Late Latitude",
+                concept_track_ids=["X1"],
+                energy_path="wave",
+                mood="dark",
+            )
+        ]
+    )
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, concept_history=history)
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "RECENT CONCEPTS" in user_prompt
+    assert "Late Latitude" in user_prompt
+
+
+@respx.mock
+async def test_stage2_prompt_omits_recent_concepts_block_when_history_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty history must not produce an orphan header in the prompt."""
+    from mixlab.history import ConceptHistory
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, concept_history=ConceptHistory())
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "RECENT CONCEPTS" not in user_prompt
+
+
+@respx.mock
+async def test_stage2_prompt_omits_recent_concepts_block_when_history_not_supplied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Passing concept_history=None (default) leaves the prompt unchanged."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "RECENT CONCEPTS" not in user_prompt
+
+
+@respx.mock
 async def test_stage2_marks_only_unplayed_tracks_when_unplayed_ids_provided(monkeypatch: pytest.MonkeyPatch) -> None:
     """When unplayed_ids is provided, only those tracks get the 'unplayed' marker — not all tracks."""
     from mixlab.llm import stage2_curate_and_report
@@ -2002,6 +2095,400 @@ def test_validate_stage2_output_artist_repeat_warning() -> None:
     canvas = _make_canvas(ids)
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
     assert any("Same Artist" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# DJ-structural validation checks (#4) — opener/closer/peak/wind-down/role-runs/energy
+# ---------------------------------------------------------------------------
+
+
+def _canvas_with_roles(
+    core_ids: list[str],
+    opener: list[str] | None = None,
+    closer: list[str] | None = None,
+    peak: list[str] | None = None,
+    builder: list[str] | None = None,
+) -> MixCanvas:
+    """Canvas factory with explicit role-pool assignments for structural-validation tests."""
+    return MixCanvas(
+        canvas_id="test_canvas",
+        genre="Drum & Bass",
+        bpm_range=(168.0, 178.0),
+        dominant_bpm=172.0,
+        dominant_camelot="4A",
+        core_track_ids=core_ids,
+        bridge_track_ids=[],
+        wildcard_track_ids=[],
+        roles=CanvasRoleCandidates(
+            opener=opener or [],
+            groove_locker=[],
+            builder=builder or [],
+            pivot=[],
+            peak=peak or [],
+            closer=closer or [],
+        ),
+        contrast=ContrastAssets(
+            vocal_moments=[],
+            texture_changes=[],
+            darker_turns=[],
+            brighter_lifts=[],
+            lower_pressure_resets=[],
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=MixConcept(title="T", mood="dark", track_ids=core_ids),
+    )
+
+
+def test_validate_stage2_output_warns_when_no_opener_in_first_two_positions() -> None:
+    """Strong-tier check: opener role must appear in positions 1 or 2 (fires regardless of genre)."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    canvas = _canvas_with_roles(ids, opener=["8"], closer=["8"])  # opener only at end
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+    assert any("no opener-role track in first 2 positions" in w for w in warnings)
+
+
+def test_validate_stage2_output_warns_when_no_closer_in_last_two_positions() -> None:
+    """Strong-tier check: closer role must appear in positions N or N-1."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    canvas = _canvas_with_roles(ids, opener=["1"], closer=["1"])  # closer only at start
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+    assert any("no closer-role track in last 2 positions" in w for w in warnings)
+
+
+def test_validate_stage2_output_no_peak_warning_softened_by_plateau_arc() -> None:
+    """Soft-tier: missing peak suppressed when arc_type=plateau explicitly justifies it."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])  # peak pool present, T5 isn't picked
+    # Concept doesn't include track 5 (the peak candidate).
+    concept = MixConcept(title="T", mood="plateau", track_ids=["1", "2", "3", "4", "6", "7", "8"], arc_type="plateau")
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+    assert not any("no peak-role" in w for w in warnings)
+
+
+def test_validate_stage2_output_warns_about_consecutive_builder_run() -> None:
+    """Three consecutive builder-role tracks fires the role-family-run warning."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], builder=["3", "4", "5"], peak=["6"])
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+    assert any("consecutive builder tracks" in w for w in warnings)
+
+
+def test_validate_stage2_output_warns_all_high_energy_no_dynamic_range() -> None:
+    """Concept where every track is energy ≥6/8 fires the high-energy band warning."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    lib = {
+        tid: Track(track_id=tid, artist="A", title="T", bpm=124.0, camelot_key="8A", genre="House", energy=7)
+        for tid in ids
+    }
+    canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="house")
+    assert any("all tracks high-energy" in w for w in warnings)
+
+
+def test_validate_stage2_output_high_energy_warning_softened_for_dnb() -> None:
+    """DnB genre tolerates sustained-pressure structures: all-high-energy warning suppressed."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    lib = {
+        tid: Track(track_id=tid, artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB", energy=7)
+        for tid in ids
+    }
+    canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="drum_and_bass")
+    assert not any("all tracks high-energy" in w for w in warnings)
+
+
+def test_validate_stage2_output_high_energy_warning_softened_for_sustained_pressure_arc() -> None:
+    """arc_type=sustained-pressure suppresses the high-energy warning regardless of genre."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    lib = {
+        tid: Track(track_id=tid, artist="A", title="T", bpm=124.0, camelot_key="8A", genre="House", energy=7)
+        for tid in ids
+    }
+    canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
+    concept = MixConcept(title="T", mood="dark", track_ids=ids, arc_type="sustained-pressure")
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="house")
+    assert not any("all tracks high-energy" in w for w in warnings)
+
+
+def test_validate_stage2_output_wind_down_warning_fires_when_final_three_all_high_energy() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    # First five tracks low-energy, last three high — fires "no wind-down" warning.
+    energies = [2, 3, 3, 4, 4, 7, 7, 8]
+    lib = {
+        tid: Track(track_id=tid, artist="A", title="T", bpm=124.0, camelot_key="8A", genre="House", energy=e)
+        for tid, e in zip(ids, energies, strict=True)
+    }
+    canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="house")
+    assert any("no wind-down" in w for w in warnings)
+
+
+def test_validate_stage2_output_skips_structural_checks_when_canvas_has_no_role_data() -> None:
+    """Legacy canvases without any role assignments must not trigger false positives."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    canvas = _make_canvas(ids)  # No role pools populated.
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+    # None of the structural checks should fire.
+    assert not any("no opener-role" in w for w in warnings)
+    assert not any("no closer-role" in w for w in warnings)
+    assert not any("no peak-role" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# Cross-concept distinctiveness (L3) and generic-name regex (L4) from review
+# ---------------------------------------------------------------------------
+
+
+def test_validate_stage2_output_warns_when_concepts_share_more_than_half_tracks() -> None:
+    """Two concepts with >50% track overlap fire the distinctiveness check."""
+    from mixlab.llm import validate_stage2_output
+
+    ids_a = [f"A{i}" for i in range(1, 11)]  # 10 unique IDs
+    ids_b = ids_a[:6] + [f"B{i}" for i in range(1, 5)]  # 6 of 10 shared = 60% overlap
+    lib = {
+        tid: Track(track_id=tid, artist="A", title="T", bpm=124.0, camelot_key="8A", genre="House")
+        for tid in ids_a + ids_b
+    }
+    canvas_a = _make_canvas(ids_a)
+    concept_a = MixConcept(title="Set Alpha", mood="dark", track_ids=ids_a)
+    concept_b = MixConcept(title="Set Bravo", mood="dark", track_ids=ids_b)
+    warnings = validate_stage2_output([concept_a, concept_b], [canvas_a], lib, set(), set())
+    assert any("Set Alpha" in w and "Set Bravo" in w and "distinctiveness" in w for w in warnings)
+
+
+def test_validate_stage2_output_no_distinctiveness_warning_when_concepts_diverge() -> None:
+    """Concepts with <50% overlap should not fire."""
+    from mixlab.llm import validate_stage2_output
+
+    ids_a = [f"A{i}" for i in range(1, 11)]
+    ids_b = ids_a[:3] + [f"B{i}" for i in range(1, 8)]  # 3 of 10 shared = 30% overlap
+    lib = {
+        tid: Track(track_id=tid, artist="A", title="T", bpm=124.0, camelot_key="8A", genre="House")
+        for tid in ids_a + ids_b
+    }
+    canvas_a = _make_canvas(ids_a)
+    concept_a = MixConcept(title="Set Alpha", mood="dark", track_ids=ids_a)
+    concept_b = MixConcept(title="Set Bravo", mood="dark", track_ids=ids_b)
+    warnings = validate_stage2_output([concept_a, concept_b], [canvas_a], lib, set(), set())
+    assert not any("distinctiveness check" in w for w in warnings)
+
+
+def test_validate_stage2_output_warns_on_generic_adjective_noun_title() -> None:
+    """Concept titled "Warm Gravity" matches the forbidden generic pattern."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    canvas = _make_canvas(ids)
+    concept = MixConcept(title="Warm Gravity", mood="dark", track_ids=ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+    assert any("Warm Gravity" in w and "generic" in w for w in warnings)
+
+
+def test_validate_stage2_output_does_not_warn_on_oblique_title() -> None:
+    """Concept titled "Late Latitude" or other oblique forms should not match the generic pattern."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    canvas = _make_canvas(ids)
+    for title in ("Late Latitude", "Fever", "Interzone", "Red Light", "The Slow Hours"):
+        concept = MixConcept(title=title, mood="dark", track_ids=ids)
+        warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+        assert not any("generic" in w for w in warnings), f"Title '{title}' wrongly flagged as generic"
+
+
+# ---------------------------------------------------------------------------
+# Known-good fixture + edge cases — verifies the validator is not noisy (#5)
+# ---------------------------------------------------------------------------
+
+
+def _known_good_setup() -> tuple[MixConcept, MixCanvas, dict[str, Track]]:
+    """Construct a 10-track concept that should produce zero validation warnings.
+
+    Properties:
+    - First track is the opener candidate (energy 2)
+    - Last track is the closer candidate (energy 3)
+    - Mid-set peak candidate (energy 7) sits in positions 5-6
+    - BPM walk: 122 → 124, max step <2
+    - Camelot walk: 8A → 9A → 10A → 11A, max distance 1 per step
+    - Each artist appears once
+    - Two distinct mid-range roles (groove_locker + builder) prevent role-family runs
+    """
+    ids = [f"T{i:03d}" for i in range(1, 11)]
+    artists = [f"Artist{i}" for i in range(1, 11)]
+    bpms = [122.0, 122.5, 123.0, 123.5, 124.0, 124.0, 123.5, 123.0, 122.5, 122.0]
+    keys = ["8A", "8A", "9A", "9A", "10A", "10A", "9A", "9A", "8A", "8A"]
+    energies = [2, 4, 5, 6, 7, 7, 6, 5, 4, 3]
+    lib = {
+        tid: Track(
+            track_id=tid,
+            artist=artist,
+            title=f"Track {tid}",
+            bpm=bpm,
+            camelot_key=key,
+            genre="House",
+            energy=energy,
+        )
+        for tid, artist, bpm, key, energy in zip(ids, artists, bpms, keys, energies, strict=True)
+    }
+    canvas = _canvas_with_roles(
+        ids,
+        opener=[ids[0]],
+        closer=[ids[-1]],
+        peak=[ids[4], ids[5]],
+        builder=[ids[2], ids[3], ids[6], ids[7]],
+    )
+    canvas.bpm_range = (122.0, 124.0)
+    concept = MixConcept(
+        title="Late Latitude",  # oblique title — does NOT match generic regex
+        mood="warm and patient",
+        track_ids=ids,
+        arc_type="wave",
+    )
+    return concept, canvas, lib
+
+
+def test_validate_stage2_output_known_good_mix_produces_zero_warnings() -> None:
+    """A well-formed concept with full role coverage and gentle BPM/key walk fires no warnings."""
+    from mixlab.llm import validate_stage2_output
+
+    concept, canvas, lib = _known_good_setup()
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="house")
+    assert warnings == [], f"Known-good mix produced unexpected warnings: {warnings}"
+
+
+def test_validate_stage2_output_empty_concept_list_returns_no_warnings() -> None:
+    """No concepts, no canvases — must not crash, must return [] (regression guard)."""
+    from mixlab.llm import validate_stage2_output
+
+    assert validate_stage2_output([], [], {}, set(), set()) == []
+
+
+def test_validate_stage2_output_empty_track_list_does_not_crash() -> None:
+    """A concept with zero tracks must not crash structural checks."""
+    from mixlab.llm import validate_stage2_output
+
+    concept = MixConcept(title="Empty", mood="dark", track_ids=[])
+    canvas = _canvas_with_roles([], opener=[], closer=[])  # no roles, but should not crash
+    warnings = validate_stage2_output([concept], [canvas], {}, set(), set())
+    # Track-count warning is expected (0 < min); just confirm no crash.
+    assert isinstance(warnings, list)
+
+
+def test_validate_stage2_output_single_track_concept_does_not_crash() -> None:
+    """A 1-track concept exercises edge cases in BPM-jump / role-run loops."""
+    from mixlab.llm import validate_stage2_output
+
+    concept = MixConcept(title="Solo", mood="dark", track_ids=["1"])
+    canvas = _canvas_with_roles(["1"], opener=["1"], closer=["1"])
+    warnings = validate_stage2_output([concept], [canvas], _lib(["1"]), set(), set())
+    # Track-count warning expected; should not crash.
+    assert isinstance(warnings, list)
+
+
+def test_validate_stage2_output_distinctiveness_skipped_for_empty_concepts() -> None:
+    """Pairwise check should tolerate empty track lists without ZeroDivision or crash."""
+    from mixlab.llm import _cross_concept_distinctiveness_warnings
+
+    a = MixConcept(title="A", mood="m", track_ids=[])
+    b = MixConcept(title="B", mood="m", track_ids=["1", "2"])
+    # Should not raise; should produce no warning (one concept is empty).
+    assert _cross_concept_distinctiveness_warnings([a, b]) == []
+
+
+@pytest.mark.parametrize(
+    "title,should_flag",
+    [
+        ("Warm Gravity", True),
+        ("Slow Descent", True),
+        ("Deep Pulse", True),
+        ("Orbital Descent", True),
+        ("Late Latitude", False),
+        ("Fever", False),
+        ("Interzone", False),
+        ("Red Light", False),
+        ("The Slow Hours", False),
+        ("Slow Burn", False),  # noun (Burn) not in the suffix list — title is acceptable
+    ],
+)
+def test_generic_name_regex_classification(title: str, should_flag: bool) -> None:
+    """Parametrized regression: confirm the generic-name regex flags clichés and spares oblique titles."""
+    from mixlab.llm import _generic_name_warning
+
+    concept = MixConcept(title=title, mood="m", track_ids=["1"])
+    warning = _generic_name_warning(concept)
+    if should_flag:
+        assert warning is not None, f"Expected '{title}' to be flagged as generic"
+    else:
+        assert warning is None, f"Expected '{title}' NOT to be flagged"
+
+
+@pytest.mark.parametrize(
+    "genre,arc_type,should_warn",
+    [
+        ("house", None, True),  # default genre, no arc → warns
+        ("drum_and_bass", None, False),  # DnB suppresses high-energy warning
+        ("house", "plateau", False),  # arc_type suppresses
+        ("house", "sustained-pressure", False),  # arc_type suppresses
+        ("electronica", None, True),  # electronica does NOT suppress high-energy specifically
+    ],
+)
+def test_structural_high_energy_warning_softening(genre: str, arc_type: str | None, should_warn: bool) -> None:
+    """High-energy warning softening: genre and arc_type each independently suppress the warning."""
+    from typing import cast
+
+    from mixlab.llm import validate_stage2_output
+    from mixlab.models import ArcType
+
+    ids = [str(i) for i in range(1, 9)]
+    lib = {
+        tid: Track(track_id=tid, artist=f"A{tid}", title="T", bpm=124.0, camelot_key="8A", genre=genre, energy=7)
+        for tid in ids
+    }
+    canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
+    arc_value = cast("ArcType | None", arc_type)
+    concept = MixConcept(title="T", mood="dark", track_ids=ids, arc_type=arc_value)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre=genre)
+    fires = any("all tracks high-energy" in w for w in warnings)
+    assert fires is should_warn, f"genre={genre} arc_type={arc_type}: expected fires={should_warn}, got {fires}"
+
+
+def test_known_good_mix_with_different_arc_types_stays_clean() -> None:
+    """Known-good fixture should remain warning-free under several plausible arc_types."""
+    from mixlab.llm import validate_stage2_output
+    from mixlab.models import ArcType
+
+    arc_values: list[ArcType | None] = ["wave", "build-and-drop", "double-peak", None]
+    for arc in arc_values:
+        concept, canvas, lib = _known_good_setup()
+        concept = concept.model_copy(update={"arc_type": arc})
+        warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="house")
+        assert warnings == [], f"arc_type={arc} produced unexpected warnings: {warnings}"
 
 
 @respx.mock

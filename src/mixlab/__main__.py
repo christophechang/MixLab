@@ -352,6 +352,10 @@ async def run_playlist_mode(
 
     t_start = time.monotonic()
 
+    # Load concept history so Stage 2 can deliberately diverge from prior runs (#13).
+    # Playlist mode does not use canvas selection so history was previously not loaded here.
+    history = load_history(Path(".mixlab/concept-history.json"))
+
     all_concepts, report = await stage2_curate_and_report(
         shortlists,
         tracks_by_id,
@@ -361,6 +365,7 @@ async def run_playlist_mode(
         unplayed_ids=unplayed_ids,
         intent_brief=intent_brief,
         used_mix_names=mix_names or None,
+        concept_history=history,
         debug=debug,
     )
     if not all_concepts:
@@ -659,6 +664,7 @@ async def run(
         used_mix_names=mix_names or None,
         canvases=selected_canvases,
         unplayed_ids=unplayed_ids_for_stage2,
+        concept_history=history,
         debug=debug,
     )
     if not all_concepts:
