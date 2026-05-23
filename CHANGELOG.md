@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.12.3
+
+- **Fix played-track matching: strip version suffixes and bare `feat` before key comparison.** `normalise()` now removes parenthesised/bracketed version tokens (`Original Mix`, `Extended Mix`, `Club Mix`, `VIP`, `Dub`, `Vocal Mix`, `Instrumental`, `Remaster`, etc.) from both catalog and Rekordbox titles before building the match key. Also handles bare `Original Mix` without brackets (e.g. Rekordbox title `Freaker Original Mix`) and `feat` without trailing period inside parens (`feat Slay` vs `feat. Slay`). Root cause: SoundCloud tracklist descriptions routinely omit mix version suffixes, so `filter_unplayed` was treating 17 in-collection played tracks as unplayed — including Dam Swindle *That's Right (Original Mix)* appearing in the unplayed pool despite being used in *Slow Burn*.
+
+---
+
 ## v0.12.2
 
 - **Stage 2 prose/JSON risk-annotation alignment (#29).** The Stage 2 report pass previously received only the concept title, mood, thesis, and track listing — never the `transitions` array from the selection pass. The report writer guessed prose `Risk:` content from the track sequence alone, often producing rich risk descriptions while the structured `Transition.is_risky` stayed `False`. v0.12.1's validator suppression depends on the structured annotation, so the gap meant warnings still fired on chapter pivots the LLM had described as risky. Two changes ship together: (1) `_call_stage2_report_single` now appends a `Transition annotations from selection` block to the report prompt listing each transition's `is_risky` and `risk_type`; (2) `_STAGE2_REPORT_SYSTEM` gains a `CONSISTENCY` rule requiring prose `Risk:` lines to mirror those fields. Smoke runs show the report now uses the `risk_type` enum vocabulary verbatim in prose (`chapter pivot`, `peak impact`, `deliberate reset`, `closer move`), closing the gap.
