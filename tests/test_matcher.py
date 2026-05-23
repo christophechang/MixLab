@@ -76,3 +76,30 @@ def test_filter_unplayed_excludes_played_tracks() -> None:
     result = filter_unplayed(tracks, played)
     assert len(result) == 1
     assert result[0].artist == "Noisia"
+
+
+@pytest.mark.parametrize(
+    "rb_title,catalog_title",
+    [
+        ("That's Right (Original Mix)", "That's Right"),
+        ("Don't Let Me Go (Original Mix)", "Don't Let Me Go"),
+        ("Cloud (Extended Mix)", "Cloud"),
+        ("Smile (Original Mix)", "Smile"),
+        ("Freaker Original Mix", "Freaker"),          # bare suffix, no brackets
+        ("I want more (original_mix)", "I Want More"),  # underscore variant
+    ],
+)
+def test_normalise_strips_version_suffixes(rb_title: str, catalog_title: str) -> None:
+    assert normalise(rb_title) == normalise(catalog_title)
+
+
+def test_is_played_matches_original_mix_suffix_difference() -> None:
+    # Catalog stores "That's Right"; Rekordbox has "That's Right (Original Mix)"
+    track = _track("Dam Swindle", "That's Right (Original Mix)")
+    played = [_played("Dam Swindle", "That's Right")]
+    assert is_played(track, played) is True
+
+
+def test_normalise_removes_feat_without_period_in_parens() -> None:
+    # Rekordbox: "(feat. Slay)"; catalog: "(feat Slay)" — both should strip
+    assert normalise("Let It Slide (feat. Slay)") == normalise("Let It Slide (feat Slay)")
