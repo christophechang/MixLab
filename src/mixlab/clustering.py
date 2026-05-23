@@ -320,6 +320,22 @@ def _infer_roles(tracks: list[Track], pools: BpmPools) -> CanvasRoleCandidates:
             if t.bpm <= median_bpm - 2:
                 closer.append(t.track_id)
 
+    # Pool-relative fallback: when absolute energy thresholds yield no opener/closer
+    # candidates (e.g. D&B where MIK tags everything 6-7), promote tracks at the pool's
+    # minimum energy level. The least-demanding track in any pool IS a viable opener/closer
+    # relative to its peers, even if high in absolute terms.
+    pool_energies = sorted({t.energy for t in tracks if t.energy is not None})
+    if not opener and pool_energies:
+        relative_opener_max = pool_energies[0]  # strictly minimum energy in pool
+        for t in tracks:
+            if t.energy is not None and t.energy <= relative_opener_max and t.track_id not in opener:
+                opener.append(t.track_id)
+    if not closer and pool_energies:
+        relative_closer_max = pool_energies[0]  # strictly minimum energy in pool
+        for t in tracks:
+            if t.energy is not None and t.energy <= relative_closer_max and t.track_id not in closer:
+                closer.append(t.track_id)
+
     return CanvasRoleCandidates(
         opener=list(dict.fromkeys(opener)),
         groove_locker=list(dict.fromkeys(groove_locker)),
@@ -368,9 +384,9 @@ def _generate_risk_notes(
 ) -> list[str]:
     notes: list[str] = []
 
-    if len(roles.opener) < 2:
+    if not roles.opener:
         notes.append("weak opener pool")
-    if len(roles.closer) < 2:
+    if not roles.closer:
         notes.append("weak closer pool")
 
     if pools.core:

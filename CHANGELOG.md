@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.12.4
+
+- **Pool-relative opener/closer fallback in `_infer_roles`.** When absolute energy thresholds yield no opener or closer candidates (e.g. D&B pools where MIK tags everything 6–7), the minimum-energy track(s) in the pool are promoted as relative opener/closer candidates. Avoids spurious "weak opener pool" / "weak closer pool" risk notes on high-energy but internally-varied pools. Risk-note threshold also tightened: notes fire only when the candidate list is completely empty, not merely `< 2`.
+- **Intent surfaced in report context.** `_format_report_context` now appends the `--intent` string to the context block passed to Stage 2, so the report prompt sees the user's free-text creative direction alongside mode and export details.
+- **Discord delivery progress prints.** Two `print()` lines added to `DiscordClient.post`: one before chunked posting (logs resolved channel ID) and one after (logs message + attachment counts). Aids smoke-test visibility.
+
+---
+
 ## v0.12.3
 
 - **Fix played-track matching: strip version suffixes and bare `feat` before key comparison.** `normalise()` now removes parenthesised/bracketed version tokens (`Original Mix`, `Extended Mix`, `Club Mix`, `VIP`, `Dub`, `Vocal Mix`, `Instrumental`, `Remaster`, etc.) from both catalog and Rekordbox titles before building the match key. Also handles bare `Original Mix` without brackets (e.g. Rekordbox title `Freaker Original Mix`) and `feat` without trailing period inside parens (`feat Slay` vs `feat. Slay`). Root cause: SoundCloud tracklist descriptions routinely omit mix version suffixes, so `filter_unplayed` was treating 17 in-collection played tracks as unplayed — including Dam Swindle *That's Right (Original Mix)* appearing in the unplayed pool despite being used in *Slow Burn*.

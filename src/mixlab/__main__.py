@@ -68,6 +68,7 @@ def _format_report_context(
     playlist_name: str | None,
     mode: TrackMode,
     export_dir: Path | None,
+    intent: str | None = None,
 ) -> str:
     base_label: str
     details: list[str] = []
@@ -91,7 +92,10 @@ def _format_report_context(
     if export_dir is not None:
         details.append("export enabled")
 
-    return f"Report context: {base_label} ({', '.join(details)})"
+    context = f"Report context: {base_label} ({', '.join(details)})"
+    if intent:
+        context += f'\nIntent: "{intent.strip()}"'
+    return context
 
 
 def _load_do_not_recommend_ids(xml_path: Path) -> tuple[set[str], bool]:
@@ -711,6 +715,7 @@ async def run(
         playlist_name=None,
         mode=mode,
         export_dir=export_dir,
+        intent=intent,
     )
     report += f"\n⏱ Generated in {elapsed_str}"
 

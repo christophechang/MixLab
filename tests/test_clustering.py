@@ -399,12 +399,22 @@ def test_build_mix_canvas_contrast_assets_vocal() -> None:
     assert "plain" not in canvas.contrast.vocal_moments
 
 
-def test_build_mix_canvas_risk_notes_weak_closer() -> None:
-    # All high energy → no closer candidates → risk note
-    tracks = [_track(track_id=str(i), bpm=172.0, energy=7) for i in range(5)]
+def test_build_mix_canvas_risk_notes_weak_closer_no_energy() -> None:
+    # No energy metadata + uniform BPM → BPM proxy can't help → risk note fires
+    tracks = [_track(track_id=str(i), bpm=172.0, energy=None) for i in range(5)]
     concept = _concept([t.track_id for t in tracks])
     canvas = build_mix_canvas(concept, _tracks_by_id(*tracks))
     assert "weak closer pool" in canvas.risk_notes
+
+
+def test_build_mix_canvas_risk_notes_weak_closer_relative_fallback() -> None:
+    # All high energy but uniform → pool-relative fallback promotes min-energy tracks
+    # as closer candidates, so "weak closer pool" should NOT fire
+    tracks = [_track(track_id=str(i), bpm=172.0, energy=7) for i in range(5)]
+    concept = _concept([t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, _tracks_by_id(*tracks))
+    assert "weak closer pool" not in canvas.risk_notes
+    assert len(canvas.roles.closer) >= 2
 
 
 def test_build_mix_canvas_risk_notes_over_repeated_artist() -> None:
