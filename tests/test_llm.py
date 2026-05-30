@@ -1230,6 +1230,46 @@ def test_parse_user_intent_classic_era_detected() -> None:
     assert signals.get("era") in ("classic", "oldschool")
 
 
+def test_parse_user_intent_after_hours_hyphenated_detected() -> None:
+    """Hyphenated 'after-hours' must resolve to late-night register (was silently dropped)."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("After-hours club set, seasoned crowd, hypnotic and stripped back")
+    assert signals.get("register") == "late-night"
+
+
+def test_parse_user_intent_slow_burn_hyphenated_detected() -> None:
+    """Hyphenated 'slow-burn' must resolve to slow-burn arc-hint (was silently dropped)."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("Slow-burn minimal techno for a late-night crowd, dark and driving")
+    assert signals.get("arc-hint") == "slow-burn"
+
+
+def test_parse_user_intent_warm_mood_not_spurious_on_warmup_text() -> None:
+    """'warm' mood must NOT fire when the only 'warm' in text is inside 'warm-up'."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("warm-up set, cold and minimal")
+    assert "warm" not in signals.get("mood", "")
+
+
+def test_parse_user_intent_late_night_beats_warmup_when_cooccurring() -> None:
+    """late-night must take priority over warmup when both appear in intent text."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("late-night warmup set, dark and hypnotic")
+    assert signals.get("register") == "late-night"
+
+
+def test_parse_user_intent_close_not_matched_as_closing_register() -> None:
+    """'close' alone must not fire as closing register — too broad a word."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("pay close attention to the BPM gradient")
+    assert signals.get("register") is None
+
+
 @respx.mock
 async def test_stage2_mode_fragment_unplayed(monkeypatch: pytest.MonkeyPatch) -> None:
     """mode='unplayed' must append the unplayed framing to the genre-mode system prompt."""
