@@ -1270,6 +1270,20 @@ def test_parse_user_intent_close_not_matched_as_closing_register() -> None:
     assert signals.get("register") is None
 
 
+def test_parse_user_intent_audience_specific_beats_venue_word() -> None:
+    """Specific audience descriptors must win over venue words when both are present.
+
+    'radio show for seasoned listeners' contains both 'radio' (→ broad) and
+    'seasoned' (→ experienced); the specific descriptor must take priority.
+    """
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("radio show for seasoned listeners")
+    assert signals.get("audience") == "experienced", (
+        f"Expected audience=experienced but got audience={signals.get('audience')!r}"
+    )
+
+
 def test_parse_user_intent_mood_ordered_by_text_position_not_list_order() -> None:
     """Mood extraction must rank moods by where they appear in the text, not by keyword-list position.
 
