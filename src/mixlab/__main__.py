@@ -817,9 +817,9 @@ def _warn_intent(intent: str | None) -> None:
             "Consider adding purpose, mood, or stylistic scope for better results.",
             file=sys.stderr,
         )
-    elif word_count > 100:
+    elif word_count > 50:
         print(
-            f"WARNING: --intent exceeds 100 words ({word_count}). "
+            f"WARNING: --intent exceeds 50 words ({word_count}). "
             "Consider keeping it concise — Stage 2 responds better to focused direction.",
             file=sys.stderr,
         )

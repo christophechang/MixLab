@@ -558,8 +558,9 @@ def test_warn_intent_none_emits_nothing(capsys: pytest.CaptureFixture[str]) -> N
 
 def test_warn_intent_empty_string_warns(capsys: pytest.CaptureFixture[str]) -> None:
     _warn_intent("   ")
-    assert "WARNING" in capsys.readouterr().err
-    assert "empty" in capsys.readouterr().err or True  # message already checked once
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "empty" in err
 
 
 def test_warn_intent_short_intent_warns(capsys: pytest.CaptureFixture[str]) -> None:
@@ -582,13 +583,13 @@ def test_warn_intent_five_words_no_warning(capsys: pytest.CaptureFixture[str]) -
     assert capsys.readouterr().err == ""
 
 
-def test_warn_intent_exactly_100_words_no_warning(capsys: pytest.CaptureFixture[str]) -> None:
-    _warn_intent(" ".join(["word"] * 100))
+def test_warn_intent_exactly_50_words_no_warning(capsys: pytest.CaptureFixture[str]) -> None:
+    _warn_intent(" ".join(["word"] * 50))
     assert capsys.readouterr().err == ""
 
 
-def test_warn_intent_101_words_warns(capsys: pytest.CaptureFixture[str]) -> None:
-    _warn_intent(" ".join(["word"] * 101))
+def test_warn_intent_51_words_warns(capsys: pytest.CaptureFixture[str]) -> None:
+    _warn_intent(" ".join(["word"] * 51))
     err = capsys.readouterr().err
     assert "WARNING" in err
-    assert "101" in err
+    assert "51" in err

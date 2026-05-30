@@ -2141,6 +2141,12 @@ async def _call_stage2_reports(
     )
 
 
+def _kw_match(kw: str, text: str) -> bool:
+    """Word-boundary-aware keyword match. Prevents 'close' matching 'closely',
+    'warm' matching 'warmup', 'arc' matching 'search', etc."""
+    return bool(re.search(r"\b" + re.escape(kw) + r"\b", text))
+
+
 def _parse_user_intent(intent_text: str) -> dict[str, str]:
     """Extract structured signals from free-text intent for richer Stage 2 context.
 
@@ -2169,7 +2175,7 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
         "afterhours": "late-night",
     }
     for kw, val in _register_map.items():
-        if kw in text:
+        if _kw_match(kw, text):
             signals["register"] = val
             break
 
@@ -2199,10 +2205,12 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
         "anthemic",
         "stripped",
     ]
-    moods = [kw for kw in _mood_keywords if kw in text]
+    moods = [kw for kw in _mood_keywords if _kw_match(kw, text)]
     if moods:
         signals["mood"] = "+".join(moods[:3])
 
+    # "radio" and "club" intentionally appear in both _occasion_map and _audience_map —
+    # each implies both the venue and the listener profile. Both signals fire independently.
     _occasion_map = {
         "radio": "radio",
         "podcast": "radio",
@@ -2214,7 +2222,7 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
         "wedding": "private-event",
     }
     for kw, val in _occasion_map.items():
-        if kw in text:
+        if _kw_match(kw, text):
             signals["occasion"] = val
             break
 
@@ -2229,10 +2237,12 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
         "explore": "exploratory",
     }
     for kw, val in _arc_hints.items():
-        if kw in text:
+        if _kw_match(kw, text):
             signals["arc-hint"] = val
             break
 
+    # "new" is omitted intentionally — too common a word to be a reliable era signal,
+    # and it conflicts with "new listeners" in _audience_map below.
     _era_map = {
         "classic": "classic",
         "oldschool": "oldschool",
@@ -2243,13 +2253,14 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
         "2010s": "2010s",
         "10s": "2010s",
         "modern": "modern",
-        "new": "modern",
     }
     for kw, val in _era_map.items():
-        if kw in text:
+        if _kw_match(kw, text):
             signals["era"] = val
             break
 
+    # "radio" → "broad" and "club" → "experienced" intentionally overlap with _occasion_map
+    # above; both signals are set when either word is present.
     _audience_map = {
         "radio": "broad",
         "seasoned": "experienced",
@@ -2260,7 +2271,7 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
         "club": "experienced",
     }
     for kw, val in _audience_map.items():
-        if kw in text:
+        if _kw_match(kw, text):
             signals["audience"] = val
             break
 
