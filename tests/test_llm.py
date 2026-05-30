@@ -1198,6 +1198,14 @@ def test_parse_user_intent_detects_radio_occasion() -> None:
     assert signals.get("occasion") == "radio"
 
 
+def test_parse_user_intent_podcast_occasion_alias() -> None:
+    """'podcast' is an alias for occasion=radio in _OCCASION_MAP."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("podcast episode, 60 minutes")
+    assert signals.get("occasion") == "radio"
+
+
 def test_parse_user_intent_detects_journey_arc_hint() -> None:
     from mixlab.llm import _parse_user_intent  # noqa: PLC2701
 
@@ -1269,14 +1277,17 @@ def test_parse_user_intent_warm_up_spaced_sets_register() -> None:
 
 
 def test_parse_user_intent_warm_mood_preserved_after_warmup_span() -> None:
-    """Standalone 'warm' after a 'warm-up' span must still fire as a mood signal.
+    """Standalone 'warm' after a 'warm up' span must survive the position-aware re-scan.
 
-    Position-aware suppression: only the 'warm' hit INSIDE the register span is
-    suppressed; a second standalone 'warm' later in the sentence is a valid mood.
+    For the spaced 'warm up' form, _kw_search('warm', text) finds 'warm' at position 0
+    (inside the register span). The suppression code discards it, then re-scans from
+    reg_end to find the independent 'warm' later in the sentence. This exercises the
+    actual suppression+re-scan code path (the hyphenated form never reaches it because
+    the regex (?!-) prevents the first match from landing in the span at all).
     """
     from mixlab.llm import _parse_user_intent  # noqa: PLC2701
 
-    signals = _parse_user_intent("warm-up set should feel warm and inviting")
+    signals = _parse_user_intent("warm up set should feel warm and inviting")
     assert signals.get("register") == "warmup"
     assert "warm" in signals.get("mood", "")
 
