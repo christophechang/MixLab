@@ -1048,6 +1048,453 @@ async def test_stage2_genre_intent_blank_string_emits_no_block(monkeypatch: pyte
 
 
 @respx.mock
+async def test_stage2_recent_concepts_precedes_intent_in_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RECENT CONCEPTS block must appear before USER INTENT so intent reads as the override."""
+    from mixlab.history import ConceptHistory, HistoryEntry
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+    history = ConceptHistory(
+        runs=[
+            HistoryEntry(
+                run_id="r1",
+                created_at="2026-05-10T12:00:00+00:00",
+                mode="standard",
+                genre="dnb",
+                selected_canvas_ids=["c1"],
+                dominant_bpm_clusters=[174.0],
+                dominant_camelot_keys=["8A"],
+                core_track_ids=["X1"],
+                anchor_track_ids=["X1"],
+                opener_candidates=["X1"],
+                closer_candidates=["X1"],
+                concept_title="Dark Minimal",
+                concept_track_ids=["X1"],
+                energy_path="plateau",
+                mood="dark",
+            )
+        ]
+    )
+
+    intent_text = "bright euphoric front-loaded energy, peak time conviction"
+    await stage2_curate_and_report(shortlists, tracks_by_id, concept_history=history, genre_intent=intent_text)
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "RECENT CONCEPTS" in user_prompt
+    assert "USER INTENT" in user_prompt
+    assert user_prompt.index("RECENT CONCEPTS") < user_prompt.index("USER INTENT")
+
+
+@respx.mock
+async def test_stage2_intent_meta_instruction_uses_primary_lens_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Meta-instruction must tell Stage 2 that intent is the primary curatorial lens."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, genre_intent="warm hypnotic opener")
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "primary curatorial lens" in user_prompt
+    assert "Reject concepts" in user_prompt
+
+
+@respx.mock
+async def test_stage2_intent_parsed_signals_injected_when_keywords_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parsed signals line appears in USER INTENT block when keywords are detected."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(
+        shortlists, tracks_by_id, genre_intent="late-night radio showcase, dark hypnotic journey, chapters"
+    )
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "Parsed signals:" in user_prompt
+
+
+@respx.mock
+async def test_stage2_intent_no_parsed_signals_when_generic_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No Parsed signals line emitted when intent contains no detectable keywords."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, genre_intent="xyz foobar qux baz quux norf")
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "Parsed signals:" not in user_prompt
+
+
+# ---------------------------------------------------------------------------
+# _parse_user_intent unit tests (#35)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_user_intent_detects_warmup_register() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("warmup set for an outdoor afternoon")
+    assert signals.get("register") == "warmup"
+
+
+def test_parse_user_intent_detects_late_night_register() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("late-night radio showcase with dark conviction")
+    assert signals.get("register") == "late-night"
+
+
+def test_parse_user_intent_detects_mood_dark() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("dark hypnotic drive through the night")
+    assert signals.get("mood") == "dark+hypnotic"
+
+
+def test_parse_user_intent_detects_radio_occasion() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("radio mix for a broad audience")
+    assert signals.get("occasion") == "radio"
+
+
+def test_parse_user_intent_podcast_occasion_alias() -> None:
+    """'podcast' is an alias for occasion=radio in _OCCASION_MAP."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("podcast episode, 60 minutes")
+    assert signals.get("occasion") == "radio"
+
+
+def test_parse_user_intent_detects_journey_arc_hint() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("the journey matters — chapters, not a playlist")
+    assert signals.get("arc-hint") == "journey"
+
+
+def test_parse_user_intent_returns_empty_for_unrecognised_text() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("xyz foobar qux baz quux norf")
+    assert signals == {}
+
+
+def test_parse_user_intent_multiple_signals_all_present() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("late-night radio showcase — dark hypnotic journey, seasoned club crowd")
+    assert signals.get("register") == "late-night"
+    assert signals.get("occasion") == "showcase"
+    assert signals.get("arc-hint") == "journey"
+    assert signals.get("mood") == "dark+hypnotic"
+    assert signals.get("audience") == "experienced"
+
+
+def test_parse_user_intent_classic_era_detected() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    # 'classic' comes first in _ERA_MAP so it wins when both appear in text.
+    signals = _parse_user_intent("classic oldschool house vibes only")
+    assert signals.get("era") == "classic"
+
+
+def test_parse_user_intent_after_hours_hyphenated_detected() -> None:
+    """Hyphenated 'after-hours' must resolve to late-night register (was silently dropped)."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("After-hours club set, seasoned crowd, hypnotic and stripped back")
+    assert signals.get("register") == "late-night"
+
+
+def test_parse_user_intent_slow_burn_hyphenated_detected() -> None:
+    """Hyphenated 'slow-burn' must resolve to slow-burn arc-hint (was silently dropped)."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("Slow-burn minimal techno for a late-night crowd, dark and driving")
+    assert signals.get("arc-hint") == "slow-burn"
+
+
+def test_parse_user_intent_warm_mood_not_spurious_on_warmup_text() -> None:
+    """'warm' mood must NOT fire when the only 'warm' in text is inside 'warm-up'."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("warm-up set, cold and minimal")
+    assert "warm" not in signals.get("mood", "")
+
+
+def test_parse_user_intent_warm_up_spaced_sets_register() -> None:
+    """'warm up' (two words, spaced) must fire register=warmup and NOT mood=warm.
+
+    The 'warm' prefix of the 'warm up' register key must be suppressed from mood
+    extraction — same invariant as the hyphenated 'warm-up' form.
+    """
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("warm up set, cold and minimal")
+    assert signals.get("register") == "warmup"
+    assert "warm" not in signals.get("mood", "")
+
+
+def test_parse_user_intent_warm_mood_preserved_after_warmup_span() -> None:
+    """Standalone 'warm' after a 'warm up' span must survive the position-aware re-scan.
+
+    For the spaced 'warm up' form, _kw_search('warm', text) finds 'warm' at position 0
+    (inside the register span). The suppression code discards it, then re-scans from
+    reg_end to find the independent 'warm' later in the sentence. This exercises the
+    actual suppression+re-scan code path (the hyphenated form never reaches it because
+    the regex (?!-) prevents the first match from landing in the span at all).
+    """
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("warm up set should feel warm and inviting")
+    assert signals.get("register") == "warmup"
+    assert "warm" in signals.get("mood", "")
+
+
+def test_parse_user_intent_warm_suppressed_with_non_warmup_register() -> None:
+    """'warm' must not fire as mood when 'warm up' appears alongside a different register key.
+
+    'late-night warm up set' — the matched register is 'late-night', but 'warm up' is also
+    present at a different span.  The suppression loop must scan ALL register keys, not just
+    the matched one, so 'warm' is still suppressed from mood extraction.
+    """
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("late-night warm up set, dark and hypnotic")
+    assert signals.get("register") == "late-night"
+    assert "warm" not in signals.get("mood", "")
+    assert "dark" in signals.get("mood", "")
+    assert "hypnotic" in signals.get("mood", "")
+
+
+def test_parse_user_intent_warm_suppressed_when_warm_up_appears_twice() -> None:
+    """'warm' must not fire as mood when every occurrence is inside a 'warm up' span.
+
+    Single-pass suppression would re-scan past the first span, land on the second
+    occurrence of 'warm' (also inside 'warm up'), and spuriously emit mood=warm.
+    The while-loop fix must keep scanning until a standalone 'warm' is found or exhausted.
+    """
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("warm up session for warm up lovers")
+    assert "warm" not in signals.get("mood", "")
+
+
+def test_parse_user_intent_radio_sets_both_occasion_and_audience() -> None:
+    """'radio' fires occasion=radio AND audience=broad (dual-signal, intentional design)."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("radio mix")
+    assert signals.get("occasion") == "radio"
+    assert signals.get("audience") == "broad"
+
+
+def test_parse_user_intent_club_sets_both_occasion_and_audience() -> None:
+    """'club' fires occasion=club AND audience=experienced (dual-signal, intentional design)."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("club set")
+    assert signals.get("occasion") == "club"
+    assert signals.get("audience") == "experienced"
+
+
+def test_parse_user_intent_old_school_hyphenated_detected() -> None:
+    """'old-school' (hyphenated) must resolve to oldschool era — was silently missing."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("old-school jungle from the 90s")
+    assert signals.get("era") == "oldschool"
+
+
+def test_parse_user_intent_late_night_beats_warmup_when_cooccurring() -> None:
+    """late-night must take priority over warmup when both appear in intent text."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("late-night warmup set, dark and hypnotic")
+    assert signals.get("register") == "late-night"
+
+
+def test_parse_user_intent_close_not_matched_as_closing_register() -> None:
+    """'close' alone must not fire as closing register — too broad a word."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("pay close attention to the BPM gradient")
+    assert signals.get("register") is None
+
+
+def test_parse_user_intent_audience_specific_beats_venue_word() -> None:
+    """Specific audience descriptors must win over venue words when both are present.
+
+    'radio show for seasoned listeners' contains both 'radio' (→ broad) and
+    'seasoned' (→ experienced); the specific descriptor must take priority.
+    """
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("radio show for seasoned listeners")
+    assert signals.get("audience") == "experienced", (
+        f"Expected audience=experienced but got audience={signals.get('audience')!r}"
+    )
+
+
+def test_parse_user_intent_main_room_hyphenated_detected() -> None:
+    """Hyphenated 'main-room' must resolve to peak register (was silently missing from dict).
+
+    Input is free of other register keywords to confirm main-room alone is sufficient.
+    """
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("main-room techno, prime time energy")
+    assert signals.get("register") == "peak"
+
+
+def test_parse_user_intent_occasion_showcase_beats_radio() -> None:
+    """'showcase' (specific event type) must win over 'radio' (broadcast) when both appear."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("late-night radio showcase — dark and driven")
+    assert signals.get("occasion") == "showcase"
+
+
+def test_parse_user_intent_arc_hint_narrative_beats_arc() -> None:
+    """'narrative' must win over bare 'arc' when both appear in 'narrative arc'."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("the narrative arc should span 90 minutes")
+    assert signals.get("arc-hint") == "narrative"
+
+
+def test_parse_user_intent_slow_burn_unhyphenated_detected() -> None:
+    """'slow burn' (space-delimited) must resolve to slow-burn arc-hint."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("a slow burn through the night, deliberate and unhurried")
+    assert signals.get("arc-hint") == "slow-burn"
+
+
+def test_parse_user_intent_mood_ordered_by_text_position_not_list_order() -> None:
+    """Mood extraction must rank moods by where they appear in the text, not by keyword-list position.
+
+    'intense' is near the end of _MOOD_KEYWORDS but appears first in the intent — it must rank first.
+    """
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    # "intense" is at index 18 in _MOOD_KEYWORDS, "driving" at 5, "minimal" at 15.
+    # But intent leads with "intense" — it must appear first in the extracted mood signal.
+    signals = _parse_user_intent("intense driving minimal, keep it stripped")
+    mood = signals.get("mood", "")
+    assert mood.startswith("intense"), f"Expected 'intense' first in mood '{mood}'"
+
+
+@respx.mock
+async def test_stage2_intent_parsed_signals_include_precedence_caveat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parsed signals block must include a caveat that quoted intent takes precedence on conflict."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, genre_intent="late-night dark hypnotic warmup")
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "Parsed signals:" in user_prompt
+    assert "quoted intent takes precedence" in user_prompt
+    assert "negated phrases" in user_prompt
+
+
+@respx.mock
+async def test_stage2_genre_intent_suppressed_in_playlist_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When playlist_name is set, genre_intent must be ignored — USER INTENT block absent."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset(["1", "2"]),
+        genre_intent="dark and hypnotic",
+    )
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "USER INTENT" not in user_prompt
+
+
+def test_parse_user_intent_negation_does_not_suppress_signal() -> None:
+    """Negated mood words still fire — the parser has no negation awareness.
+
+    This documents the current contract: 'not dark' produces mood=dark.
+    Stage 2 is instructed via the parsed_line caveat to prefer the quoted intent.
+    """
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("not dark, not hypnotic, bright and euphoric")
+    mood = signals.get("mood", "")
+    assert "dark" in mood
+    assert "hypnotic" in mood
+
+
+@respx.mock
 async def test_stage2_mode_fragment_unplayed(monkeypatch: pytest.MonkeyPatch) -> None:
     """mode='unplayed' must append the unplayed framing to the genre-mode system prompt."""
     from mixlab.llm import stage2_curate_and_report

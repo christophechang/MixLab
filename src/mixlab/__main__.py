@@ -794,6 +794,33 @@ def _validate_range_args(
         sys.exit(1)
 
 
+def _warn_intent(intent: str | None) -> None:
+    """Emit stderr warnings when --intent is likely to produce ineffective results."""
+    if intent is None:
+        return
+    intent_stripped = intent.strip()
+    if not intent_stripped:
+        print(
+            "WARNING: --intent is empty; Stage 2 will run without creative direction.",
+            file=sys.stderr,
+        )
+        return
+    word_count = len(intent_stripped.split())
+    if word_count < 5:
+        word_label = "word" if word_count == 1 else "words"
+        print(
+            f"WARNING: --intent is very short ({word_count} {word_label}). "
+            "Consider adding purpose, mood, or stylistic scope for better results.",
+            file=sys.stderr,
+        )
+    elif word_count > 50:
+        print(
+            f"WARNING: --intent exceeds 50 words ({word_count}). "
+            "Consider keeping it concise — Stage 2 responds better to focused direction.",
+            file=sys.stderr,
+        )
+
+
 def main() -> None:
     load_dotenv()
     parser = argparse.ArgumentParser(
@@ -909,8 +936,14 @@ examples:
         default=None,
         metavar="TEXT",
         help=(
-            "Free-text creative direction for the Stage 2 model in genre mode "
-            "(e.g. 'warmup set, low pressure, melodic'). "
+            "Free-text creative direction for the Stage 2 model in genre mode. "
+            "Shapes which concepts are generated, their mood, energy arc, and track selection. "
+            "Most effective when it covers: (1) occasion/purpose — what is this mix for? "
+            "(2) emotional destination — what should the listener feel by the end? "
+            "(3) stylistic scope — any specific scene, era, or cross-genre angle. "
+            "Example: 'Late-night radio showcase — UKG, UK bass, and breaks played with full conviction. "
+            "The journey matters: chapters, not a playlist.' "
+            "Aim for 10–50 words. Use positive framing ('dark and driven' not 'not melodic'). "
             "Ignored in playlist mode, which runs its own Stage 0 intent extraction."
         ),
     )
@@ -975,6 +1008,8 @@ examples:
             )
         )
         return
+
+    _warn_intent(args.intent)
 
     asyncio.run(
         run(

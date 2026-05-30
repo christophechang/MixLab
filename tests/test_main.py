@@ -15,6 +15,7 @@ from mixlab.__main__ import (
     _print_availability,
     _print_pipeline_summary,
     _validate_range_args,
+    _warn_intent,
     run,
     run_export_unplayed,
 )
@@ -543,3 +544,52 @@ async def test_run_mode_all_handles_catalog_fetch_failure_gracefully(
     captured = capsys.readouterr()
     assert "catalog fetch failed" in captured.err
     assert "played/unplayed signal disabled" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# _warn_intent
+# ---------------------------------------------------------------------------
+
+
+def test_warn_intent_none_emits_nothing(capsys: pytest.CaptureFixture[str]) -> None:
+    _warn_intent(None)
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_intent_empty_string_warns(capsys: pytest.CaptureFixture[str]) -> None:
+    _warn_intent("   ")
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "empty" in err
+
+
+def test_warn_intent_short_intent_warns(capsys: pytest.CaptureFixture[str]) -> None:
+    _warn_intent("dark")
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "short" in err
+    assert "1 word" in err
+
+
+def test_warn_intent_four_words_warns(capsys: pytest.CaptureFixture[str]) -> None:
+    _warn_intent("dark and very cool")
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "4 words" in err
+
+
+def test_warn_intent_five_words_no_warning(capsys: pytest.CaptureFixture[str]) -> None:
+    _warn_intent("dark hypnotic late night opener")
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_intent_exactly_50_words_no_warning(capsys: pytest.CaptureFixture[str]) -> None:
+    _warn_intent(" ".join(["word"] * 50))
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_intent_51_words_warns(capsys: pytest.CaptureFixture[str]) -> None:
+    _warn_intent(" ".join(["word"] * 51))
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "51" in err

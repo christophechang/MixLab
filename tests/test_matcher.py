@@ -85,7 +85,7 @@ def test_filter_unplayed_excludes_played_tracks() -> None:
         ("Don't Let Me Go (Original Mix)", "Don't Let Me Go"),
         ("Cloud (Extended Mix)", "Cloud"),
         ("Smile (Original Mix)", "Smile"),
-        ("Freaker Original Mix", "Freaker"),          # bare suffix, no brackets
+        ("Freaker Original Mix", "Freaker"),  # bare suffix, no brackets
         ("I want more (original_mix)", "I Want More"),  # underscore variant
     ],
 )
