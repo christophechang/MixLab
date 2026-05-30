@@ -2141,6 +2141,222 @@ async def _call_stage2_reports(
     )
 
 
+def _kw_search(kw: str, text: str, pos: int = 0) -> re.Match[str] | None:
+    """Return the first word-boundary match of kw in text at or after pos, or None.
+
+    Hyphen lookahead/lookbehind prevents 'warm' matching inside 'warm-up' while
+    still matching hyphenated keywords like 'warm-up' or 'after-hours' as whole tokens.
+    Single source of truth for the regex pattern — _kw_match and mood extraction both
+    delegate here so changes propagate automatically.
+    The pos parameter uses compiled-pattern search so lookbehind context is preserved.
+
+    Known side-effect: a mood keyword that is the left element of a hyphenated genre
+    name (e.g. 'deep' in 'deep-house', 'dark' in 'dark-room') will NOT match because
+    (?!-) fires. This is intentional — genre-name prefix matches are not mood signals.
+    Users who mean the mood should write the keyword as a standalone word."""
+    return re.compile(r"(?<!-)\b" + re.escape(kw) + r"\b(?!-)").search(text, pos)
+
+
+def _kw_match(kw: str, text: str) -> bool:
+    """Word-boundary-aware keyword match — delegates to _kw_search."""
+    return bool(_kw_search(kw, text))
+
+
+# Keys ordered most-specific first: when multiple signals co-occur (e.g. "late-night
+# warmup"), the first match wins and should be the strongest environmental context.
+# Insertion order is load-bearing — do not reorder without updating tests.
+_REGISTER_MAP: dict[str, str] = {
+    # late-night family (most specific — time-of-night environmental constraint)
+    "after-hours": "late-night",
+    "after hours": "late-night",
+    "afterhours": "late-night",
+    "late-night": "late-night",
+    "late night": "late-night",
+    # closing family
+    "wind-down": "closing",
+    "wind down": "closing",
+    "closing": "closing",
+    # peak family
+    "main-room": "peak",
+    "main room": "peak",
+    "peak-time": "peak",
+    "peak time": "peak",
+    "peak": "peak",
+    # warmup family (most general — can co-occur with late-night context)
+    "warmup": "warmup",
+    "warm-up": "warmup",
+    "warm up": "warmup",
+    "opener": "warmup",
+    "opening": "warmup",
+}
+
+# Moods ordered loosely by conceptual specificity; text-position sort overrides
+# list order so the user's lead word ranks first among the top-3 extracted.
+_MOOD_KEYWORDS: list[str] = [
+    "dark",
+    "euphoric",
+    "melancholic",
+    "hypnotic",
+    "playful",
+    "driving",
+    "deep",
+    "bright",
+    "warm",
+    "cold",
+    "hard",
+    "soft",
+    "raw",
+    "smooth",
+    "groovy",
+    "minimal",
+    "lush",
+    "dreamy",
+    "intense",
+    "restrained",
+    "aggressive",
+    "tender",
+    "anthemic",
+    "stripped",
+]
+
+# "radio" and "club" intentionally appear in both _OCCASION_MAP and _AUDIENCE_MAP —
+# each implies both the venue and the listener profile. Both signals fire independently.
+# Specific event types precede broadcast types so "radio showcase" → occasion=showcase,
+# not occasion=radio (same specificity principle as _AUDIENCE_MAP ordering).
+_OCCASION_MAP: dict[str, str] = {
+    "showcase": "showcase",
+    "festival": "festival",
+    "wedding": "private-event",
+    "private event": "private-event",
+    "private party": "private-event",
+    "outdoor": "outdoor",
+    "club": "club",
+    "radio": "radio",
+    "podcast": "radio",
+}
+
+_ARC_HINTS: dict[str, str] = {
+    "journey": "journey",
+    "chapters": "chapters",
+    # narrative/storytelling before "arc" so "narrative arc" → arc-hint=narrative,
+    # not the less informative arc-hint=arc.
+    "storytelling": "narrative",
+    "narrative": "narrative",
+    "arc": "arc",
+    "slow-burn": "slow-burn",
+    "slow burn": "slow-burn",
+    "build": "build",
+    "explore": "exploratory",
+}
+
+# "new" is omitted intentionally — too common a word to be a reliable era signal,
+# and it conflicts with "new listeners" in _AUDIENCE_MAP below.
+_ERA_MAP: dict[str, str] = {
+    "classic": "classic",
+    "oldschool": "oldschool",
+    "old-school": "oldschool",
+    "old school": "oldschool",
+    "90s": "90s",
+    "2000s": "2000s",
+    "00s": "2000s",
+    "2010s": "2010s",
+    "10s": "2010s",
+    "modern": "modern",
+}
+
+# "radio" → "broad" and "club" → "experienced" intentionally overlap with _OCCASION_MAP
+# above; both signals are set when either word is present.
+# Specific descriptors precede venue words so "radio show for seasoned listeners"
+# correctly returns audience=experienced rather than audience=broad.
+_AUDIENCE_MAP: dict[str, str] = {
+    "seasoned": "experienced",
+    "heads": "experienced",
+    "new listeners": "newcomers",
+    "accessible": "newcomers",
+    "low pressure": "newcomers",
+    "radio": "broad",
+    "club": "experienced",
+}
+
+# Max mood keywords to extract into the signal; text-position sorting ensures the
+# user's lead mood ranks first, so the top-N faithfully reflects intent emphasis.
+_MAX_MOOD_SIGNALS: int = 3
+
+# Precomputed: mood keyword → register keys it space-prefixes (e.g. 'warm' → ['warm up']).
+# Hyphenated forms (e.g. 'warm-up') are excluded because (?!-) in _kw_search already
+# prevents a mood keyword from matching inside a hyphenated token — no span-based
+# suppression is needed for those.
+_MOOD_REGISTER_PREFIXES: dict[str, list[str]] = {
+    kw: [reg_kw for reg_kw in _REGISTER_MAP if reg_kw.startswith(kw + " ")] for kw in _MOOD_KEYWORDS
+}
+
+
+def _first_match(mapping: dict[str, str], text: str) -> str | None:
+    """Return the value for the first keyword in mapping that word-boundary-matches text, or None."""
+    return next((val for kw, val in mapping.items() if _kw_match(kw, text)), None)
+
+
+def _parse_user_intent(intent_text: str) -> dict[str, str]:
+    """Extract structured signals from free-text intent for richer Stage 2 context.
+
+    Returns a dict of signal_name → value. Empty dict if nothing useful is found.
+    Parser is heuristic/keyword-based — no LLM call. Does not handle negation
+    (e.g. 'not dark' may still produce mood=dark).
+    """
+    # Normalise whitespace so multi-word keys ('slow burn', 'warm up', etc.) match
+    # regardless of tabs or double spaces in the input.
+    text = " ".join(intent_text.lower().split())
+    signals: dict[str, str] = {}
+
+    if (v := _first_match(_REGISTER_MAP, text)) is not None:
+        signals["register"] = v
+
+    # Collect mood matches with their text position so the user's lead word ranks first.
+    mood_hits: list[tuple[int, str]] = []
+    for kw in _MOOD_KEYWORDS:
+        prefix_reg_keys = _MOOD_REGISTER_PREFIXES[kw]
+        if not prefix_reg_keys:
+            m = _kw_search(kw, text)
+        else:
+            # kw is a word-prefix of one or more register keys (e.g. 'warm' prefixes 'warm up').
+            # Collect ALL spans where those register keys appear in the text, then find the
+            # first kw hit that falls outside every such span.  Using a while loop (rather than
+            # a single re-scan) correctly suppresses 'warm' when 'warm up' appears more than once.
+            prefix_spans: list[tuple[int, int]] = []
+            for reg_kw in prefix_reg_keys:
+                pos_scan = 0
+                while (reg_m := _kw_search(reg_kw, text, pos=pos_scan)) is not None:
+                    prefix_spans.append((reg_m.start(), reg_m.end()))
+                    pos_scan = reg_m.end()
+            m = None
+            pos_search = 0
+            while (candidate := _kw_search(kw, text, pos=pos_search)) is not None:
+                if not any(s <= candidate.start() < e for s, e in prefix_spans):
+                    m = candidate
+                    break
+                pos_search = candidate.end()
+        if m is None:
+            continue
+        mood_hits.append((m.start(), kw))
+    mood_hits.sort()
+    if mood_hits:
+        signals["mood"] = "+".join(kw for _, kw in mood_hits[:_MAX_MOOD_SIGNALS])
+
+    if (v := _first_match(_OCCASION_MAP, text)) is not None:
+        signals["occasion"] = v
+
+    if (v := _first_match(_ARC_HINTS, text)) is not None:
+        signals["arc-hint"] = v
+
+    if (v := _first_match(_ERA_MAP, text)) is not None:
+        signals["era"] = v
+
+    if (v := _first_match(_AUDIENCE_MAP, text)) is not None:
+        signals["audience"] = v
+
+    return signals
+
+
 async def stage2_curate_and_report(
     shortlists: list[MixConcept],
     tracks_by_id: dict[str, Track],
@@ -2226,15 +2442,33 @@ async def stage2_curate_and_report(
     # Ignored in playlist mode, which has its own Stage 0 intent brief.
     genre_intent_block = ""
     if genre_intent is not None and playlist_name is None:
-        intent_text = genre_intent.strip()
+        intent_text = " ".join(genre_intent.split())  # normalize whitespace including newlines
         if intent_text:
+            parsed = _parse_user_intent(intent_text)
+            parsed_line = (
+                (
+                    f"Parsed signals: {', '.join(f'{k}={v}' for k, v in parsed.items())}\n"
+                    "(Heuristic extraction — signals may include words used in negated phrases, "
+                    "e.g. 'not dark' may still produce mood=dark. "
+                    "If any signal conflicts with the quoted intent above, "
+                    "the quoted intent takes precedence.)\n\n"
+                )
+                if parsed
+                else ""
+            )
             genre_intent_block = (
                 "USER INTENT\n"
                 "The user has stated the following intent for this run:\n"
                 f'"{intent_text}"\n\n'
-                "Read this as creative direction. It is not exhaustive — fill in what the user did not "
-                "specify. If the intent conflicts with what the candidate pool can actually support, "
-                "prioritise honesty: pick the closest viable interpretation and note the gap in Assumptions.\n\n"
+                f"{parsed_line}"
+                "The user's intent is the primary curatorial lens for this run. Every concept you produce must "
+                "serve this direction — not just technically fit the pool, but genuinely answer the thesis the "
+                "user has described. Reject concepts that work on paper but miss the stated mood, occasion, or "
+                "creative direction.\n\n"
+                "The intent may be underspecified — infer the closest coherent interpretation and fill gaps "
+                "with your own curatorial judgement. If the pool cannot support what the intent asks for, name "
+                "the specific conflict in the Assumptions section (e.g. 'intent asks for warmth and restraint, "
+                "but the pool is heavily peak-energy — closest viable interpretation chosen').\n\n"
                 "---\n\n"
             )
 
@@ -2293,16 +2527,16 @@ async def stage2_curate_and_report(
     else:
         if canvases is not None:
             prompt = (
-                f"{genre_intent_block}"
                 f"{recent_concepts_block}"
+                f"{genre_intent_block}"
                 f"Curate a set of mix concepts from the following {n} candidate canvases. "
                 f"Produce between 3 and 6 distinct concepts total. Each concept must draw only from tracks within a single canvas.\n\n"
                 + "\n\n".join(sections)
             )
         else:
             prompt = (
-                f"{genre_intent_block}"
                 f"{recent_concepts_block}"
+                f"{genre_intent_block}"
                 f"Curate a set of mix concepts from the following {n} candidate shortlists. "
                 f"Produce between 3 and 6 distinct concepts total. A rich shortlist may yield more than one concept; "
                 f"a thin shortlist may yield none — but each concept must draw only from tracks within a single shortlist.\n\n"
