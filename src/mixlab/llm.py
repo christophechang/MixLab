@@ -2141,14 +2141,15 @@ async def _call_stage2_reports(
     )
 
 
-def _kw_search(kw: str, text: str) -> re.Match[str] | None:
-    """Return the first word-boundary match of kw in text, or None.
+def _kw_search(kw: str, text: str, pos: int = 0) -> re.Match[str] | None:
+    """Return the first word-boundary match of kw in text at or after pos, or None.
 
     Hyphen lookahead/lookbehind prevents 'warm' matching inside 'warm-up' while
     still matching hyphenated keywords like 'warm-up' or 'after-hours' as whole tokens.
     Single source of truth for the regex pattern — _kw_match and mood extraction both
-    delegate here so changes propagate automatically."""
-    return re.search(r"(?<!-)\b" + re.escape(kw) + r"\b(?!-)", text)
+    delegate here so changes propagate automatically.
+    The pos parameter uses compiled-pattern search so lookbehind context is preserved."""
+    return re.compile(r"(?<!-)\b" + re.escape(kw) + r"\b(?!-)").search(text, pos)
 
 
 def _kw_match(kw: str, text: str) -> bool:
@@ -2282,9 +2283,12 @@ def _first_match(mapping: dict[str, str], text: str) -> str | None:
     return next((val for kw, val in mapping.items() if _kw_match(kw, text)), None)
 
 
-def _first_match_entry(mapping: dict[str, str], text: str) -> tuple[str, str] | None:
-    """Return (keyword, value) for the first keyword in mapping that matches, or None."""
-    return next(((kw, val) for kw, val in mapping.items() if _kw_match(kw, text)), None)
+def _first_match_entry(mapping: dict[str, str], text: str) -> tuple[str, str, int, int] | None:
+    """Return (keyword, value, match_start, match_end) for the first keyword that matches, or None."""
+    for kw, val in mapping.items():
+        if (m := _kw_search(kw, text)) is not None:
+            return kw, val, m.start(), m.end()
+    return None
 
 
 def _parse_user_intent(intent_text: str) -> dict[str, str]:
@@ -2299,25 +2303,34 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
     text = " ".join(intent_text.lower().split())
     signals: dict[str, str] = {}
 
-    # Keep the matched register keyword so mood extraction can suppress prefix collisions
-    # (e.g. 'warm' must not fire as a mood when register was matched via 'warm up'/'warm-up').
+    # Keep the matched register span so mood extraction can suppress prefix collisions.
+    # 'warm' must not fire as a mood when register was matched via 'warm up'/'warm-up',
+    # but only when the 'warm' hit is inside that span — a standalone 'warm' later in the
+    # same text is a legitimate mood signal and must NOT be suppressed.
     register_entry = _first_match_entry(_REGISTER_MAP, text)
     if register_entry is not None:
-        matched_register_key, register_val = register_entry
+        matched_register_key, register_val, reg_start, reg_end = register_entry
         signals["register"] = register_val
     else:
-        matched_register_key = None
+        matched_register_key, reg_start, reg_end = None, -1, -1
 
     # Collect mood matches with their text position so the user's lead word ranks first.
-    mood_hits: list[tuple[int, str]] = [(m.start(), kw) for kw in _MOOD_KEYWORDS if (m := _kw_search(kw, text))]
-    # Suppress mood keywords that are a word-prefix of the matched register keyword.
-    # This prevents 'warm' firing as mood when register was matched via 'warm up' or 'warm-up'.
-    if matched_register_key is not None:
-        mood_hits = [
-            (pos, kw)
-            for pos, kw in mood_hits
-            if not (matched_register_key.startswith(kw + " ") or matched_register_key.startswith(kw + "-"))
-        ]
+    mood_hits: list[tuple[int, str]] = []
+    for kw in _MOOD_KEYWORDS:
+        m = _kw_search(kw, text)
+        if m is None:
+            continue
+        # If the first hit lands inside the register keyword span AND kw is a word-prefix
+        # of that register key, skip this occurrence and look for one after the span.
+        if (
+            matched_register_key is not None
+            and reg_start <= m.start() < reg_end
+            and (matched_register_key.startswith(kw + " ") or matched_register_key.startswith(kw + "-"))
+        ):
+            m = _kw_search(kw, text, pos=reg_end)
+            if m is None:
+                continue  # no independent occurrence — suppress
+        mood_hits.append((m.start(), kw))
     mood_hits.sort()
     if mood_hits:
         signals["mood"] = "+".join(kw for _, kw in mood_hits[:_MAX_MOOD_SIGNALS])
