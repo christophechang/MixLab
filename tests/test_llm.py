@@ -1188,8 +1188,7 @@ def test_parse_user_intent_detects_mood_dark() -> None:
     from mixlab.llm import _parse_user_intent  # noqa: PLC2701
 
     signals = _parse_user_intent("dark hypnotic drive through the night")
-    assert "dark" in signals.get("mood", "")
-    assert "hypnotic" in signals.get("mood", "")
+    assert signals.get("mood") == "dark+hypnotic"
 
 
 def test_parse_user_intent_detects_radio_occasion() -> None:
@@ -1217,10 +1216,11 @@ def test_parse_user_intent_multiple_signals_all_present() -> None:
     from mixlab.llm import _parse_user_intent  # noqa: PLC2701
 
     signals = _parse_user_intent("late-night radio showcase — dark hypnotic journey, seasoned club crowd")
-    assert "register" in signals
-    assert "occasion" in signals
-    assert "arc-hint" in signals
-    assert "mood" in signals
+    assert signals.get("register") == "late-night"
+    assert signals.get("occasion") == "showcase"
+    assert signals.get("arc-hint") == "journey"
+    assert signals.get("mood") == "dark+hypnotic"
+    assert signals.get("audience") == "experienced"
 
 
 def test_parse_user_intent_classic_era_detected() -> None:
@@ -1266,6 +1266,37 @@ def test_parse_user_intent_warm_up_spaced_sets_register() -> None:
     signals = _parse_user_intent("warm up set, cold and minimal")
     assert signals.get("register") == "warmup"
     assert "warm" not in signals.get("mood", "")
+
+
+def test_parse_user_intent_warm_mood_preserved_after_warmup_span() -> None:
+    """Standalone 'warm' after a 'warm-up' span must still fire as a mood signal.
+
+    Position-aware suppression: only the 'warm' hit INSIDE the register span is
+    suppressed; a second standalone 'warm' later in the sentence is a valid mood.
+    """
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("warm-up set should feel warm and inviting")
+    assert signals.get("register") == "warmup"
+    assert "warm" in signals.get("mood", "")
+
+
+def test_parse_user_intent_radio_sets_both_occasion_and_audience() -> None:
+    """'radio' fires occasion=radio AND audience=broad (dual-signal, intentional design)."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("radio mix")
+    assert signals.get("occasion") == "radio"
+    assert signals.get("audience") == "broad"
+
+
+def test_parse_user_intent_club_sets_both_occasion_and_audience() -> None:
+    """'club' fires occasion=club AND audience=experienced (dual-signal, intentional design)."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("club set")
+    assert signals.get("occasion") == "club"
+    assert signals.get("audience") == "experienced"
 
 
 def test_parse_user_intent_old_school_hyphenated_detected() -> None:
@@ -1378,6 +1409,35 @@ async def test_stage2_intent_parsed_signals_include_precedence_caveat(
     assert "Parsed signals:" in user_prompt
     assert "quoted intent takes precedence" in user_prompt
     assert "negated phrases" in user_prompt
+
+
+@respx.mock
+async def test_stage2_genre_intent_suppressed_in_playlist_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When playlist_name is set, genre_intent must be ignored — USER INTENT block absent."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset(["1", "2"]),
+        genre_intent="dark and hypnotic",
+    )
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "USER INTENT" not in user_prompt
 
 
 def test_parse_user_intent_negation_does_not_suppress_signal() -> None:
