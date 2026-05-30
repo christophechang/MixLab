@@ -2148,7 +2148,12 @@ def _kw_search(kw: str, text: str, pos: int = 0) -> re.Match[str] | None:
     still matching hyphenated keywords like 'warm-up' or 'after-hours' as whole tokens.
     Single source of truth for the regex pattern — _kw_match and mood extraction both
     delegate here so changes propagate automatically.
-    The pos parameter uses compiled-pattern search so lookbehind context is preserved."""
+    The pos parameter uses compiled-pattern search so lookbehind context is preserved.
+
+    Known side-effect: a mood keyword that is the left element of a hyphenated genre
+    name (e.g. 'deep' in 'deep-house', 'dark' in 'dark-room') will NOT match because
+    (?!-) fires. This is intentional — genre-name prefix matches are not mood signals.
+    Users who mean the mood should write the keyword as a standalone word."""
     return re.compile(r"(?<!-)\b" + re.escape(kw) + r"\b(?!-)").search(text, pos)
 
 
