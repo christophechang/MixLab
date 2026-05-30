@@ -2288,14 +2288,6 @@ def _first_match(mapping: dict[str, str], text: str) -> str | None:
     return next((val for kw, val in mapping.items() if _kw_match(kw, text)), None)
 
 
-def _first_match_entry(mapping: dict[str, str], text: str) -> tuple[str, str, int, int] | None:
-    """Return (keyword, value, match_start, match_end) for the first keyword that matches, or None."""
-    for kw, val in mapping.items():
-        if (m := _kw_search(kw, text)) is not None:
-            return kw, val, m.start(), m.end()
-    return None
-
-
 def _parse_user_intent(intent_text: str) -> dict[str, str]:
     """Extract structured signals from free-text intent for richer Stage 2 context.
 
@@ -2308,16 +2300,8 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
     text = " ".join(intent_text.lower().split())
     signals: dict[str, str] = {}
 
-    # Keep the matched register span so mood extraction can suppress prefix collisions.
-    # 'warm' must not fire as a mood when register was matched via 'warm up'/'warm-up',
-    # but only when the 'warm' hit is inside that span — a standalone 'warm' later in the
-    # same text is a legitimate mood signal and must NOT be suppressed.
-    register_entry = _first_match_entry(_REGISTER_MAP, text)
-    if register_entry is not None:
-        matched_register_key, register_val, reg_start, reg_end = register_entry
-        signals["register"] = register_val
-    else:
-        matched_register_key, reg_start, reg_end = None, -1, -1
+    if (v := _first_match(_REGISTER_MAP, text)) is not None:
+        signals["register"] = v
 
     # Collect mood matches with their text position so the user's lead word ranks first.
     mood_hits: list[tuple[int, str]] = []
@@ -2325,16 +2309,18 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
         m = _kw_search(kw, text)
         if m is None:
             continue
-        # If the first hit lands inside the register keyword span AND kw is a word-prefix
-        # of that register key, skip this occurrence and look for one after the span.
-        if (
-            matched_register_key is not None
-            and reg_start <= m.start() < reg_end
-            and (matched_register_key.startswith(kw + " ") or matched_register_key.startswith(kw + "-"))
-        ):
-            m = _kw_search(kw, text, pos=reg_end)
-            if m is None:
-                continue  # no independent occurrence — suppress
+        # If this mood-keyword hit falls inside any register keyword that uses kw as a
+        # word-prefix (e.g. 'warm' inside 'warm up' or 'warm-up'), look for an independent
+        # occurrence after that span.  This covers the case where the matched register key
+        # (e.g. 'late-night') differs from the prefix register key (e.g. 'warm up').
+        for reg_kw in _REGISTER_MAP:
+            if not (reg_kw.startswith(kw + " ") or reg_kw.startswith(kw + "-")):
+                continue
+            if (reg_m := _kw_search(reg_kw, text)) is not None and reg_m.start() <= m.start() < reg_m.end():
+                m = _kw_search(kw, text, pos=reg_m.end())
+                break
+        if m is None:
+            continue
         mood_hits.append((m.start(), kw))
     mood_hits.sort()
     if mood_hits:
