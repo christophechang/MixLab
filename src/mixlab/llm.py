@@ -2171,6 +2171,7 @@ _REGISTER_MAP: dict[str, str] = {
     "wind down": "closing",
     "closing": "closing",
     # peak family
+    "main-room": "peak",
     "main room": "peak",
     "peak-time": "peak",
     "peak time": "peak",
@@ -2213,23 +2214,27 @@ _MOOD_KEYWORDS: list[str] = [
 
 # "radio" and "club" intentionally appear in both _OCCASION_MAP and _AUDIENCE_MAP —
 # each implies both the venue and the listener profile. Both signals fire independently.
+# Specific event types precede broadcast types so "radio showcase" → occasion=showcase,
+# not occasion=radio (same specificity principle as _AUDIENCE_MAP ordering).
 _OCCASION_MAP: dict[str, str] = {
+    "showcase": "showcase",
+    "festival": "festival",
+    "wedding": "private-event",
+    "private": "private-event",
+    "outdoor": "outdoor",
+    "club": "club",
     "radio": "radio",
     "podcast": "radio",
-    "showcase": "showcase",
-    "club": "club",
-    "outdoor": "outdoor",
-    "festival": "festival",
-    "private": "private-event",
-    "wedding": "private-event",
 }
 
 _ARC_HINTS: dict[str, str] = {
     "journey": "journey",
     "chapters": "chapters",
-    "arc": "arc",
+    # narrative/storytelling before "arc" so "narrative arc" → arc-hint=narrative,
+    # not the less informative arc-hint=arc.
     "storytelling": "narrative",
     "narrative": "narrative",
+    "arc": "arc",
     "slow burn": "slow-burn",
     "slow-burn": "slow-burn",
     "build": "build",

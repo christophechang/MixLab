@@ -1284,6 +1284,38 @@ def test_parse_user_intent_audience_specific_beats_venue_word() -> None:
     )
 
 
+def test_parse_user_intent_main_room_hyphenated_detected() -> None:
+    """Hyphenated 'main-room' must resolve to peak register (was silently missing from dict)."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("main-room techno at peak hour")
+    assert signals.get("register") == "peak"
+
+
+def test_parse_user_intent_occasion_showcase_beats_radio() -> None:
+    """'showcase' (specific event type) must win over 'radio' (broadcast) when both appear."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("late-night radio showcase — dark and driven")
+    assert signals.get("occasion") == "showcase"
+
+
+def test_parse_user_intent_arc_hint_narrative_beats_arc() -> None:
+    """'narrative' must win over bare 'arc' when both appear in 'narrative arc'."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("the narrative arc should span 90 minutes")
+    assert signals.get("arc-hint") == "narrative"
+
+
+def test_parse_user_intent_slow_burn_unhyphenated_detected() -> None:
+    """'slow burn' (space-delimited) must resolve to slow-burn arc-hint."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("a slow burn through the night, deliberate and unhurried")
+    assert signals.get("arc-hint") == "slow-burn"
+
+
 def test_parse_user_intent_mood_ordered_by_text_position_not_list_order() -> None:
     """Mood extraction must rank moods by where they appear in the text, not by keyword-list position.
 
