@@ -1254,6 +1254,22 @@ def test_parse_user_intent_warm_mood_not_spurious_on_warmup_text() -> None:
     assert "warm" not in signals.get("mood", "")
 
 
+def test_parse_user_intent_warm_up_spaced_sets_register() -> None:
+    """'warm up' (two words, spaced) must fire register=warmup just like 'warm-up'."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("warm up set before the main act")
+    assert signals.get("register") == "warmup"
+
+
+def test_parse_user_intent_old_school_hyphenated_detected() -> None:
+    """'old-school' (hyphenated) must resolve to oldschool era — was silently missing."""
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("old-school jungle from the 90s")
+    assert signals.get("era") == "oldschool"
+
+
 def test_parse_user_intent_late_night_beats_warmup_when_cooccurring() -> None:
     """late-night must take priority over warmup when both appear in intent text."""
     from mixlab.llm import _parse_user_intent  # noqa: PLC2701
@@ -1352,6 +1368,7 @@ async def test_stage2_intent_parsed_signals_include_precedence_caveat(
     user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
     assert "Parsed signals:" in user_prompt
     assert "quoted intent takes precedence" in user_prompt
+    assert "negated phrases" in user_prompt
 
 
 @respx.mock
