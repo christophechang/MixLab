@@ -568,7 +568,7 @@ def test_warn_intent_short_intent_warns(capsys: pytest.CaptureFixture[str]) -> N
     err = capsys.readouterr().err
     assert "WARNING" in err
     assert "short" in err
-    assert "1 words" in err
+    assert "1 word" in err
 
 
 def test_warn_intent_four_words_warns(capsys: pytest.CaptureFixture[str]) -> None:

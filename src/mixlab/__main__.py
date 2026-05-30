@@ -807,8 +807,9 @@ def _warn_intent(intent: str | None) -> None:
         return
     word_count = len(intent_stripped.split())
     if word_count < 5:
+        word_label = "word" if word_count == 1 else "words"
         print(
-            f"WARNING: --intent is very short ({word_count} words). "
+            f"WARNING: --intent is very short ({word_count} {word_label}). "
             "Consider adding purpose, mood, or stylistic scope for better results.",
             file=sys.stderr,
         )

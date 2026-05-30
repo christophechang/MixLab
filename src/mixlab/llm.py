@@ -2143,8 +2143,10 @@ async def _call_stage2_reports(
 
 def _kw_match(kw: str, text: str) -> bool:
     """Word-boundary-aware keyword match. Prevents 'close' matching 'closely',
-    'warm' matching 'warmup', 'arc' matching 'search', etc."""
-    return bool(re.search(r"\b" + re.escape(kw) + r"\b", text))
+    'arc' matching 'search', etc. Hyphen lookahead/lookbehind prevents 'warm'
+    matching inside 'warm-up' while still matching hyphenated keywords like
+    'warm-up' or 'after-hours' as whole tokens."""
+    return bool(re.search(r"(?<!-)\b" + re.escape(kw) + r"\b(?!-)", text))
 
 
 def _parse_user_intent(intent_text: str) -> dict[str, str]:
@@ -2156,23 +2158,29 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
     text = intent_text.lower()
     signals: dict[str, str] = {}
 
+    # Keys ordered most-specific first: when multiple signals co-occur (e.g. "late-night
+    # warmup"), the first match wins and should be the strongest environmental context.
     _register_map = {
+        # late-night family (most specific — time-of-night environmental constraint)
+        "after-hours": "late-night",
+        "after hours": "late-night",
+        "afterhours": "late-night",
+        "late-night": "late-night",
+        "late night": "late-night",
+        # closing family
+        "wind-down": "closing",
+        "wind down": "closing",
+        "closing": "closing",
+        # peak family
+        "main room": "peak",
+        "peak-time": "peak",
+        "peak time": "peak",
+        "peak": "peak",
+        # warmup family (most general — can co-occur with late-night context)
         "warmup": "warmup",
         "warm-up": "warmup",
         "opener": "warmup",
         "opening": "warmup",
-        "peak": "peak",
-        "peak-time": "peak",
-        "peak time": "peak",
-        "main room": "peak",
-        "closing": "closing",
-        "close": "closing",
-        "wind down": "closing",
-        "wind-down": "closing",
-        "late night": "late-night",
-        "late-night": "late-night",
-        "after hours": "late-night",
-        "afterhours": "late-night",
     }
     for kw, val in _register_map.items():
         if _kw_match(kw, text):
@@ -2233,6 +2241,7 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
         "storytelling": "narrative",
         "narrative": "narrative",
         "slow burn": "slow-burn",
+        "slow-burn": "slow-burn",
         "build": "build",
         "explore": "exploratory",
     }
@@ -2363,7 +2372,7 @@ async def stage2_curate_and_report(
     # Ignored in playlist mode, which has its own Stage 0 intent brief.
     genre_intent_block = ""
     if genre_intent is not None and playlist_name is None:
-        intent_text = genre_intent.strip()
+        intent_text = " ".join(genre_intent.split())  # normalize whitespace including newlines
         if intent_text:
             parsed = _parse_user_intent(intent_text)
             parsed_line = f"Parsed signals: {', '.join(f'{k}={v}' for k, v in parsed.items())}\n\n" if parsed else ""
