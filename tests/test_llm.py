@@ -1270,6 +1270,44 @@ def test_parse_user_intent_close_not_matched_as_closing_register() -> None:
     assert signals.get("register") is None
 
 
+def test_parse_user_intent_mood_ordered_by_text_position_not_list_order() -> None:
+    """Mood extraction must rank moods by where they appear in the text, not by keyword-list position.
+
+    'intense' is near the end of _MOOD_KEYWORDS but appears first in the intent — it must rank first.
+    """
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    # "intense" is at index 18 in _MOOD_KEYWORDS, "driving" at 5, "minimal" at 15.
+    # But intent leads with "intense" — it must appear first in the extracted mood signal.
+    signals = _parse_user_intent("intense driving minimal, keep it stripped")
+    mood = signals.get("mood", "")
+    assert mood.startswith("intense"), f"Expected 'intense' first in mood '{mood}'"
+
+
+@respx.mock
+async def test_stage2_intent_parsed_signals_include_precedence_caveat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parsed signals block must include a caveat that quoted intent takes precedence on conflict."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, genre_intent="late-night dark hypnotic warmup")
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "Parsed signals:" in user_prompt
+    assert "quoted intent takes precedence" in user_prompt
+
+
 @respx.mock
 async def test_stage2_mode_fragment_unplayed(monkeypatch: pytest.MonkeyPatch) -> None:
     """mode='unplayed' must append the unplayed framing to the genre-mode system prompt."""

@@ -2149,137 +2149,151 @@ def _kw_match(kw: str, text: str) -> bool:
     return bool(re.search(r"(?<!-)\b" + re.escape(kw) + r"\b(?!-)", text))
 
 
+# Keys ordered most-specific first: when multiple signals co-occur (e.g. "late-night
+# warmup"), the first match wins and should be the strongest environmental context.
+# Insertion order is load-bearing — do not reorder without updating tests.
+_REGISTER_MAP: dict[str, str] = {
+    # late-night family (most specific — time-of-night environmental constraint)
+    "after-hours": "late-night",
+    "after hours": "late-night",
+    "afterhours": "late-night",
+    "late-night": "late-night",
+    "late night": "late-night",
+    # closing family
+    "wind-down": "closing",
+    "wind down": "closing",
+    "closing": "closing",
+    # peak family
+    "main room": "peak",
+    "peak-time": "peak",
+    "peak time": "peak",
+    "peak": "peak",
+    # warmup family (most general — can co-occur with late-night context)
+    "warmup": "warmup",
+    "warm-up": "warmup",
+    "opener": "warmup",
+    "opening": "warmup",
+}
+
+# Moods ordered loosely by conceptual specificity; text-position sort overrides
+# list order so the user's lead word ranks first among the top-3 extracted.
+_MOOD_KEYWORDS: list[str] = [
+    "dark",
+    "euphoric",
+    "melancholic",
+    "hypnotic",
+    "playful",
+    "driving",
+    "deep",
+    "bright",
+    "warm",
+    "cold",
+    "hard",
+    "soft",
+    "raw",
+    "smooth",
+    "groovy",
+    "minimal",
+    "lush",
+    "dreamy",
+    "intense",
+    "restrained",
+    "aggressive",
+    "tender",
+    "anthemic",
+    "stripped",
+]
+
+# "radio" and "club" intentionally appear in both _OCCASION_MAP and _AUDIENCE_MAP —
+# each implies both the venue and the listener profile. Both signals fire independently.
+_OCCASION_MAP: dict[str, str] = {
+    "radio": "radio",
+    "podcast": "radio",
+    "showcase": "showcase",
+    "club": "club",
+    "outdoor": "outdoor",
+    "festival": "festival",
+    "private": "private-event",
+    "wedding": "private-event",
+}
+
+_ARC_HINTS: dict[str, str] = {
+    "journey": "journey",
+    "chapters": "chapters",
+    "arc": "arc",
+    "storytelling": "narrative",
+    "narrative": "narrative",
+    "slow burn": "slow-burn",
+    "slow-burn": "slow-burn",
+    "build": "build",
+    "explore": "exploratory",
+}
+
+# "new" is omitted intentionally — too common a word to be a reliable era signal,
+# and it conflicts with "new listeners" in _AUDIENCE_MAP below.
+_ERA_MAP: dict[str, str] = {
+    "classic": "classic",
+    "oldschool": "oldschool",
+    "old school": "oldschool",
+    "90s": "90s",
+    "2000s": "2000s",
+    "00s": "2000s",
+    "2010s": "2010s",
+    "10s": "2010s",
+    "modern": "modern",
+}
+
+# "radio" → "broad" and "club" → "experienced" intentionally overlap with _OCCASION_MAP
+# above; both signals are set when either word is present.
+_AUDIENCE_MAP: dict[str, str] = {
+    "radio": "broad",
+    "seasoned": "experienced",
+    "heads": "experienced",
+    "new listeners": "newcomers",
+    "accessible": "newcomers",
+    "low pressure": "newcomers",
+    "club": "experienced",
+}
+
+
 def _parse_user_intent(intent_text: str) -> dict[str, str]:
     """Extract structured signals from free-text intent for richer Stage 2 context.
 
     Returns a dict of signal_name → value. Empty dict if nothing useful is found.
-    Parser is heuristic/keyword-based — no LLM call.
+    Parser is heuristic/keyword-based — no LLM call. Does not handle negation.
     """
     text = intent_text.lower()
     signals: dict[str, str] = {}
 
-    # Keys ordered most-specific first: when multiple signals co-occur (e.g. "late-night
-    # warmup"), the first match wins and should be the strongest environmental context.
-    _register_map = {
-        # late-night family (most specific — time-of-night environmental constraint)
-        "after-hours": "late-night",
-        "after hours": "late-night",
-        "afterhours": "late-night",
-        "late-night": "late-night",
-        "late night": "late-night",
-        # closing family
-        "wind-down": "closing",
-        "wind down": "closing",
-        "closing": "closing",
-        # peak family
-        "main room": "peak",
-        "peak-time": "peak",
-        "peak time": "peak",
-        "peak": "peak",
-        # warmup family (most general — can co-occur with late-night context)
-        "warmup": "warmup",
-        "warm-up": "warmup",
-        "opener": "warmup",
-        "opening": "warmup",
-    }
-    for kw, val in _register_map.items():
+    for kw, val in _REGISTER_MAP.items():
         if _kw_match(kw, text):
             signals["register"] = val
             break
 
-    _mood_keywords = [
-        "dark",
-        "euphoric",
-        "melancholic",
-        "hypnotic",
-        "playful",
-        "driving",
-        "deep",
-        "bright",
-        "warm",
-        "cold",
-        "hard",
-        "soft",
-        "raw",
-        "smooth",
-        "groovy",
-        "minimal",
-        "lush",
-        "dreamy",
-        "intense",
-        "restrained",
-        "aggressive",
-        "tender",
-        "anthemic",
-        "stripped",
+    # Collect mood matches with their text position so the user's lead word ranks first.
+    mood_hits: list[tuple[int, str]] = [
+        (m.start(), kw) for kw in _MOOD_KEYWORDS if (m := re.search(r"(?<!-)\b" + re.escape(kw) + r"\b(?!-)", text))
     ]
-    moods = [kw for kw in _mood_keywords if _kw_match(kw, text)]
-    if moods:
-        signals["mood"] = "+".join(moods[:3])
+    mood_hits.sort()
+    if mood_hits:
+        signals["mood"] = "+".join(kw for _, kw in mood_hits[:3])
 
-    # "radio" and "club" intentionally appear in both _occasion_map and _audience_map —
-    # each implies both the venue and the listener profile. Both signals fire independently.
-    _occasion_map = {
-        "radio": "radio",
-        "podcast": "radio",
-        "showcase": "showcase",
-        "club": "club",
-        "outdoor": "outdoor",
-        "festival": "festival",
-        "private": "private-event",
-        "wedding": "private-event",
-    }
-    for kw, val in _occasion_map.items():
+    for kw, val in _OCCASION_MAP.items():
         if _kw_match(kw, text):
             signals["occasion"] = val
             break
 
-    _arc_hints = {
-        "journey": "journey",
-        "chapters": "chapters",
-        "arc": "arc",
-        "storytelling": "narrative",
-        "narrative": "narrative",
-        "slow burn": "slow-burn",
-        "slow-burn": "slow-burn",
-        "build": "build",
-        "explore": "exploratory",
-    }
-    for kw, val in _arc_hints.items():
+    for kw, val in _ARC_HINTS.items():
         if _kw_match(kw, text):
             signals["arc-hint"] = val
             break
 
-    # "new" is omitted intentionally — too common a word to be a reliable era signal,
-    # and it conflicts with "new listeners" in _audience_map below.
-    _era_map = {
-        "classic": "classic",
-        "oldschool": "oldschool",
-        "old school": "oldschool",
-        "90s": "90s",
-        "2000s": "2000s",
-        "00s": "2000s",
-        "2010s": "2010s",
-        "10s": "2010s",
-        "modern": "modern",
-    }
-    for kw, val in _era_map.items():
+    for kw, val in _ERA_MAP.items():
         if _kw_match(kw, text):
             signals["era"] = val
             break
 
-    # "radio" → "broad" and "club" → "experienced" intentionally overlap with _occasion_map
-    # above; both signals are set when either word is present.
-    _audience_map = {
-        "radio": "broad",
-        "seasoned": "experienced",
-        "heads": "experienced",
-        "new listeners": "newcomers",
-        "accessible": "newcomers",
-        "low pressure": "newcomers",
-        "club": "experienced",
-    }
-    for kw, val in _audience_map.items():
+    for kw, val in _AUDIENCE_MAP.items():
         if _kw_match(kw, text):
             signals["audience"] = val
             break
@@ -2375,7 +2389,15 @@ async def stage2_curate_and_report(
         intent_text = " ".join(genre_intent.split())  # normalize whitespace including newlines
         if intent_text:
             parsed = _parse_user_intent(intent_text)
-            parsed_line = f"Parsed signals: {', '.join(f'{k}={v}' for k, v in parsed.items())}\n\n" if parsed else ""
+            parsed_line = (
+                (
+                    f"Parsed signals: {', '.join(f'{k}={v}' for k, v in parsed.items())}\n"
+                    "(Heuristic extraction — if any signal conflicts with the quoted intent above, "
+                    "the quoted intent takes precedence.)\n\n"
+                )
+                if parsed
+                else ""
+            )
             genre_intent_block = (
                 "USER INTENT\n"
                 "The user has stated the following intent for this run:\n"
