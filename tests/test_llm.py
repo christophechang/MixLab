@@ -1203,7 +1203,7 @@ def test_parse_user_intent_detects_journey_arc_hint() -> None:
     from mixlab.llm import _parse_user_intent  # noqa: PLC2701
 
     signals = _parse_user_intent("the journey matters — chapters, not a playlist")
-    assert signals.get("arc-hint") in ("journey", "chapters")
+    assert signals.get("arc-hint") == "journey"
 
 
 def test_parse_user_intent_returns_empty_for_unrecognised_text() -> None:
@@ -1226,8 +1226,9 @@ def test_parse_user_intent_multiple_signals_all_present() -> None:
 def test_parse_user_intent_classic_era_detected() -> None:
     from mixlab.llm import _parse_user_intent  # noqa: PLC2701
 
+    # 'classic' comes first in _ERA_MAP so it wins when both appear in text.
     signals = _parse_user_intent("classic oldschool house vibes only")
-    assert signals.get("era") in ("classic", "oldschool")
+    assert signals.get("era") == "classic"
 
 
 def test_parse_user_intent_after_hours_hyphenated_detected() -> None:
@@ -1255,11 +1256,16 @@ def test_parse_user_intent_warm_mood_not_spurious_on_warmup_text() -> None:
 
 
 def test_parse_user_intent_warm_up_spaced_sets_register() -> None:
-    """'warm up' (two words, spaced) must fire register=warmup just like 'warm-up'."""
+    """'warm up' (two words, spaced) must fire register=warmup and NOT mood=warm.
+
+    The 'warm' prefix of the 'warm up' register key must be suppressed from mood
+    extraction — same invariant as the hyphenated 'warm-up' form.
+    """
     from mixlab.llm import _parse_user_intent  # noqa: PLC2701
 
-    signals = _parse_user_intent("warm up set before the main act")
+    signals = _parse_user_intent("warm up set, cold and minimal")
     assert signals.get("register") == "warmup"
+    assert "warm" not in signals.get("mood", "")
 
 
 def test_parse_user_intent_old_school_hyphenated_detected() -> None:
@@ -1301,10 +1307,13 @@ def test_parse_user_intent_audience_specific_beats_venue_word() -> None:
 
 
 def test_parse_user_intent_main_room_hyphenated_detected() -> None:
-    """Hyphenated 'main-room' must resolve to peak register (was silently missing from dict)."""
+    """Hyphenated 'main-room' must resolve to peak register (was silently missing from dict).
+
+    Input is free of other register keywords to confirm main-room alone is sufficient.
+    """
     from mixlab.llm import _parse_user_intent  # noqa: PLC2701
 
-    signals = _parse_user_intent("main-room techno at peak hour")
+    signals = _parse_user_intent("main-room techno, prime time energy")
     assert signals.get("register") == "peak"
 
 
@@ -1369,6 +1378,20 @@ async def test_stage2_intent_parsed_signals_include_precedence_caveat(
     assert "Parsed signals:" in user_prompt
     assert "quoted intent takes precedence" in user_prompt
     assert "negated phrases" in user_prompt
+
+
+def test_parse_user_intent_negation_does_not_suppress_signal() -> None:
+    """Negated mood words still fire — the parser has no negation awareness.
+
+    This documents the current contract: 'not dark' produces mood=dark.
+    Stage 2 is instructed via the parsed_line caveat to prefer the quoted intent.
+    """
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("not dark, not hypnotic, bright and euphoric")
+    mood = signals.get("mood", "")
+    assert "dark" in mood
+    assert "hypnotic" in mood
 
 
 @respx.mock

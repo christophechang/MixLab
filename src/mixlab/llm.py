@@ -2221,7 +2221,8 @@ _OCCASION_MAP: dict[str, str] = {
     "showcase": "showcase",
     "festival": "festival",
     "wedding": "private-event",
-    "private": "private-event",
+    "private event": "private-event",
+    "private party": "private-event",
     "outdoor": "outdoor",
     "club": "club",
     "radio": "radio",
@@ -2236,8 +2237,8 @@ _ARC_HINTS: dict[str, str] = {
     "storytelling": "narrative",
     "narrative": "narrative",
     "arc": "arc",
-    "slow burn": "slow-burn",
     "slow-burn": "slow-burn",
+    "slow burn": "slow-burn",
     "build": "build",
     "explore": "exploratory",
 }
@@ -2281,20 +2282,42 @@ def _first_match(mapping: dict[str, str], text: str) -> str | None:
     return next((val for kw, val in mapping.items() if _kw_match(kw, text)), None)
 
 
+def _first_match_entry(mapping: dict[str, str], text: str) -> tuple[str, str] | None:
+    """Return (keyword, value) for the first keyword in mapping that matches, or None."""
+    return next(((kw, val) for kw, val in mapping.items() if _kw_match(kw, text)), None)
+
+
 def _parse_user_intent(intent_text: str) -> dict[str, str]:
     """Extract structured signals from free-text intent for richer Stage 2 context.
 
     Returns a dict of signal_name → value. Empty dict if nothing useful is found.
-    Parser is heuristic/keyword-based — no LLM call. Does not handle negation.
+    Parser is heuristic/keyword-based — no LLM call. Does not handle negation
+    (e.g. 'not dark' may still produce mood=dark).
     """
-    text = intent_text.lower()
+    # Normalise whitespace so multi-word keys ('slow burn', 'warm up', etc.) match
+    # regardless of tabs or double spaces in the input.
+    text = " ".join(intent_text.lower().split())
     signals: dict[str, str] = {}
 
-    if (v := _first_match(_REGISTER_MAP, text)) is not None:
-        signals["register"] = v
+    # Keep the matched register keyword so mood extraction can suppress prefix collisions
+    # (e.g. 'warm' must not fire as a mood when register was matched via 'warm up'/'warm-up').
+    register_entry = _first_match_entry(_REGISTER_MAP, text)
+    if register_entry is not None:
+        matched_register_key, register_val = register_entry
+        signals["register"] = register_val
+    else:
+        matched_register_key = None
 
     # Collect mood matches with their text position so the user's lead word ranks first.
     mood_hits: list[tuple[int, str]] = [(m.start(), kw) for kw in _MOOD_KEYWORDS if (m := _kw_search(kw, text))]
+    # Suppress mood keywords that are a word-prefix of the matched register keyword.
+    # This prevents 'warm' firing as mood when register was matched via 'warm up' or 'warm-up'.
+    if matched_register_key is not None:
+        mood_hits = [
+            (pos, kw)
+            for pos, kw in mood_hits
+            if not (matched_register_key.startswith(kw + " ") or matched_register_key.startswith(kw + "-"))
+        ]
     mood_hits.sort()
     if mood_hits:
         signals["mood"] = "+".join(kw for _, kw in mood_hits[:_MAX_MOOD_SIGNALS])
