@@ -2141,12 +2141,19 @@ async def _call_stage2_reports(
     )
 
 
+def _kw_search(kw: str, text: str) -> re.Match[str] | None:
+    """Return the first word-boundary match of kw in text, or None.
+
+    Hyphen lookahead/lookbehind prevents 'warm' matching inside 'warm-up' while
+    still matching hyphenated keywords like 'warm-up' or 'after-hours' as whole tokens.
+    Single source of truth for the regex pattern — _kw_match and mood extraction both
+    delegate here so changes propagate automatically."""
+    return re.search(r"(?<!-)\b" + re.escape(kw) + r"\b(?!-)", text)
+
+
 def _kw_match(kw: str, text: str) -> bool:
-    """Word-boundary-aware keyword match. Prevents 'close' matching 'closely',
-    'arc' matching 'search', etc. Hyphen lookahead/lookbehind prevents 'warm'
-    matching inside 'warm-up' while still matching hyphenated keywords like
-    'warm-up' or 'after-hours' as whole tokens."""
-    return bool(re.search(r"(?<!-)\b" + re.escape(kw) + r"\b(?!-)", text))
+    """Word-boundary-aware keyword match — delegates to _kw_search."""
+    return bool(_kw_search(kw, text))
 
 
 # Keys ordered most-specific first: when multiple signals co-occur (e.g. "late-night
@@ -2245,15 +2252,26 @@ _ERA_MAP: dict[str, str] = {
 
 # "radio" → "broad" and "club" → "experienced" intentionally overlap with _OCCASION_MAP
 # above; both signals are set when either word is present.
+# Specific descriptors precede venue words so "radio show for seasoned listeners"
+# correctly returns audience=experienced rather than audience=broad.
 _AUDIENCE_MAP: dict[str, str] = {
-    "radio": "broad",
     "seasoned": "experienced",
     "heads": "experienced",
     "new listeners": "newcomers",
     "accessible": "newcomers",
     "low pressure": "newcomers",
+    "radio": "broad",
     "club": "experienced",
 }
+
+# Max mood keywords to extract into the signal; text-position sorting ensures the
+# user's lead mood ranks first, so the top-N faithfully reflects intent emphasis.
+_MAX_MOOD_SIGNALS: int = 3
+
+
+def _first_match(mapping: dict[str, str], text: str) -> str | None:
+    """Return the value for the first keyword in mapping that word-boundary-matches text, or None."""
+    return next((val for kw, val in mapping.items() if _kw_match(kw, text)), None)
 
 
 def _parse_user_intent(intent_text: str) -> dict[str, str]:
@@ -2265,38 +2283,26 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
     text = intent_text.lower()
     signals: dict[str, str] = {}
 
-    for kw, val in _REGISTER_MAP.items():
-        if _kw_match(kw, text):
-            signals["register"] = val
-            break
+    if (v := _first_match(_REGISTER_MAP, text)) is not None:
+        signals["register"] = v
 
     # Collect mood matches with their text position so the user's lead word ranks first.
-    mood_hits: list[tuple[int, str]] = [
-        (m.start(), kw) for kw in _MOOD_KEYWORDS if (m := re.search(r"(?<!-)\b" + re.escape(kw) + r"\b(?!-)", text))
-    ]
+    mood_hits: list[tuple[int, str]] = [(m.start(), kw) for kw in _MOOD_KEYWORDS if (m := _kw_search(kw, text))]
     mood_hits.sort()
     if mood_hits:
-        signals["mood"] = "+".join(kw for _, kw in mood_hits[:3])
+        signals["mood"] = "+".join(kw for _, kw in mood_hits[:_MAX_MOOD_SIGNALS])
 
-    for kw, val in _OCCASION_MAP.items():
-        if _kw_match(kw, text):
-            signals["occasion"] = val
-            break
+    if (v := _first_match(_OCCASION_MAP, text)) is not None:
+        signals["occasion"] = v
 
-    for kw, val in _ARC_HINTS.items():
-        if _kw_match(kw, text):
-            signals["arc-hint"] = val
-            break
+    if (v := _first_match(_ARC_HINTS, text)) is not None:
+        signals["arc-hint"] = v
 
-    for kw, val in _ERA_MAP.items():
-        if _kw_match(kw, text):
-            signals["era"] = val
-            break
+    if (v := _first_match(_ERA_MAP, text)) is not None:
+        signals["era"] = v
 
-    for kw, val in _AUDIENCE_MAP.items():
-        if _kw_match(kw, text):
-            signals["audience"] = val
-            break
+    if (v := _first_match(_AUDIENCE_MAP, text)) is not None:
+        signals["audience"] = v
 
     return signals
 
