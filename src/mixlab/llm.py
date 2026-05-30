@@ -2141,6 +2141,132 @@ async def _call_stage2_reports(
     )
 
 
+def _parse_user_intent(intent_text: str) -> dict[str, str]:
+    """Extract structured signals from free-text intent for richer Stage 2 context.
+
+    Returns a dict of signal_name → value. Empty dict if nothing useful is found.
+    Parser is heuristic/keyword-based — no LLM call.
+    """
+    text = intent_text.lower()
+    signals: dict[str, str] = {}
+
+    _register_map = {
+        "warmup": "warmup",
+        "warm-up": "warmup",
+        "opener": "warmup",
+        "opening": "warmup",
+        "peak": "peak",
+        "peak-time": "peak",
+        "peak time": "peak",
+        "main room": "peak",
+        "closing": "closing",
+        "close": "closing",
+        "wind down": "closing",
+        "wind-down": "closing",
+        "late night": "late-night",
+        "late-night": "late-night",
+        "after hours": "late-night",
+        "afterhours": "late-night",
+    }
+    for kw, val in _register_map.items():
+        if kw in text:
+            signals["register"] = val
+            break
+
+    _mood_keywords = [
+        "dark",
+        "euphoric",
+        "melancholic",
+        "hypnotic",
+        "playful",
+        "driving",
+        "deep",
+        "bright",
+        "warm",
+        "cold",
+        "hard",
+        "soft",
+        "raw",
+        "smooth",
+        "groovy",
+        "minimal",
+        "lush",
+        "dreamy",
+        "intense",
+        "restrained",
+        "aggressive",
+        "tender",
+        "anthemic",
+        "stripped",
+    ]
+    moods = [kw for kw in _mood_keywords if kw in text]
+    if moods:
+        signals["mood"] = "+".join(moods[:3])
+
+    _occasion_map = {
+        "radio": "radio",
+        "podcast": "radio",
+        "showcase": "showcase",
+        "club": "club",
+        "outdoor": "outdoor",
+        "festival": "festival",
+        "private": "private-event",
+        "wedding": "private-event",
+    }
+    for kw, val in _occasion_map.items():
+        if kw in text:
+            signals["occasion"] = val
+            break
+
+    _arc_hints = {
+        "journey": "journey",
+        "chapters": "chapters",
+        "arc": "arc",
+        "storytelling": "narrative",
+        "narrative": "narrative",
+        "slow burn": "slow-burn",
+        "build": "build",
+        "explore": "exploratory",
+    }
+    for kw, val in _arc_hints.items():
+        if kw in text:
+            signals["arc-hint"] = val
+            break
+
+    _era_map = {
+        "classic": "classic",
+        "oldschool": "oldschool",
+        "old school": "oldschool",
+        "90s": "90s",
+        "2000s": "2000s",
+        "00s": "2000s",
+        "2010s": "2010s",
+        "10s": "2010s",
+        "modern": "modern",
+        "new": "modern",
+    }
+    for kw, val in _era_map.items():
+        if kw in text:
+            signals["era"] = val
+            break
+
+    _audience_map = {
+        "radio": "broad",
+        "seasoned": "experienced",
+        "heads": "experienced",
+        "new listeners": "newcomers",
+        "accessible": "newcomers",
+        "low pressure": "newcomers",
+        "club": "experienced",
+    }
+    for kw, val in _audience_map.items():
+        if kw in text:
+            signals["audience"] = val
+            break
+
+    return signals
+
+
 async def stage2_curate_and_report(
     shortlists: list[MixConcept],
     tracks_by_id: dict[str, Track],
@@ -2228,13 +2354,21 @@ async def stage2_curate_and_report(
     if genre_intent is not None and playlist_name is None:
         intent_text = genre_intent.strip()
         if intent_text:
+            parsed = _parse_user_intent(intent_text)
+            parsed_line = f"Parsed signals: {', '.join(f'{k}={v}' for k, v in parsed.items())}\n\n" if parsed else ""
             genre_intent_block = (
                 "USER INTENT\n"
                 "The user has stated the following intent for this run:\n"
                 f'"{intent_text}"\n\n'
-                "Read this as creative direction. It is not exhaustive — fill in what the user did not "
-                "specify. If the intent conflicts with what the candidate pool can actually support, "
-                "prioritise honesty: pick the closest viable interpretation and note the gap in Assumptions.\n\n"
+                f"{parsed_line}"
+                "The user's intent is the primary curatorial lens for this run. Every concept you produce must "
+                "serve this direction — not just technically fit the pool, but genuinely answer the thesis the "
+                "user has described. Reject concepts that work on paper but miss the stated mood, occasion, or "
+                "creative direction.\n\n"
+                "The intent may be underspecified — infer the closest coherent interpretation and fill gaps "
+                "with your own curatorial judgement. If the pool cannot support what the intent asks for, name "
+                "the specific conflict in the Assumptions section (e.g. 'intent asks for warmth and restraint, "
+                "but the pool is heavily peak-energy — closest viable interpretation chosen').\n\n"
                 "---\n\n"
             )
 
@@ -2293,16 +2427,16 @@ async def stage2_curate_and_report(
     else:
         if canvases is not None:
             prompt = (
-                f"{genre_intent_block}"
                 f"{recent_concepts_block}"
+                f"{genre_intent_block}"
                 f"Curate a set of mix concepts from the following {n} candidate canvases. "
                 f"Produce between 3 and 6 distinct concepts total. Each concept must draw only from tracks within a single canvas.\n\n"
                 + "\n\n".join(sections)
             )
         else:
             prompt = (
-                f"{genre_intent_block}"
                 f"{recent_concepts_block}"
+                f"{genre_intent_block}"
                 f"Curate a set of mix concepts from the following {n} candidate shortlists. "
                 f"Produce between 3 and 6 distinct concepts total. A rich shortlist may yield more than one concept; "
                 f"a thin shortlist may yield none — but each concept must draw only from tracks within a single shortlist.\n\n"
