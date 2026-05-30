@@ -2282,6 +2282,14 @@ _AUDIENCE_MAP: dict[str, str] = {
 # user's lead mood ranks first, so the top-N faithfully reflects intent emphasis.
 _MAX_MOOD_SIGNALS: int = 3
 
+# Precomputed: mood keyword → register keys it space-prefixes (e.g. 'warm' → ['warm up']).
+# Hyphenated forms (e.g. 'warm-up') are excluded because (?!-) in _kw_search already
+# prevents a mood keyword from matching inside a hyphenated token — no span-based
+# suppression is needed for those.
+_MOOD_REGISTER_PREFIXES: dict[str, list[str]] = {
+    kw: [reg_kw for reg_kw in _REGISTER_MAP if reg_kw.startswith(kw + " ")] for kw in _MOOD_KEYWORDS
+}
+
 
 def _first_match(mapping: dict[str, str], text: str) -> str | None:
     """Return the value for the first keyword in mapping that word-boundary-matches text, or None."""
@@ -2306,19 +2314,27 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
     # Collect mood matches with their text position so the user's lead word ranks first.
     mood_hits: list[tuple[int, str]] = []
     for kw in _MOOD_KEYWORDS:
-        m = _kw_search(kw, text)
-        if m is None:
-            continue
-        # If this mood-keyword hit falls inside any register keyword that uses kw as a
-        # word-prefix (e.g. 'warm' inside 'warm up' or 'warm-up'), look for an independent
-        # occurrence after that span.  This covers the case where the matched register key
-        # (e.g. 'late-night') differs from the prefix register key (e.g. 'warm up').
-        for reg_kw in _REGISTER_MAP:
-            if not (reg_kw.startswith(kw + " ") or reg_kw.startswith(kw + "-")):
-                continue
-            if (reg_m := _kw_search(reg_kw, text)) is not None and reg_m.start() <= m.start() < reg_m.end():
-                m = _kw_search(kw, text, pos=reg_m.end())
-                break
+        prefix_reg_keys = _MOOD_REGISTER_PREFIXES[kw]
+        if not prefix_reg_keys:
+            m = _kw_search(kw, text)
+        else:
+            # kw is a word-prefix of one or more register keys (e.g. 'warm' prefixes 'warm up').
+            # Collect ALL spans where those register keys appear in the text, then find the
+            # first kw hit that falls outside every such span.  Using a while loop (rather than
+            # a single re-scan) correctly suppresses 'warm' when 'warm up' appears more than once.
+            prefix_spans: list[tuple[int, int]] = []
+            for reg_kw in prefix_reg_keys:
+                pos_scan = 0
+                while (reg_m := _kw_search(reg_kw, text, pos=pos_scan)) is not None:
+                    prefix_spans.append((reg_m.start(), reg_m.end()))
+                    pos_scan = reg_m.end()
+            m = None
+            pos_search = 0
+            while (candidate := _kw_search(kw, text, pos=pos_search)) is not None:
+                if not any(s <= candidate.start() < e for s, e in prefix_spans):
+                    m = candidate
+                    break
+                pos_search = candidate.end()
         if m is None:
             continue
         mood_hits.append((m.start(), kw))

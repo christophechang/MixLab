@@ -1308,6 +1308,19 @@ def test_parse_user_intent_warm_suppressed_with_non_warmup_register() -> None:
     assert "hypnotic" in signals.get("mood", "")
 
 
+def test_parse_user_intent_warm_suppressed_when_warm_up_appears_twice() -> None:
+    """'warm' must not fire as mood when every occurrence is inside a 'warm up' span.
+
+    Single-pass suppression would re-scan past the first span, land on the second
+    occurrence of 'warm' (also inside 'warm up'), and spuriously emit mood=warm.
+    The while-loop fix must keep scanning until a standalone 'warm' is found or exhausted.
+    """
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("warm up session for warm up lovers")
+    assert "warm" not in signals.get("mood", "")
+
+
 def test_parse_user_intent_radio_sets_both_occasion_and_audience() -> None:
     """'radio' fires occasion=radio AND audience=broad (dual-signal, intentional design)."""
     from mixlab.llm import _parse_user_intent  # noqa: PLC2701
