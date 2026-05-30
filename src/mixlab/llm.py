@@ -2179,6 +2179,7 @@ _REGISTER_MAP: dict[str, str] = {
     # warmup family (most general — can co-occur with late-night context)
     "warmup": "warmup",
     "warm-up": "warmup",
+    "warm up": "warmup",
     "opener": "warmup",
     "opening": "warmup",
 }
@@ -2246,6 +2247,7 @@ _ARC_HINTS: dict[str, str] = {
 _ERA_MAP: dict[str, str] = {
     "classic": "classic",
     "oldschool": "oldschool",
+    "old-school": "oldschool",
     "old school": "oldschool",
     "90s": "90s",
     "2000s": "2000s",
@@ -2403,7 +2405,9 @@ async def stage2_curate_and_report(
             parsed_line = (
                 (
                     f"Parsed signals: {', '.join(f'{k}={v}' for k, v in parsed.items())}\n"
-                    "(Heuristic extraction — if any signal conflicts with the quoted intent above, "
+                    "(Heuristic extraction — signals may include words used in negated phrases, "
+                    "e.g. 'not dark' may still produce mood=dark. "
+                    "If any signal conflicts with the quoted intent above, "
                     "the quoted intent takes precedence.)\n\n"
                 )
                 if parsed
