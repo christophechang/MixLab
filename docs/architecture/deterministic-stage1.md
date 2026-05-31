@@ -288,11 +288,17 @@ After BPM + Camelot + era passes, the candidate shortlists are resized to meet
 the 15–25 track target. All comparisons use current shortlist contents.
 
 **Sizing pass order:** execute as a loop of at most 3 iterations, where one iteration
-= one oversized pass followed by one undersized pass. Within each pass, snapshot the
-shortlist list sorted by length (descending for oversized, ascending for undersized)
-at the start of that pass; iterate through the snapshot in order. Shortlists created
-or grown during a pass (by Attempt 1/2 splits or Attempt 3 remainder attachment) are
-NOT processed in the current pass — they are picked up by a subsequent iteration.
+= one oversized pass followed by one undersized pass. "Current pass" means the
+half-iteration currently executing (oversized OR undersized), not the whole iteration.
+Within each pass, snapshot the shortlist list sorted by length (descending for
+oversized, ascending for undersized) at the start of that pass; iterate through the
+snapshot in order. During iteration:
+  - Shortlists created or split during the current pass are NOT in the snapshot and
+    are NOT processed in the current pass. A shortlist created by the oversized pass
+    IS eligible for the immediately following undersized pass of the same iteration.
+  - Shortlists already consumed (merged into another) during the current pass are
+    skipped when their snapshot slot is reached — check that the shortlist still
+    exists in the live list before processing it.
 Exit the loop early (before 3 iterations) if neither pass made any change.
 
 **Under-sizing (len < MIN_SHORTLIST):**
@@ -315,14 +321,17 @@ Phase 1 — first attempt (closest partner only):
   - If merging the closest partner would exceed MAX_SHORTLIST:
     Keep both as-is. If len(undersized) < ABSOLUTE_MIN, drop it. STOP — do not
     enter Phase 2. (The closest partner overflows; no further attempts are made.)
-  - Otherwise: merge with the closest partner.
+  - Otherwise: merge with the closest partner. Place the merged shortlist at the
+    lower of the two original indices; remove the higher-index shortlist from the
+    live list.
 
 Phase 2 — retry loop (only entered if Phase 1 merged but result still < MIN_SHORTLIST):
   Use the post-Phase-1 merged shortlist's _median_bpm() as the reference for all
   Phase 2 distance comparisons.
   For each remaining partner in ascending _median_bpm() distance order:
     - If this partner would cause overflow (merged len > MAX_SHORTLIST): skip it.
-    - Otherwise: merge. If result >= MIN_SHORTLIST: STOP (success).
+    - Otherwise: merge. Place result at the lower of the two original indices;
+      remove the higher-index shortlist. If result >= MIN_SHORTLIST: STOP (success).
   End loop when: (a) result >= MIN_SHORTLIST, (b) no un-skipped partners remain,
   or (c) all remaining partners would overflow.
   After the loop: keep the shortlist if len >= ABSOLUTE_MIN, otherwise drop it.
@@ -375,9 +384,10 @@ Attempt 3: rank by centrality ascending, keep the first MAX_SHORTLIST, attach
         # The 999 guard must be kept — do not remove it as "dead code".
       centrality = bpm_norm + camelot_norm
       # centrality ∈ [0, 2.0]. Do not cap or normalise — sort uses raw value.
-    Sort key: 2-tuple (centrality, track_id) ascending. Using track_id as the
-    explicit secondary key (not relying on input-list order + sort stability) ensures
-    the result is deterministic regardless of how tracks were ordered in the shortlist.
+    Sort key: 2-tuple (centrality, track_id) ascending, where track_id is compared
+    lexicographically (string comparison, not numeric). Using track_id as the explicit
+    secondary key (not relying on input-list order + sort stability) ensures the
+    result is deterministic regardless of how tracks were ordered in the shortlist.
 ```
 
 **Pool-level adjustments (after all per-shortlist passes):**
