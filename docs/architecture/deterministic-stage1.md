@@ -281,10 +281,12 @@ adjacency is conservative and correct. Do not broaden the definition.
    (camelot_compatible returns False for any unparseable key, making that track a
    Camelot singleton. Tracks with unknown keys form their own singleton components
    and are merged into the largest component in Step 2.4.)
-   **Key normalisation**: before all Camelot comparisons and Counter operations in
-   Steps 2 and 5, normalise every camelot_key to UPPERCASE (e.g. `key.upper()`).
+   **Key normalisation**: before ALL Camelot comparisons and Counter operations
+   throughout the algorithm (Steps 2, 4 Attempt 3 centrality, and Step 5 mood
+   inference), normalise every camelot_key to UPPERCASE (e.g. `key.upper()`).
    _CAMELOT_RE uses IGNORECASE, so '8a' and '8A' are both parseable; without
-   normalisation they count as distinct keys, splitting frequency counts.
+   normalisation they count as distinct keys, splitting frequency counts and
+   producing non-deterministic dominant_key selection.
 2. Find connected components via BFS. For determinism:
    - Sort all tracks ascending by track_id before building the adjacency graph.
    - BFS queue: start from the unvisited track with the lexicographically smallest
@@ -496,13 +498,18 @@ Attempt 3: rank by centrality ascending, keep the first MAX_SHORTLIST tracks as 
   the remainder group).
   Tie in distance: attach to the shortlist whose minimum track_id is
   lexicographically smaller.
-  If no other shortlist exists, discard the remainder.
-  Note: appending the remainder may push the target shortlist over MAX_SHORTLIST.
-  This is accepted — do NOT trigger a recursive sizing pass. Stage 2 tolerates
-  slight oversize, same as the pool-level merge note below.
+  If no other shortlist exists, discard the remainder. This is accepted behavior —
+  a single large coherent cluster (e.g. flat-BPM, single Camelot key) cannot be split
+  further; returning the most central MAX_SHORTLIST tracks is the best available output.
+  Emit a diagnostic when tracks are discarded:
+  `print(f"partition_pool: Attempt 3 discarded {len(remainder)} tracks (no split target).", file=sys.stderr)`
+  Note: appending the remainder to an existing shortlist may push that shortlist over
+  MAX_SHORTLIST. This is accepted — do NOT trigger a recursive sizing pass. Stage 2
+  tolerates slight oversize, same as the pool-level merge note below.
 
   Centrality computation:
-    parsed_keys = [t.camelot_key for t in shortlist
+    # Normalise to uppercase before counting (see Step 2.1 key normalisation note).
+    parsed_keys = [t.camelot_key.upper() for t in shortlist
                    if t.camelot_key and _CAMELOT_RE.match(t.camelot_key)]
     # Deterministic dominant_key: sort by (-count, key_str) to break count ties.
     # Counter.most_common() is non-deterministic for equal counts (heap insertion order).
@@ -573,9 +580,9 @@ def _infer_shortlist_mood(tracks: list[Track]) -> tuple[str, str]:
     bpm_lo, bpm_hi = round(min(bpm_vals)), round(max(bpm_vals))
 
     # Dominant Camelot key — use full key string (e.g. "8A", "5B"), not just number.
-    # Filter to tracks with a parseable key to preserve the mode letter (A vs B).
+    # Normalise to uppercase before counting (IGNORECASE regex means '8a' == '8A').
     parsed_keys = [
-        t.camelot_key for t in tracks
+        t.camelot_key.upper() for t in tracks
         if t.camelot_key and _CAMELOT_RE.match(t.camelot_key)
     ]
     # Deterministic dominant_key: sort by (-count, key_str). Counter.most_common() is
@@ -674,8 +681,9 @@ call sites, filter out tracks with `bpm <= 0`. Zero/negative-BPM tracks distort
 centroids and histogram construction. If the pool-building code does not already
 exclude them, add:
 ```python
-bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # call sites A, C
-sorted_tracks = [t for t in sorted_tracks if t.bpm > 0]      # call site B
+bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # call site A
+sorted_tracks   = [t for t in sorted_tracks   if t.bpm > 0]  # call site B
+genre_outliers  = [t for t in genre_outliers  if t.bpm > 0]  # call site C
 ```
 This filter must be applied before the LLM-path window-trim check too, so both paths
 operate on the same cleaned pool.
@@ -807,9 +815,9 @@ test_era_split_skipped_at_7_year_gap_boundary
 test_era_split_skipped_when_gap_below_threshold
 test_era_split_skipped_when_one_side_too_small
 test_era_split_skipped_when_too_few_known_years
-test_era_split_unknown_year_tracks_routed_by_centroid
+test_era_split_unknown_year_tracks_assigned_to_era_old_unconditionally
 test_era_split_year_zero_tracks_treated_as_unknown_year
-test_era_split_centroid_tie_assigns_to_era_old
+test_era_split_unknown_year_tracks_include_zero_and_none_years
 test_era_split_gap_idx_points_to_last_track_before_gap
 test_era_split_counts_only_positive_year_tracks_for_side_guard
 
