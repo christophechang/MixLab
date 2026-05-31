@@ -57,7 +57,15 @@ def partition_pool(
     *,
     seed: int | None = None,
 ) -> list[MixConcept]:
-    """Partition a genre-scoped track pool into 3–5 shortlists of 15–25 tracks.
+    """Partition a genre-scoped track pool into shortlists for Stage 2.
+
+    Normal output: 3–5 shortlists of 15–25 tracks each.
+    Small-pool exceptions (Step 1 early exits):
+      - len(tracks) < 5 (ABSOLUTE_MIN): returns [].
+      - len(tracks) < 15 (MIN_SHORTLIST): returns one shortlist with all tracks.
+      - flat-BPM pools of 15–29 tracks (n_groups=1 fallback): one shortlist of
+        up to 29 tracks — 4 over MAX_SHORTLIST. Accepted; no further split exists.
+
 
     Deterministic replacement for the Stage 1 LLM call. Same pool + same seed =
     same output across runs. All tie-breaking is by sorted track_id — output is
@@ -156,14 +164,13 @@ all tracks have bpm > 0 (see §3 precondition).
    a. Decompose the smoothed histogram into maximal runs of consecutive equal values.
       A run of length 1 is a single-bucket (non-plateau) run.
    b. For each run:
-      L = smoothed value of the bucket immediately to the left of the run
-          (treat as -infinity if the run starts at i=0)
-      R = smoothed value of the bucket immediately to the right of the run
-          (treat as -infinity if the run ends at i=N)
-      If the run starts at i=0 OR ends at i=N: no peak (edge run).
-      Else if run_value > L AND run_value > R: the leftmost bucket of the run is
-        a peak. (Single-bucket runs with this property are standard strict peaks.)
-      Else: no peak for this run.
+      If the run starts at i=0 OR ends at i=N: no peak (edge run). Skip to next run.
+      Otherwise (interior run only):
+        L = smoothed value of the bucket immediately to the left of the run.
+        R = smoothed value of the bucket immediately to the right of the run.
+        If run_value > L AND run_value > R: the leftmost bucket of the run is a
+          peak. (Single-bucket runs with this property are standard strict peaks.)
+        Else: no peak for this run.
 
 Note: this unified algorithm replaces the "strict rule + plateau exception" framing.
 It produces identical results to the strict rule for single-bucket runs, and correctly
@@ -179,10 +186,13 @@ plateau detection step required.
      combined peak BPM (sum of the two centres).
    - Repeat until no two peaks have distance < 8.0.
 
-Note on threshold equivalence: 'distance < 8 BPM' for merging and '|bpm - centre| ≤ 7.0'
-for assignment in Step 6 are numerically equivalent (7 < 8 and 7 ≤ 7). Both are
-intentional; the phrasing differs only to match natural language ("closer than 8" vs
-"within ±7"). Implement both as their written form.
+Note on merge vs assignment thresholds: 'distance < 8 BPM' for merging and
+'|bpm - centre| ≤ 7.0' for assignment in Step 6 are intentionally different in form.
+After merging, two adjacent peaks are at least 8.0 BPM apart; their ±7.0 assignment
+windows may overlap by up to 6 BPM (e.g., peaks at 120 and 128 share the window
+121–127). The nearest-peak tie-break in Step 6 (lower-index peak wins) resolves all
+such overlaps — no track can be assigned to two peaks.
+Implement both thresholds exactly as written (< 8.0 for merging, ≤ 7.0 for assignment).
 ```
 
 **Peak centre** = midpoint of the 3-BPM bucket: `bucket_start + 1.5`.
@@ -211,10 +221,12 @@ Target: 2–6 raw BPM clusters before sizing adjustments.
 ```
 n_groups = min(MAX_POOL_COUNT, len(tracks) // MIN_SHORTLIST)
 If n_groups < 2:
-  Skip Steps 2–4. Call _infer_shortlist_mood on all tracks, assemble one MixConcept,
-  and return a single-element list. (Do NOT interpret "Steps 5–6" as the intra-Step-1
-  numbered sub-items 5 and 6 — those are peak-merge and track-assignment, which
-  require peaks to exist.)
+  Skip outer algorithm Steps 2, 3, and 4 (Camelot sub-clustering, era split, and
+  sizing enforcement). Proceed directly to outer Step 5 (mood/title inference) and
+  outer Step 6 (MixConcept assembly) using all tracks as a single group, then return.
+  Note: "outer Steps 5–6" refers to the top-level §4 algorithm steps, NOT to
+  intra-Step-1 sub-items 5 (peak-merge) and 6 (track-assignment), which are
+  inapplicable when no peaks exist.
   Note: pools of 15–29 tracks yield n_groups = 1. The returned shortlist may have
   up to 29 tracks — 4 over MAX_SHORTLIST. This is accepted for flat-BPM pools where
   no meaningful split exists.
@@ -278,14 +290,14 @@ Applied independently to each candidate shortlist *after* Camelot sub-clustering
 6. If gap_size >= 8 AND era_old_known >= 8 AND era_new_known >= 8:
    - era_old: tracks with year is not None and year > 0 and year <= gap_start
    - era_new: tracks with year is not None and year > 0 and year >  gap_start
-   - Unknown-year tracks (year=None OR year<=0): assign by comparing era centroids.
-     centroid_old = mean(t.year for t in era_old)   # always >= 8 known-year tracks
-     centroid_new = mean(t.year for t in era_new)   # always >= 8 known-year tracks
-     For each unknown-year track: assign to era_old if centroid_old <= centroid_new,
-     else assign to era_new. (Tie: assign to era_old.)
-     IMPORTANT: the centroid comparison does NOT use the unknown-year track's own year
-     value — all unknown-year tracks in a shortlist are assigned to the same side,
-     determined solely by comparing centroid_old vs centroid_new.
+   - Unknown-year tracks (year=None OR year<=0): assign ALL to era_old.
+     Rationale: era_old contains only years <= gap_start; era_new contains only
+     years > gap_start. Therefore centroid_old <= gap_start < centroid_new strictly
+     — "assign to the smaller centroid side" always resolves to era_old. The else
+     branch and any tie-break are unreachable; this rule encodes the invariant
+     directly.
+     IMPORTANT: no unknown-year track's year value is used — all unknown-year tracks
+     in a shortlist go to era_old unconditionally.
 7. Otherwise: no era split.
 ```
 
@@ -308,6 +320,15 @@ Iterate through the snapshot in order. During iteration:
     skipped when their snapshot slot is reached — check that the shortlist still
     exists in the live list before processing it.
 Exit the loop early (before 3 iterations) if neither pass made any change.
+**A change** is defined as: any shortlist being merged (under-sizing), split into two
+(Attempt 1 or 2), trimmed with or without remainder attached (Attempt 3), or dropped
+(len < ABSOLUTE_MIN). Simply evaluating a shortlist and leaving it untouched does NOT
+count as a change.
+
+**"Original index"** throughout Step 4 means the 0-based position of the shortlist
+in the live list at the start of the current pass (snapshot time). As merges and
+splits happen during a pass, the live list shifts — always use the snapshot-time
+index for placement, not the post-shift position.
 
 **Under-sizing (len < MIN_SHORTLIST):**
 
@@ -329,6 +350,9 @@ Phase 1 — first attempt (closest partner only):
   - If merging the closest partner would exceed MAX_SHORTLIST:
     Keep both as-is. If len(undersized) < ABSOLUTE_MIN, drop it. STOP — do not
     enter Phase 2. (The closest partner overflows; no further attempts are made.)
+    If len(undersized) >= ABSOLUTE_MIN, the shortlist is kept and returned below
+    MIN_SHORTLIST — this is accepted behavior for this edge case. Stage 2 tolerates
+    slight undersize.
   - Otherwise: merge with the closest partner. Place the merged shortlist at the
     lower of the two original indices; remove the higher-index shortlist from the
     live list.
@@ -336,7 +360,11 @@ Phase 1 — first attempt (closest partner only):
 Phase 2 — retry loop (only entered if Phase 1 merged but result still < MIN_SHORTLIST):
   Use the post-Phase-1 merged shortlist's _median_bpm() as the reference for all
   Phase 2 distance comparisons.
-  For each remaining partner in ascending _median_bpm() distance order:
+  Compute partner ordering ONCE at Phase 2 entry: ascending _median_bpm() distance
+  from the reference BPM. Do NOT recompute after each merge — the ordering is fixed
+  at Phase 2 entry regardless of merges that occur within Phase 2.
+  Tie in distance: choose the partner with the lexicographically smaller min_track_id.
+  For each remaining partner in that fixed order:
     - If this partner would cause overflow (merged len > MAX_SHORTLIST): skip it.
     - Otherwise: merge. Place result at the lower of the two original indices;
       remove the higher-index shortlist. If result >= MIN_SHORTLIST: STOP (success).
@@ -358,18 +386,26 @@ Attempt 1: split by Camelot component. Run BFS on the oversized shortlist's trac
   component below MIN_SHORTLIST, skip to Attempt 2.
   On success: replace the oversized shortlist with the two components in ascending
   _median_bpm() order (lower-BPM component first, at the original index).
+  Tie (both components have equal _median_bpm()): place the component with the
+  lexicographically smaller min_track_id first.
 Attempt 2: re-apply the full Step 3 era-split logic (including the 60% coverage
   gate) to the oversized shortlist. Attempt 2 succeeds only when the era conditions
   pass AND len(era_old) >= MIN_SHORTLIST AND len(era_new) >= MIN_SHORTLIST. If either
   half would be below MIN_SHORTLIST, treat Attempt 2 as failed and proceed to Attempt 3.
   On success: replace the oversized shortlist with era_old first (at original index),
   era_new second (at original index + 1).
-Attempt 3: rank by centrality ascending, keep the first MAX_SHORTLIST, attach
-  the remainder to the nearest other shortlist by _median_bpm() distance measured
-  from the TRIMMED shortlist (not from the remainder group).
+Attempt 3: rank by centrality ascending, keep the first MAX_SHORTLIST tracks as the
+  trimmed shortlist. Replace the oversized shortlist with the trimmed shortlist at
+  the original index.
+  Attach the remainder (tracks beyond rank MAX_SHORTLIST) to the nearest other
+  shortlist by _median_bpm() distance measured from the TRIMMED shortlist (not from
+  the remainder group).
   Tie in distance: attach to the shortlist whose minimum track_id is
   lexicographically smaller.
   If no other shortlist exists, discard the remainder.
+  Note: appending the remainder may push the target shortlist over MAX_SHORTLIST.
+  This is accepted — do NOT trigger a recursive sizing pass. Stage 2 tolerates
+  slight oversize, same as the pool-level merge note below.
 
   Centrality computation:
     parsed_keys = [t.camelot_key for t in shortlist
