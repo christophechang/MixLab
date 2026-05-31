@@ -63,8 +63,10 @@ def partition_pool(
     Small-pool exceptions (Step 1 early exits):
       - len(tracks) < 5 (ABSOLUTE_MIN): returns [].
       - len(tracks) < 15 (MIN_SHORTLIST): returns one shortlist with all tracks.
-      - flat-BPM pools of 15–29 tracks (n_groups=1 fallback): one shortlist of
-        up to 29 tracks — 4 over MAX_SHORTLIST. Accepted; no further split exists.
+      - pools of 15–29 tracks where no detectable peaks exist (n_groups=1 fallback):
+        one shortlist of up to 29 tracks — 4 over MAX_SHORTLIST. Accepted.
+        Note: the flat-BPM guard (max-min < 4) is a DIFFERENT code path — it
+        proceeds to Step 2 (Camelot sub-clustering) rather than this fallback.
 
 
     Deterministic replacement for the Stage 1 LLM call. Same pool + same seed =
@@ -80,8 +82,11 @@ def partition_pool(
     cascade_state passed to the old stage1_concepts() are not needed — genre
     is already implicit in the pool, and cascade_state is LLM infrastructure.
 
-    Note on seed: in v1 all tie-breaking is deterministic via sorted track_id, so
-    every seed value (including None) produces identical output. The parameter is
+    Note on seed: in v1 the output is fully deterministic — track_id is the final
+    tie-breaker in every ordering where other criteria tie. (Not ALL tie-breaks use
+    track_id: peak-merge uses lower-BPM, pair-selection uses combined BPM, Step 3
+    uses smaller gap index, and pool-level merge uses index position as last resort.)
+    Every seed value (including None) produces identical output. The parameter is
     reserved for a future BPM-jitter extension. Callers may always pass seed=None.
 
     Args:
@@ -140,8 +145,9 @@ all tracks have bpm > 0 (see §3 precondition).
 - If len(tracks) < ABSOLUTE_MIN (< 5): return [].
 - If len(tracks) < MIN_SHORTLIST (< 15): return [all tracks as one MixConcept].
   Skip Steps 2–4. (No clustering needed — the pool is too small to split.)
-- If all tracks have |bpm_i - bpm_j| < 4 for all pairs: treat all tracks as a single
-  BPM cluster and proceed directly to Step 2 with that one cluster.
+- If all tracks have |bpm_i - bpm_j| < 4 for all pairs (equivalently: max_bpm -
+  min_bpm < 4; implement as O(n) via min/max): treat all tracks as a single BPM
+  cluster and proceed directly to Step 2 with that one cluster.
   This bypasses histogram construction, smoothing, peak detection, AND the
   uniform-spread fallback entirely.
 ```
@@ -224,7 +230,8 @@ it simply finds no candidate peak during assignment.)
    - Tracks with no candidate peak within ±7 BPM become "outliers".
 7. Attach each outlier unconditionally to the nearest cluster by absolute BPM distance
    (no cap). There is no "hold as merge candidate" step.
-   Ties (equidistant from two clusters): attach to the cluster with the lower index.
+   Ties (equidistant from two clusters): attach to the cluster with the lower index
+   in the sorted ascending-BPM peak list (same list used in Step 6).
 ```
 
 Target: 2–6 raw BPM clusters before sizing adjustments.
@@ -241,8 +248,9 @@ If n_groups < 2:
   intra-Step-1 sub-items 5 (peak-merge) and 6 (track-assignment), which are
   inapplicable when no peaks exist.
   Note: pools of 15–29 tracks yield n_groups = 1. The returned shortlist may have
-  up to 29 tracks — 4 over MAX_SHORTLIST. This is accepted for flat-BPM pools where
-  no meaningful split exists.
+  up to 29 tracks — 4 over MAX_SHORTLIST. This is accepted whenever no meaningful
+  split exists (any pool that reaches this fallback with n_groups=1, not only
+  flat-BPM pools — see docstring for the distinction).
 Otherwise: split into n_groups equal-sized groups using the ascending-BPM sort
   from Step 1.1 (reuse it — do not re-sort).
   Group sizes: if len(tracks) % n_groups != 0, the first (len(tracks) % n_groups)
@@ -366,7 +374,12 @@ position may differ from its snapshot index — using reference lookup is correc
 **Under-sizing (len < MIN_SHORTLIST):**
 
 ```
-Find the other shortlist with the smallest abs(_median_bpm(this) - _median_bpm(other)).
+Search the current undersized-pass snapshot (excluding the shortlist being processed)
+for the other shortlist with the smallest abs(_median_bpm(this) - _median_bpm(other)).
+Do NOT include shortlists added to the live list during the current undersized pass
+itself — only snapshot shortlists are eligible partners.
+Note: shortlists created by the preceding oversized pass ARE in the undersized-pass
+snapshot (the spec states they are eligible); they have defined snapshot indices.
 (Tie in BPM distance: choose the shortlist whose minimum track_id is lexicographically
 smaller.)
 
@@ -407,6 +420,8 @@ Phase 2 — retry loop (only entered if Phase 1 merged but result still < MIN_SH
     - Otherwise: merge. Place result at the lower of the two UNDERSIZED PASS
       snapshot-time indices (resolve by reference lookup as defined above);
       remove the other shortlist. If result >= MIN_SHORTLIST: STOP (success).
+      Partners created by the preceding oversized pass are in the undersized snapshot
+      and have defined snapshot indices — treat them identically to other partners.
   End loop when: (a) result >= MIN_SHORTLIST, (b) no un-skipped partners remain,
   or (c) all remaining partners would overflow.
   After the loop: keep the shortlist if len >= ABSOLUTE_MIN, otherwise drop it.
@@ -533,8 +548,12 @@ def _infer_shortlist_mood(tracks: list[Track]) -> tuple[str, str]:
     # Dominant tags (top 2 by frequency across tracks)
     all_tags: list[str] = [tag for t in tracks for tag in t.tags]
     tag_counts = Counter(all_tags)
-    # Use tag_str (not t) to avoid shadowing the Track loop variable above.
-    top_tags = ", ".join(tag_str for tag_str, _ in tag_counts.most_common(2)) if tag_counts else ""
+    # Sort by (-count, tag_str) to break ties deterministically (Counter.most_common
+    # uses heap order which is insertion-order for equal counts — non-deterministic).
+    top_tags = ", ".join(
+        tag_str
+        for tag_str, _ in sorted(tag_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:2]
+    ) if tag_counts else ""
 
     parts = [f"{bpm_lo}–{bpm_hi} BPM", dominant_key]
     if era:
@@ -639,13 +658,18 @@ all_shortlists.extend(shortlists)
 
 ### Call site C — outlier / "Misc" pool (line ~616–617, inside `if len(genre_outliers) >= 4:`)
 
+The existing guard `len(genre_outliers) >= 4` must be updated to `>= ABSOLUTE_MIN`
+(>= 5) because `partition_pool` returns `[]` for pools smaller than ABSOLUTE_MIN=5.
+A pool of exactly 4 outliers would silently produce no shortlist on the deterministic
+path (whereas the LLM path accepted it). Update the guard to match the new contract.
+
 ```python
 # Before
 if len(genre_outliers) >= 4:
     all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc", cascade_state))
 
 # After
-if len(genre_outliers) >= 4:
+if len(genre_outliers) >= ABSOLUTE_MIN:  # was >= 4; updated to match partition_pool contract
     if os.environ.get("MIXLAB_STAGE1_LLM"):
         shortlists = await stage1_concepts(genre_outliers, "Misc", cascade_state)
     else:
