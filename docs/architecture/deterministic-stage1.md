@@ -156,7 +156,9 @@ all tracks have bpm > 0 (see §3 precondition).
 **Histogram construction:**
 
 ```
-1. Sort tracks ascending by BPM.
+1. Sort tracks ascending by BPM, then by track_id (lexicographic) for ties.
+   (Equal-BPM tracks are common; without a secondary key their order is input-order
+   dependent, breaking same-pool determinism.)
 2. Bin tracks into 3-BPM-wide histogram buckets using left-inclusive, right-exclusive
    intervals [lo, lo+3). The first bucket starts at floor(min_bpm / 3) * 3.
    Example: min_bpm=122.4 → first bucket is [120, 123).
@@ -210,6 +212,8 @@ plateau detection step required.
    - Tie (equal raw count): keep the lower-BPM peak.
    - Distance tie (two pairs are equidistant): choose the pair with the lowest
      combined peak BPM (sum of the two centres).
+   - Combined-BPM tie (two pairs share equal distance AND equal centre-sum): choose
+     the pair whose lower-BPM peak has the lower bucket index (i.e. lower centre).
    - Repeat until no two peaks have distance < 8.0.
 
 Note on merge vs assignment thresholds: 'distance < 8 BPM' for merging and
@@ -262,6 +266,13 @@ If n_groups < 2:
   up to 29 tracks — 4 over MAX_SHORTLIST. This is accepted whenever no meaningful
   split exists (any pool that reaches this fallback with n_groups=1, not only
   flat-BPM pools — see docstring for the distinction).
+  Note on asymmetry with the peaks path: a 26–29 track cluster that arrives via the
+  peaks path (i.e. it was produced by Step 1 peak-windowing or by the n_groups≥2
+  uniform spread) DOES pass through Step 4 sizing enforcement, where it may be split
+  or trimmed to fit [15, 25]. The n_groups=1 fallback intentionally bypasses Step 4
+  because, with only one group, there is no partner to split into and no surplus to
+  discard meaningfully; the minor overrun (≤4 tracks) is the accepted trade-off for
+  simplicity.
 Otherwise: split into n_groups equal-sized groups using the ascending-BPM sort
   from Step 1.1 (reuse it — do not re-sort).
   Group sizes: if len(tracks) % n_groups != 0, the first (len(tracks) % n_groups)
@@ -708,6 +719,7 @@ custom_genre_sub_genres = cfg["genres"]
 all_shortlists.extend(await stage1_concepts(stage1_pool, genre, cascade_state, custom=True))
 
 # After
+bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # precondition filter
 cfg = CUSTOM_GENRES[genre]
 custom_genre_sub_genres = cfg["genres"]
 if os.environ.get("MIXLAB_STAGE1_LLM"):
@@ -729,11 +741,19 @@ sub-pool, Camelot-sorted. Pass this same variable (not `cluster_tracks`) to
 `partition_pool()`. The pre-filtering to the core BPM pool is intentional; bridge and
 wildcard tracks are excluded here just as they were from the LLM path.
 
+**Existing small-pool guard:** the current code has an early-continue guard before the
+Stage 1 call (approximately: `if len(pools.core) < MIN_SHORTLIST_TRACKS: continue`).
+`MIN_SHORTLIST_TRACKS` (=8) is imported from `llm.py`. With the deterministic path,
+`partition_pool` handles small pools gracefully (returns [] for < ABSOLUTE_MIN, one
+shortlist for < MIN_SHORTLIST), so this guard is **no longer needed on the deterministic
+path**. Remove it and rely on the `if not shortlists: continue` check shown below.
+
 ```python
 # Before
 all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label, cascade_state))
 
 # After
+sorted_tracks = [t for t in sorted_tracks if t.bpm > 0]  # precondition filter
 if os.environ.get("MIXLAB_STAGE1_LLM"):
     shortlists = await stage1_concepts(sorted_tracks, genre_label, cascade_state)
 else:
@@ -773,9 +793,10 @@ if len(genre_outliers) >= ABSOLUTE_MIN:  # was >= 4; updated to match partition_
 
 | File | Change |
 |------|--------|
-| `src/mixlab/clustering.py` | Add `partition_pool()`, `_find_bpm_peaks()`, `_camelot_components()`, `_era_split()`, `_resize_shortlists()`, `_median_bpm()`, `_infer_shortlist_mood()` |
+| `src/mixlab/clustering.py` | Add `partition_pool()`, `_find_bpm_peaks()`, `_camelot_components()`, `_era_split()`, `_resize_shortlists()`, `_median_bpm()`, `_infer_shortlist_mood()`; add public module-level constants `MIN_SHORTLIST`, `MAX_SHORTLIST`, `ABSOLUTE_MIN`, `MIN_POOL_COUNT`, `MAX_POOL_COUNT`, `MIN_CAMELOT_COMPONENT` (no leading underscore — `ABSOLUTE_MIN` is imported by `__main__.py`). **Note:** `MIN_SHORTLIST = 15` is distinct from `MIN_SHORTLIST_TRACKS = 8` in `llm.py` — the latter is the LLM Stage 1 output filter threshold, unrelated to partition_pool sizing. |
 | `src/mixlab/__main__.py` | Replace all three Stage 1 LLM call sites; add `--stage1-seed` flag; add feature flag env var |
 | `src/mixlab/llm.py` | Mark `_STAGE1_SYSTEM*` prompts and `stage1_concepts()` as deprecated (remove after 30-day soak) |
+| `.env.example` | Add `MIXLAB_STAGE1_LLM=` (empty = deterministic path; set to `1` to restore LLM path during soak period) |
 | `tests/test_clustering.py` | New tests for all `partition_pool` helpers and end-to-end partitioning |
 | `tests/test_llm.py` | Remove or migrate Stage 1 LLM tests |
 | `tests/test_main.py` | Update all three Stage 1 call-site tests |
@@ -802,9 +823,9 @@ test_find_bpm_peaks_track_exactly_7_bpm_from_centre_is_within_window
 test_find_bpm_peaks_track_beyond_7_bpm_becomes_outlier
 test_find_bpm_peaks_equidistant_track_assigned_to_lower_index_peak
 test_find_bpm_peaks_outliers_have_no_candidate_peak_within_7_bpm
-test_find_bpm_peaks_uniform_spread_returns_quantile_groups_not_peaks
+test_find_bpm_peaks_uniform_spread_returns_equal_bpm_groups_not_peaks
 test_find_bpm_peaks_quantile_fallback_small_pool_returns_equal_groups
-test_find_bpm_peaks_quantile_fallback_one_group_when_n_groups_equals_one
+test_partition_pool_n_groups_one_fallback_returns_single_shortlist_up_to_29_tracks
 test_find_bpm_peaks_single_bucket_histogram_triggers_fallback
 test_find_bpm_peaks_two_bucket_histogram_triggers_fallback
 test_partition_pool_below_absolute_min_returns_empty
