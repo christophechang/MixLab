@@ -139,20 +139,24 @@ def partition_pool(tracks: list[Track], *, seed: int | None = None) -> list[MixC
     # Step 1 early exits (see 'Early exits' section of Step 1 below)
     if len(tracks) < ABSOLUTE_MIN:
         return []
+    # Canonical Step 1.1 sort: ascending BPM, then track_id lexicographic for ties.
+    # Computed ONCE here and reused by all paths that emit a single shortlist in BPM
+    # order (< MIN_SHORTLIST, n_groups=1 fallback, flat-BPM guard). _find_bpm_peaks
+    # performs this sort internally — passing bpm_sorted is safe (it re-sorts).
+    bpm_sorted = sorted(tracks, key=lambda t: (t.bpm, t.track_id))
     if len(tracks) < MIN_SHORTLIST:
-        title, mood = _infer_shortlist_mood(tracks)   # both early-exit paths use this
-        return [MixConcept(title=title, mood=mood, track_ids=[t.track_id for t in tracks])]
-    if max(t.bpm for t in tracks) - min(t.bpm for t in tracks) < 4:
-        clusters: list[list[Track]] = [list(tracks)]  # flat-BPM guard: one cluster, skip histogram
+        title, mood = _infer_shortlist_mood(bpm_sorted)  # BPM-sorted order for track_ids
+        return [MixConcept(title=title, mood=mood, track_ids=[t.track_id for t in bpm_sorted])]
+    if bpm_sorted[-1].bpm - bpm_sorted[0].bpm < 4:       # flat-BPM guard (uses sorted extremes)
+        clusters: list[list[Track]] = [bpm_sorted]        # one cluster in BPM-sorted order
     else:
-        clusters = _find_bpm_peaks(tracks)            # Steps 1.1-1.7; returns clusters | None
-        if clusters is None:                          # no peaks detected: uniform-spread fallback
-            n_groups = min(MAX_POOL_COUNT, len(tracks) // MIN_SHORTLIST)
-            if n_groups < 2:                          # n_groups=1 (15-29 tracks, no peaks)
-                title, mood = _infer_shortlist_mood(tracks)
-                return [MixConcept(title=title, mood=mood, track_ids=[t.track_id for t in tracks])]
+        clusters = _find_bpm_peaks(bpm_sorted)             # Steps 1.1-1.7; returns clusters | None
+        if clusters is None:                               # no peaks detected: uniform-spread fallback
+            n_groups = min(MAX_POOL_COUNT, len(bpm_sorted) // MIN_SHORTLIST)
+            if n_groups < 2:                               # n_groups=1 (15-29 tracks, no peaks)
+                title, mood = _infer_shortlist_mood(bpm_sorted)  # BPM-sorted order
+                return [MixConcept(title=title, mood=mood, track_ids=[t.track_id for t in bpm_sorted])]
             # n_groups >= 2: split into contiguous BPM-sorted slices (Step 1 uniform-spread)
-            bpm_sorted = sorted(tracks, key=lambda t: (t.bpm, t.track_id))
             size, rem = divmod(len(bpm_sorted), n_groups)
             clusters = []
             i = 0
