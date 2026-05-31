@@ -64,9 +64,12 @@ def partition_pool(
       - len(tracks) < 5 (ABSOLUTE_MIN): returns [].
       - len(tracks) < 15 (MIN_SHORTLIST): returns one shortlist with all tracks.
       - pools of 15–29 tracks where no detectable peaks exist (n_groups=1 fallback):
-        one shortlist of up to 29 tracks — 4 over MAX_SHORTLIST. Accepted.
+        one shortlist of up to 29 tracks — at most 4 over MAX_SHORTLIST. Accepted.
         Note: the flat-BPM guard (max-min < 4) is a DIFFERENT code path — it
-        proceeds to Step 2 (Camelot sub-clustering) rather than this fallback.
+        proceeds to Step 2 (Camelot sub-clustering) and then Step 4 sizing enforcement.
+        A flat-BPM pool of 26+ tracks with a single Camelot component will be trimmed
+        to 25 by Step 4 Attempt 3 (not kept whole). Only the n_groups=1 fallback
+        bypasses Step 4 and may return up to 29 tracks intact.
 
 
     Deterministic replacement for the Stage 1 LLM call. Same pool + same seed =
@@ -74,9 +77,10 @@ def partition_pool(
     fully deterministic regardless of seed value.
 
     Preconditions:
-        - tracks must be non-empty.
         - Tracks with bpm <= 0 should be excluded by the caller — they are treated as
           the lowest-BPM tracks and will distort cluster centroids.
+        - An empty tracks list is valid input: the `len < ABSOLUTE_MIN` early exit
+          returns [] immediately without reaching any helper that requires non-empty.
 
     Note: this function accepts only tracks and seed. The genre label and
     cascade_state passed to the old stage1_concepts() are not needed — genre
@@ -185,7 +189,9 @@ all tracks have bpm > 0 (see §3 precondition).
    - Interior bucket i (0 < i < N): smoothed[i] = (raw[i-1] + raw[i] + raw[i+1]) / 3
    - Left edge (i=0): smoothed[0] = (raw[0] + raw[1]) / 2
    - Right edge (i=N): smoothed[N] = (raw[N-1] + raw[N]) / 2
-   Divide by the count of available buckets in the window (2 or 3), not always 3.
+   The divisor is the number of buckets in the window (2 for edges, 3 for interior),
+   NOT the number of buckets with non-zero raw count. Empty (count=0) buckets are
+   fully included in the window and counted in the denominator.
 ```
 
 **Peak detection:**
@@ -292,10 +298,11 @@ If n_groups < 2:
   because, with only one group, there is no partner to split into and no surplus to
   discard meaningfully; the minor overrun (≤4 tracks) is the accepted trade-off for
   simplicity.
-Otherwise: split into n_groups equal-sized groups using the ascending-BPM sort
-  from Step 1.1 (reuse it — do not re-sort).
+Otherwise: split into n_groups equal-sized groups using CONTIGUOUS slices of the
+  ascending-BPM sort from Step 1.1 (reuse it — do not re-sort; do NOT round-robin).
   Group sizes: if len(tracks) % n_groups != 0, the first (len(tracks) % n_groups)
-  groups each receive one extra track. E.g. 31 tracks / 2 groups = [16, 15].
+  groups each receive one extra track. E.g. 31 tracks / 2 groups = [16, 15]
+  (tracks[0:16] and tracks[16:31]).
   Proceed to Step 2 with these groups.
 ```
 
@@ -380,8 +387,9 @@ Applied independently to each candidate shortlist *after* Camelot sub-clustering
 5. Count era_old_known = number of tracks in KY with year <= gap_start.
    Count era_new_known = number of tracks in KY with year >  gap_start.
    (These counts use only KY — unknown-year tracks are not counted here.)
-6. If gap_size >= 8 AND era_old_known >= 8 AND era_new_known >= 8:
-   Note: the >=8 per-side threshold is intentionally LOWER than MIN_SHORTLIST=15.
+6. If gap_size >= 8 AND era_old_known >= per_side_min AND era_new_known >= per_side_min:
+   where per_side_min is a parameter (default 8 for base Step 3; 15 for Step 4 Attempt 2).
+   Note: the default >=8 per-side threshold is intentionally LOWER than MIN_SHORTLIST=15.
    A 20-track shortlist split into two 10-track halves (each with 10 known-year
    tracks) passes Step 3 but produces two sub-MIN_SHORTLIST shortlists. Step 4
    under-sizing then merges them back (or grows them). This is the intended
@@ -424,11 +432,17 @@ Note on last-iteration oversized output: if the undersized pass of the FINAL ite
 (iteration 3, or the last iteration before early-exit) merges two shortlists into a
 combined length > MAX_SHORTLIST, that oversized result is returned without further
 splitting — the oversized pass for that iteration already ran BEFORE the undersized
-pass. This is accepted behaviour (added to §9 exceptions). To minimise this, the
-undersized pass's overflow check (Phase 2, line above) already skips merges that would
-exceed MAX_SHORTLIST when growing toward MIN_SHORTLIST; Phase 1's single-merge ceiling
-is also guarded. Only a Phase 1 merge of two BOTH-undersized shortlists (each just
-below MIN_SHORTLIST) can produce this outcome.
+pass. This is accepted behaviour (added to §9 exceptions). The main sources of
+> MAX_SHORTLIST output are:
+  1. Pool-level merge (after per-shortlist passes, documented separately in §9).
+  2. Phase 1 merge of two undersized shortlists each just below MIN_SHORTLIST:
+     combined 14+14=28 > MAX_SHORTLIST=25 (possible since the overflow check only
+     guards Phase 2, not Phase 1's single-merge step).
+  3. Attempt 3 remainder-attach: trimming a 30-track shortlist to 25 and attaching
+     the 5-track remainder to a 24-track neighbour yields a 29-track shortlist
+     (> MAX_SHORTLIST). This occurs in the OVERSIZED pass, so it can be caught by
+     the next iteration's oversized pass if iterations remain.
+The § 9 parenthetical covers all three.
 **A change** is defined as: any shortlist being merged (under-sizing), split into two
 (Attempt 1 or 2), trimmed with or without remainder attached (Attempt 3), or dropped
 (len < ABSOLUTE_MIN). Simply evaluating a shortlist and leaving it untouched does NOT
@@ -479,12 +493,18 @@ Phase 1 — first attempt (closest partner only):
     lower of the two original indices; remove the higher-index shortlist from the
     live list.
 
-Phase 2 — retry loop (only entered if Phase 1 merged but result still < MIN_SHORTLIST):
-  Use the post-Phase-1 merged shortlist's _median_bpm() as the reference for all
-  Phase 2 distance comparisons.
+Phase 2 — retry loop (entered when: (a) Phase 1 merged but result is still
+  < MIN_SHORTLIST, OR (b) Phase 1's closest partner would overflow and was skipped):
+  Reference BPM for Phase 2 distance comparisons:
+    - Case (a) post-Phase-1-merge: use the merged shortlist's current _median_bpm().
+    - Case (b) Phase 1 overflow (no merge): use the original shortlist's _median_bpm()
+      (the same value that was the pre-Phase-1 median — the shortlist is unchanged).
   Compute partner ordering ONCE at Phase 2 entry: ascending _median_bpm() distance
   from the reference BPM. Do NOT recompute after each merge — the ordering is fixed
   at Phase 2 entry regardless of merges that occur within Phase 2.
+  In case (b) the closest-distance partner in Phase 2's ordering is the same partner
+  Phase 1 already rejected (it overflows). Skip it immediately (overflow check:
+  current_len + partner_len > MAX_SHORTLIST) and proceed to the next.
   Tie in distance: choose the partner with the lexicographically smaller min_track_id.
   "Remaining partners" = snapshot partners not yet processed in Phase 2 AND still
   present in the live list (not consumed during the current undersized pass).
@@ -709,10 +729,17 @@ All three live inside `run()`, not `run_playlist_mode` — playlist mode does no
 The old signature `stage1_concepts(pool, genre, cascade_state, ...)` drops `genre` and
 `cascade_state` in the new path.
 
-**Add import at the top of `__main__.py`:**
+**Update the existing `from mixlab.clustering import (...)` block in `__main__.py`**
+(lines ~15–25) to include `partition_pool` and `ABSOLUTE_MIN`. Do NOT add a separate
+import line for the same module — Ruff flags duplicate-module imports (E401/E402).
+Merge them into the existing parenthesised block:
 
 ```python
-from mixlab.clustering import partition_pool, ABSOLUTE_MIN
+from mixlab.clustering import (
+    ...,          # existing names unchanged
+    partition_pool,
+    ABSOLUTE_MIN,
+)
 ```
 
 Confirm `import os` and `import sys` are present in `__main__.py` — the new code
@@ -729,13 +756,19 @@ are declared without one so callers can import them.
 `stage1_seed=args.stage1_seed` at the `asyncio.run(run(...))` call in `main()`.
 
 ```python
-# run() signature — add the new parameter:
+# run() signature — append stage1_seed AFTER the existing final parameter (debug):
 async def run(
     genre: str | None,
     export_dir: Path | None,
     mode: TrackMode = "unplayed",
-    ...,
-    stage1_seed: int | None = None,   # ← new
+    min_bpm: float | None = None,
+    max_bpm: float | None = None,
+    min_year: int | None = None,
+    max_year: int | None = None,
+    intent: str | None = None,
+    deep: bool = False,
+    debug: bool = False,
+    stage1_seed: int | None = None,   # ← new — must come last (keyword-only safe)
 ) -> None: ...
 
 # asyncio.run(run(...)) call in main() — add the argument:
@@ -843,10 +876,22 @@ Remove the `MIN_SHORTLIST_TRACKS` import from `llm.py` at the top of `__main__.p
 that blocks the build per Ruff policy. Add this removal to the §6 file-change table.
 
 ```python
-# Before
-all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label, cascade_state))
+# Before (wider context — show all lines that change or that MUST be kept)
+pools = partition_bpm_pools(cluster_tracks)
+bpm_filtered_counts[genre_label] = len(pools.core)     # ← KEEP — not replaced
+if len(pools.core) < MIN_SHORTLIST_TRACKS:             # ← REMOVE this entire block
+    print(
+        f"Stage 1: skipping {genre_label} — {len(pools.core)} tracks in core BPM pool "
+        f"(minimum {MIN_SHORTLIST_TRACKS})"
+    )
+    continue
+sorted_tracks = sort_by_camelot(pools.core)
+all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label, cascade_state))  # ← REPLACE
 
-# After
+# After (replace only the guard+stage1 call block; keep bpm_filtered_counts line above)
+pools = partition_bpm_pools(cluster_tracks)
+bpm_filtered_counts[genre_label] = len(pools.core)     # unchanged — still records core pool size
+sorted_tracks = sort_by_camelot(pools.core)
 sorted_tracks = [t for t in sorted_tracks if t.bpm > 0]  # precondition filter
 if os.environ.get("MIXLAB_STAGE1_LLM"):
     shortlists = await stage1_concepts(sorted_tracks, genre_label, cascade_state)
@@ -876,13 +921,15 @@ if len(genre_outliers) >= 4:
     all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc", cascade_state))
 
 # After
-genre_outliers = [t for t in genre_outliers if t.bpm > 0]  # must be before the guards
 if os.environ.get("MIXLAB_STAGE1_LLM"):
-    if len(genre_outliers) >= 4:  # original threshold preserved on LLM path
+    # LLM path: preserve original behaviour exactly (no bpm filter, original threshold)
+    if len(genre_outliers) >= 4:
         shortlists = await stage1_concepts(genre_outliers, "Misc", cascade_state)
         all_shortlists.extend(shortlists)
 else:
-    if len(genre_outliers) >= ABSOLUTE_MIN:  # deterministic path requires ≥ 5
+    # Deterministic path: filter bpm<=0, use ABSOLUTE_MIN threshold
+    genre_outliers = [t for t in genre_outliers if t.bpm > 0]
+    if len(genre_outliers) >= ABSOLUTE_MIN:
         shortlists = partition_pool(genre_outliers, seed=stage1_seed)
         all_shortlists.extend(shortlists)
 # Note: no early-exit at call site C — it is not inside a loop.
@@ -894,7 +941,7 @@ else:
 
 | File | Change |
 |------|--------|
-| `src/mixlab/clustering.py` | Add `partition_pool()`, `_find_bpm_peaks()`, `_camelot_components()`, `_era_split()`, `_resize_shortlists()`, `_median_bpm()`, `_infer_shortlist_mood()`; add public module-level constants `MIN_SHORTLIST`, `MAX_SHORTLIST`, `ABSOLUTE_MIN`, `MIN_POOL_COUNT`, `MAX_POOL_COUNT`, `MIN_CAMELOT_COMPONENT` (no leading underscore — `ABSOLUTE_MIN` is imported by `__main__.py`). **Note:** `MIN_SHORTLIST = 15` is distinct from `MIN_SHORTLIST_TRACKS = 8` in `llm.py` — the latter is the LLM Stage 1 output filter threshold, unrelated to partition_pool sizing. |
+| `src/mixlab/clustering.py` | Add `partition_pool()`, `_find_bpm_peaks()`, `_camelot_components()`, `_era_split()`, `_resize_shortlists()`, `_median_bpm()`, `_infer_shortlist_mood()`; add public module-level constants `MIN_SHORTLIST`, `MAX_SHORTLIST`, `ABSOLUTE_MIN`, `MIN_POOL_COUNT`, `MAX_POOL_COUNT`, `MIN_CAMELOT_COMPONENT` (no leading underscore — `ABSOLUTE_MIN` is imported by `__main__.py`). **Note:** `MIN_SHORTLIST = 15` is distinct from `MIN_SHORTLIST_TRACKS = 8` in `llm.py` — the latter is the LLM Stage 1 output filter threshold, unrelated to partition_pool sizing. Also add `from collections import Counter` and `import statistics` at module scope if not already present (used by centrality and _infer_shortlist_mood). |
 | `src/mixlab/__main__.py` | Replace all three Stage 1 LLM call sites; add `--stage1-seed` flag; add feature flag env var; add `stage1_seed: int \| None = None` to `run()` signature; remove unused `MIN_SHORTLIST_TRACKS` import (becomes F401 after call-site B guard removal) |
 | `src/mixlab/llm.py` | Mark `_STAGE1_SYSTEM*` prompts and `stage1_concepts()` as deprecated (remove after 30-day soak) |
 | `.env.example` | Add `MIXLAB_STAGE1_LLM=` (empty = deterministic path; set to `1` to restore LLM path during soak period) |
@@ -933,8 +980,8 @@ test_find_bpm_peaks_three_bucket_all_equal_histogram_triggers_fallback
 # the partition_pool level (not the _find_bpm_peaks helper, which returns peak objects):
 test_partition_pool_below_absolute_min_returns_empty
 test_partition_pool_small_but_above_absolute_min_returns_single_shortlist
-test_partition_pool_n_groups_one_fallback_returns_single_shortlist_up_to_29_tracks
-test_partition_pool_n_groups_one_fallback_bypasses_step4_unlike_same_size_peaks_cluster
+test_partition_pool_n_groups_one_fallback_no_peaks_returns_single_shortlist_up_to_29_tracks
+test_partition_pool_n_groups_one_fallback_bypasses_step4_peaks_path_same_size_does_not
 
 # Step 2 — Camelot components
 test_camelot_components_connected_keys_form_single_component
@@ -994,7 +1041,8 @@ test_partition_pool_typical_input_shortlists_within_15_to_25_tracks
 test_partition_pool_same_seed_same_output_reproducibility
 test_partition_pool_tiny_pool_returns_single_shortlist
 test_partition_pool_below_absolute_min_returns_empty
-test_partition_pool_all_same_bpm_15plus_tracks_returns_camelot_subgroups_or_single
+test_partition_pool_all_same_bpm_15to25_tracks_returns_camelot_subgroups_or_single_intact
+test_partition_pool_all_same_bpm_26plus_tracks_trimmed_to_max_shortlist_by_step4
 test_partition_pool_outliers_attached_to_nearest_cluster
 test_partition_pool_no_peaks_uses_equal_bpm_split_before_step2
 test_partition_pool_custom_genre_pool_respects_sub_genre_coherence
@@ -1040,7 +1088,11 @@ Document `MIXLAB_STAGE1_LLM` in `.env.example`.
 - [ ] Custom-genre pools handled correctly (sub-genre coherence respected)
 - [ ] End-to-end latency drops by ≥ 5 seconds per genre call
 - [ ] `_STAGE1_SYSTEM*` prompts and `stage1_concepts()` marked deprecated in `llm.py`
-- [ ] `MIXLAB_STAGE1_LLM=1` restores LLM path without code change (all three call sites)
+- [ ] `MIXLAB_STAGE1_LLM=1` restores LLM path for all three call sites with minimal
+      behavioural differences: call site A prints the window-trim message under
+      slightly different conditions (bpm-filtered pool vs. original); call site C
+      now applies the bpm>0 filter ONLY on the deterministic branch (LLM path is
+      unfiltered, matching original). These are intentional and acceptable trade-offs.
 - [ ] All new tests pass; Stage 1 LLM tests removed or migrated
 - [ ] Outlier tracks always attached to nearest cluster (no unresolved "merge candidates")
 - [ ] `select_stage1_window` not called on the deterministic path at call site A
