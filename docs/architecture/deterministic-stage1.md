@@ -168,6 +168,9 @@ all tracks have bpm > 0 (see §3 precondition).
    distribution.
    Total bucket count = (bucket_index(max_bpm) - bucket_index(min_bpm) + 1), where
    bucket_index(b) = (floor(b / 3) * 3 - first_bucket_start) // 3.
+   Note: because bpm=123.0 falls in bucket [123,126) (the left-inclusive rule from
+   line 163), a pool spanning exactly [120.0, 123.0] produces 2 buckets, not 1.
+   This is correct — bucket_index(123.0) = (123-120)//3 = 1, giving count=2.
 3. If number of buckets (including empty ones) < 3: skip smoothing AND peak detection
    entirely; proceed directly to the uniform-spread fallback.
    Otherwise, smooth the histogram with a 3-bucket moving average.
@@ -288,9 +291,10 @@ adjacency is conservative and correct. Do not broaden the definition.
    normalisation they count as distinct keys, splitting frequency counts and
    producing non-deterministic dominant_key selection.
 2. Find connected components via BFS. For determinism:
-   - Sort all tracks ascending by track_id before building the adjacency graph.
+   - Sort all tracks ascending by track_id (lexicographic string order, NOT numeric)
+     before building the adjacency graph.
    - BFS queue: start from the unvisited track with the lexicographically smallest
-     track_id; expand neighbours in ascending track_id order.
+     track_id; expand neighbours in ascending lexicographic track_id order.
    - This fixes the internal track ordering within each component.
 3. If ALL tracks in the BPM cluster have no/unknown Camelot key (empty string or
    doesn't match _CAMELOT_RE): treat the entire cluster as a single component — keep
@@ -528,9 +532,10 @@ Attempt 3: rank by centrality ascending, keep the first MAX_SHORTLIST tracks as 
       if dominant_key is None:
         camelot_norm = 1.0   # no parseable keys in cluster — max peripheral score
       else:
-        d = camelot_distance(t.camelot_key, dominant_key)
+        d = camelot_distance(t.camelot_key.upper(), dominant_key)
         # camelot_distance returns 999 for any unparseable key (including when
         # dominant_key is parseable but t.camelot_key is not). Cap at 1.0.
+        # dominant_key is already upper() from the parsed_keys comprehension above.
         camelot_norm = 1.0 if d >= 999 else d / 7.0
         # 7.0 is the maximum finite camelot_distance (e.g. '1A' to '7B' = 7).
         # camelot_norm ∈ [0, 1.0]. For same-ring keys, max finite d=6 → norm=6/7≈0.857.
@@ -652,6 +657,10 @@ The old signature `stage1_concepts(pool, genre, cascade_state, ...)` drops `genr
 from mixlab.clustering import partition_pool, ABSOLUTE_MIN
 ```
 
+Confirm `import os` and `import sys` are present in `__main__.py` — the new code
+uses `os.environ.get(...)` at all three call sites and `sys.stderr` in the call site B
+empty-pool diagnostic. These are almost certainly already imported; if not, add them.
+
 Note: `ABSOLUTE_MIN` must be defined as a **public** (no leading underscore) module-level
 constant in `clustering.py`. If existing constants in that file use a leading underscore
 (private convention), ensure `ABSOLUTE_MIN` (and `MIN_SHORTLIST`, `MAX_SHORTLIST`, etc.)
@@ -683,10 +692,11 @@ exclude them, add:
 ```python
 bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # call site A
 sorted_tracks   = [t for t in sorted_tracks   if t.bpm > 0]  # call site B
-genre_outliers  = [t for t in genre_outliers  if t.bpm > 0]  # call site C
+# Call site C: apply inside the call site C code block, BEFORE the >= ABSOLUTE_MIN guard
+# (shown in the call site C code snippet below).
 ```
-This filter must be applied before the LLM-path window-trim check too, so both paths
-operate on the same cleaned pool.
+The filter at A and B must be applied before the LLM-path window-trim check too,
+so both paths operate on the same cleaned pool.
 
 ```python
 # Before
@@ -702,7 +712,7 @@ cfg = CUSTOM_GENRES[genre]
 custom_genre_sub_genres = cfg["genres"]
 if os.environ.get("MIXLAB_STAGE1_LLM"):
     stage1_pool = select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CUSTOM)
-    if len(stage1_pool) < len(bpm_sorted_pool):
+    if len(stage1_pool) < len(bpm_sorted_pool):  # compare against filtered pool
         print(f"  Selected {len(stage1_pool)}-track window from pool for Stage 1 (randomised per run).")
     shortlists = await stage1_concepts(stage1_pool, genre, cascade_state, custom=True)
 else:
@@ -747,6 +757,7 @@ if len(genre_outliers) >= 4:
     all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc", cascade_state))
 
 # After
+genre_outliers = [t for t in genre_outliers if t.bpm > 0]  # must be before the guard
 if len(genre_outliers) >= ABSOLUTE_MIN:  # was >= 4; updated to match partition_pool contract
     if os.environ.get("MIXLAB_STAGE1_LLM"):
         shortlists = await stage1_concepts(genre_outliers, "Misc", cascade_state)
@@ -790,14 +801,14 @@ test_find_bpm_peaks_boundary_bpm_assigned_to_new_bucket
 test_find_bpm_peaks_track_exactly_7_bpm_from_centre_is_within_window
 test_find_bpm_peaks_track_beyond_7_bpm_becomes_outlier
 test_find_bpm_peaks_equidistant_track_assigned_to_lower_index_peak
-test_find_bpm_peaks_outliers_attached_to_nearest_cluster
-test_find_bpm_peaks_uniform_spread_falls_back_to_quantile_splits
-test_find_bpm_peaks_quantile_fallback_small_pool_returns_single_group
-test_find_bpm_peaks_quantile_fallback_single_shortlist_has_populated_title_mood
-test_find_bpm_peaks_single_bucket_histogram_uses_fallback_not_peak_detection
-test_find_bpm_peaks_two_bucket_histogram_uses_fallback
-test_find_bpm_peaks_pool_below_absolute_min_returns_empty
-test_find_bpm_peaks_pool_small_but_above_absolute_min_returns_single_shortlist
+test_find_bpm_peaks_outliers_have_no_candidate_peak_within_7_bpm
+test_find_bpm_peaks_uniform_spread_returns_quantile_groups_not_peaks
+test_find_bpm_peaks_quantile_fallback_small_pool_returns_equal_groups
+test_find_bpm_peaks_quantile_fallback_one_group_when_n_groups_equals_one
+test_find_bpm_peaks_single_bucket_histogram_triggers_fallback
+test_find_bpm_peaks_two_bucket_histogram_triggers_fallback
+test_partition_pool_below_absolute_min_returns_empty
+test_partition_pool_small_but_above_absolute_min_returns_single_shortlist
 
 # Step 2 — Camelot components
 test_camelot_components_connected_keys_form_single_component
