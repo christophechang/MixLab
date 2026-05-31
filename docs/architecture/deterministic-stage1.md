@@ -95,8 +95,10 @@ def partition_pool(
         seed: Reserved for future use. Has no effect in v1.
 
     Returns:
-        List of MixConcept (title + mood + track_ids). Returns [] if pool is
-        too small to form any valid shortlist (fewer than ABSOLUTE_MIN=5 tracks).
+        List of MixConcept (title + mood + track_ids). Returns [] when:
+          - pool has fewer than ABSOLUTE_MIN=5 tracks (Step 1 early exit), OR
+          - Step 4 drops every shortlist below ABSOLUTE_MIN (extremely fragmented
+            pool; rare in practice — callers should treat [] as "no usable partition").
     """
 ```
 
@@ -171,8 +173,11 @@ all tracks have bpm > 0 (see §3 precondition).
    Total bucket count = (bucket_index(max_bpm) - bucket_index(min_bpm) + 1), where
    bucket_index(b) = (floor(b / 3) * 3 - first_bucket_start) // 3.
    Note: because bpm=123.0 falls in bucket [123,126) (the left-inclusive rule from
-   line 163), a pool spanning exactly [120.0, 123.0] produces 2 buckets, not 1.
-   This is correct — bucket_index(123.0) = (123-120)//3 = 1, giving count=2.
+   above), a pool spanning [120.0, 127.0] (span=7, >=4, not caught by flat-BPM guard)
+   with min_bpm=120.0 produces 3 buckets: [120,123), [123,126), [126,129).
+   A narrower example — min=120.0, max=123.0 — has span=3 < 4 and is caught by the
+   flat-BPM guard (line 149) BEFORE histogram construction; that guard bypasses the
+   histogram entirely, so no 2-bucket histogram is actually constructed for it.
 3. If number of buckets (including empty ones) < 3: skip smoothing AND peak detection
    entirely; proceed directly to the uniform-spread fallback.
    Otherwise, smooth the histogram with a 3-bucket moving average.
@@ -202,6 +207,10 @@ Note: this unified algorithm replaces the "strict rule + plateau exception" fram
 It produces identical results to the strict rule for single-bucket runs, and correctly
 identifies plateau peaks for multi-bucket runs — both as a single pass, no separate
 plateau detection step required.
+Note on monotone histograms: a strictly-increasing or strictly-decreasing 3-bucket
+histogram (e.g., smoothed = [3, 5, 7]) has its sole interior bucket not exceeding its
+right neighbour (R > run_value), so no peak is found → uniform-spread fallback. This
+is intentional: a monotone BPM distribution has no meaningful cluster peak.
 
 5. Complete ALL peak merges before beginning track assignment (Step 6).
    Merge peaks that are closer than 8 BPM (strict: distance < 8.0) — on each iteration:
@@ -229,6 +238,11 @@ Implement both thresholds exactly as written (< 8.0 for merging, ≤ 7.0 for ass
 
 **Peak centre** = midpoint of the 3-BPM bucket: `bucket_start + 1.5`.
 After a merge, the surviving peak retains its original centre (not recomputed).
+Note on wide plateau bias: a plateau run spanning multiple buckets uses the LEFTMOST
+bucket's midpoint as the peak centre. Tracks in the high-BPM end of a wide plateau
+(e.g., 4+ buckets = 12+ BPM wide) may fall outside the leftmost-centre ±7 window and
+become outliers even though they sit squarely within the plateau. This is accepted
+behaviour — outliers are attached in Step 7 via nearest-cluster assignment.
 Tracks that fall in the eliminated peak's ±7 window but outside the surviving peak's
 ±7 window will have no candidate peak when Step 6 runs — they are assigned as
 outliers by Step 6's "no candidate peak within ±7 BPM" rule and attached in Step 7.
@@ -323,9 +337,14 @@ adjacency is conservative and correct. Do not broaden the definition.
    Guard: if the component is the ONLY component in its BPM cluster (no other
    component exists), keep it as-is and skip — this only occurs when the entire
    BPM cluster has fewer than 8 tracks; Step 4 undersizing will handle it.
+   - The set of merge SOURCES (components with < 8 tracks) is determined once at
+     the start of Step 2.4. Merges only increase component sizes, so no new sub-8
+     source can appear mid-step. The candidate set monotonically shrinks.
    - Apply merges in size-ascending order (smallest component first).
-   - After each individual merge, recompute component sizes before the next merge.
-   - Tie in size (two components to merge both have equal size): process the one
+   - After each individual merge, recompute component sizes before selecting the next
+     merge source (to ensure the current-LARGEST TARGET is up to date). The source
+     candidates themselves are fixed (those with < 8 tracks at step start).
+   - Tie in size (two source components both have equal size): process the one
      whose minimum track_id is lexicographically smaller first.
    - Tie in "largest" target (two components share the max size after a recompute):
      target the one whose minimum track_id is lexicographically smaller.
@@ -401,6 +420,15 @@ Iterate through the snapshot in order. During iteration:
 Exit the loop early (before 3 iterations) after completing BOTH passes of an
 iteration if NEITHER the oversized pass NOR the undersized pass of that iteration
 made any change. Checking is per full iteration (both halves), not per individual pass.
+Note on last-iteration oversized output: if the undersized pass of the FINAL iteration
+(iteration 3, or the last iteration before early-exit) merges two shortlists into a
+combined length > MAX_SHORTLIST, that oversized result is returned without further
+splitting — the oversized pass for that iteration already ran BEFORE the undersized
+pass. This is accepted behaviour (added to §9 exceptions). To minimise this, the
+undersized pass's overflow check (Phase 2, line above) already skips merges that would
+exceed MAX_SHORTLIST when growing toward MIN_SHORTLIST; Phase 1's single-merge ceiling
+is also guarded. Only a Phase 1 merge of two BOTH-undersized shortlists (each just
+below MIN_SHORTLIST) can produce this outcome.
 **A change** is defined as: any shortlist being merged (under-sizing), split into two
 (Attempt 1 or 2), trimmed with or without remainder attached (Attempt 3), or dropped
 (len < ABSOLUTE_MIN). Simply evaluating a shortlist and leaving it untouched does NOT
@@ -441,14 +469,12 @@ If a merge partner exists, apply in two phases:
 
 Phase 1 — first attempt (closest partner only):
   - If merging the closest partner would exceed MAX_SHORTLIST:
-    Keep both as-is. If len(undersized) < ABSOLUTE_MIN, drop it. STOP — do not
-    enter Phase 2. (The closest partner overflows; no further attempts are made.)
-    If len(undersized) >= ABSOLUTE_MIN, the shortlist is kept and returned below
-    MIN_SHORTLIST — this is accepted behavior for this edge case. Stage 2 tolerates
-    slight undersize.
-    Note: the drop-when-< ABSOLUTE_MIN clause here is a defensive guard. In practice,
-    Step 1 early-exits pools < ABSOLUTE_MIN, and Steps 2–3 cannot produce shortlists
-    below 8 tracks. A shortlist with len < ABSOLUTE_MIN=5 cannot reach Phase 1.
+    Do NOT merge in Phase 1. Enter Phase 2 directly, using the PRE-Phase-1 median
+    of the undersized shortlist as the reference BPM for Phase 2 distance comparisons.
+    (Skipping Phase 2 here would leave the shortlist undersized even when a farther,
+    smaller partner fits within MAX_SHORTLIST — an unnecessary undersized result.)
+    If len(undersized) < ABSOLUTE_MIN, drop it and skip Phase 2. This is a defensive
+    guard; in practice Step 1 early-exits pools < ABSOLUTE_MIN before clustering.
   - Otherwise: merge with the closest partner. Place the merged shortlist at the
     lower of the two original indices; remove the higher-index shortlist from the
     live list.
@@ -505,9 +531,13 @@ Attempt 2: re-apply the full Step 3 era-split logic (including the 60% coverage
   gate) to the oversized shortlist. The coverage gate is evaluated on the oversized
   shortlist's current length — a larger shortlist may fail the 60% threshold even if
   its original sub-components would have passed it individually. This is intentional.
-  Attempt 2 succeeds only when the era conditions pass AND len(era_old) >= MIN_SHORTLIST
-  AND len(era_new) >= MIN_SHORTLIST. If either half would be below MIN_SHORTLIST, treat
-  Attempt 2 as failed and proceed to Attempt 3.
+  Attempt 2 succeeds only when ALL of the following hold:
+    (a) Step 3's logic produces a split (none of the skip conditions in Steps 3.2–3.6
+        fired — coverage gate passes, K >= 2, gap_size >= 8, both sides >= 8);
+    (b) len(era_old) >= MIN_SHORTLIST; AND
+    (c) len(era_new) >= MIN_SHORTLIST.
+  If Step 3 produces no split (any skip condition fires), OR if either half is below
+  MIN_SHORTLIST, treat Attempt 2 as failed and proceed to Attempt 3.
   Note: because all unknown-year tracks are assigned to era_old (Step 3.6), era_new
   is drawn entirely from KY. A shortlist that passes the 60% coverage gate can still
   have era_new < MIN_SHORTLIST if fewer than 15 known-year tracks fall after gap_start.
@@ -579,6 +609,11 @@ If total count > MAX_POOL_COUNT:
     Find the pair of shortlists with the smallest abs(_median_bpm(A) - _median_bpm(B)).
     Tie-break chain (apply in order until resolved):
       1. Smallest min(min_track_id(A), min_track_id(B)) — lexicographically.
+         This is the lex-minimum of the two shortlists' own min_track_ids, i.e. the
+         globally-smallest track_id that appears in EITHER shortlist of the pair.
+         If two pairs share the same globally-smallest shortlist (both contain the
+         shortlist with the overall minimum track_id), this step does NOT resolve
+         the tie — fall through to step 2.
       2. Smallest sum of the pair's 0-based indices in the current shortlist list.
       3. Lowest index of the first shortlist in the pair.
     Merge that pair. Insert the merged shortlist at the lower of the two original
@@ -669,6 +704,8 @@ The pool < ABSOLUTE_MIN early-exit returns [] directly; no MixConcept is constru
 ## 5. Call site changes in `__main__.py`
 
 There are **three** Stage 1 call sites in `__main__.py`. All three must be replaced.
+All three live inside `run()`, not `run_playlist_mode` — playlist mode does not call
+`stage1_concepts` and requires no changes for this feature.
 The old signature `stage1_concepts(pool, genre, cascade_state, ...)` drops `genre` and
 `cascade_state` in the new path.
 
@@ -762,6 +799,17 @@ if os.environ.get("MIXLAB_STAGE1_LLM"):
 else:
     shortlists = partition_pool(bpm_sorted_pool, seed=stage1_seed)
 all_shortlists.extend(shortlists)
+# Bookkeeping below is unchanged — keep it immediately after the stage1 call.
+# On the LLM path, stage1_pool is defined above. On the deterministic path,
+# use bpm_sorted_pool (the bpm>0-filtered pool) as the equivalent:
+genre_unplayed_track_ids_source = pool
+genre_outliers: list[Track] = []
+outliers: list[Track] = []
+genre_cluster_counts = {genre: len(pool)}
+if os.environ.get("MIXLAB_STAGE1_LLM"):
+    bpm_filtered_counts = {genre: len(stage1_pool)}   # window size on LLM path
+else:
+    bpm_filtered_counts = {genre: len(bpm_sorted_pool)}  # filtered pool on deterministic path
 # Note: no early-exit at call site A — it is not inside a loop.
 # Call site B (below) uses `continue` because it IS inside a for-loop.
 ```
@@ -787,6 +835,12 @@ pools. The feature-flag LLM path also drops the MIN_SHORTLIST_TRACKS guard in th
 After code below, so it too will now call stage1_concepts for 5–7 track pools. If you
 need to preserve the old LLM skip behavior, re-add the guard inside the
 `if os.environ.get("MIXLAB_STAGE1_LLM"):` branch.
+
+**Unused import:** after removing the `MIN_SHORTLIST_TRACKS` guard at call site B, the
+only remaining use of `MIN_SHORTLIST_TRACKS` in `__main__.py` (line ~604) is gone.
+Remove the `MIN_SHORTLIST_TRACKS` import from `llm.py` at the top of `__main__.py`
+(line ~31: `MIN_SHORTLIST_TRACKS,`). Leaving it causes an `F401` unused-import error
+that blocks the build per Ruff policy. Add this removal to the §6 file-change table.
 
 ```python
 # Before
@@ -841,7 +895,7 @@ else:
 | File | Change |
 |------|--------|
 | `src/mixlab/clustering.py` | Add `partition_pool()`, `_find_bpm_peaks()`, `_camelot_components()`, `_era_split()`, `_resize_shortlists()`, `_median_bpm()`, `_infer_shortlist_mood()`; add public module-level constants `MIN_SHORTLIST`, `MAX_SHORTLIST`, `ABSOLUTE_MIN`, `MIN_POOL_COUNT`, `MAX_POOL_COUNT`, `MIN_CAMELOT_COMPONENT` (no leading underscore — `ABSOLUTE_MIN` is imported by `__main__.py`). **Note:** `MIN_SHORTLIST = 15` is distinct from `MIN_SHORTLIST_TRACKS = 8` in `llm.py` — the latter is the LLM Stage 1 output filter threshold, unrelated to partition_pool sizing. |
-| `src/mixlab/__main__.py` | Replace all three Stage 1 LLM call sites; add `--stage1-seed` flag; add feature flag env var |
+| `src/mixlab/__main__.py` | Replace all three Stage 1 LLM call sites; add `--stage1-seed` flag; add feature flag env var; add `stage1_seed: int \| None = None` to `run()` signature; remove unused `MIN_SHORTLIST_TRACKS` import (becomes F401 after call-site B guard removal) |
 | `src/mixlab/llm.py` | Mark `_STAGE1_SYSTEM*` prompts and `stage1_concepts()` as deprecated (remove after 30-day soak) |
 | `.env.example` | Add `MIXLAB_STAGE1_LLM=` (empty = deterministic path; set to `1` to restore LLM path during soak period) |
 | `tests/test_clustering.py` | New tests for all `partition_pool` helpers and end-to-end partitioning |
@@ -872,13 +926,15 @@ test_find_bpm_peaks_equidistant_track_assigned_to_lower_index_peak
 test_find_bpm_peaks_outliers_have_no_candidate_peak_within_7_bpm
 test_find_bpm_peaks_uniform_spread_returns_equal_bpm_groups_not_peaks
 test_find_bpm_peaks_uniform_spread_small_pool_returns_equal_sized_groups
-test_partition_pool_n_groups_one_fallback_returns_single_shortlist_up_to_29_tracks
-test_partition_pool_n_groups_one_fallback_bypasses_step4_unlike_same_size_peaks_cluster
 test_find_bpm_peaks_single_bucket_histogram_triggers_fallback
 test_find_bpm_peaks_two_bucket_histogram_triggers_fallback
 test_find_bpm_peaks_three_bucket_all_equal_histogram_triggers_fallback
+# Note: the following test_partition_pool_* tests cover Step-1 fallback behaviour at
+# the partition_pool level (not the _find_bpm_peaks helper, which returns peak objects):
 test_partition_pool_below_absolute_min_returns_empty
 test_partition_pool_small_but_above_absolute_min_returns_single_shortlist
+test_partition_pool_n_groups_one_fallback_returns_single_shortlist_up_to_29_tracks
+test_partition_pool_n_groups_one_fallback_bypasses_step4_unlike_same_size_peaks_cluster
 
 # Step 2 — Camelot components
 test_camelot_components_connected_keys_form_single_component
@@ -938,7 +994,7 @@ test_partition_pool_typical_input_shortlists_within_15_to_25_tracks
 test_partition_pool_same_seed_same_output_reproducibility
 test_partition_pool_tiny_pool_returns_single_shortlist
 test_partition_pool_below_absolute_min_returns_empty
-test_partition_pool_all_same_bpm_returns_camelot_subgroups_or_single
+test_partition_pool_all_same_bpm_15plus_tracks_returns_camelot_subgroups_or_single
 test_partition_pool_outliers_attached_to_nearest_cluster
 test_partition_pool_no_peaks_uses_equal_bpm_split_before_step2
 test_partition_pool_custom_genre_pool_respects_sub_genre_coherence
@@ -975,8 +1031,9 @@ Document `MIXLAB_STAGE1_LLM` in `.env.example`.
 - [ ] `partition_pool()` produces 3–5 shortlists of 15–25 tracks on a real library snapshot
       (except documented edge cases: pool < ABSOLUTE_MIN returns []; pool < MIN_SHORTLIST
       returns exactly one shortlist; unimodal or thin pool may return 1–2 shortlists; pool-
-      level merge may exceed 25; Phase 1 overflow may leave one shortlist below 15; n_groups=1
-      fallback may return one shortlist up to 29)
+      level merge may exceed 25; Phase 2 or last-iteration undersized merge may exceed 25;
+      Phase 1 overflow may leave one shortlist below 15; n_groups=1 fallback may return one
+      shortlist up to 29)
 - [ ] Same pool + same seed → identical output across two runs
 - [ ] Stage 2 concept quality on manual review of 5 snapshots: equal or better than LLM Stage 1
 - [ ] No regression in `--mode all`, `--mode unplayed`, `--mode played`
