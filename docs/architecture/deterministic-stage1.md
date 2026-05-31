@@ -134,45 +134,69 @@ when falling back to `stage1_concepts()`.
 
 ### Top-level control flow of `partition_pool`
 
-```
-partition_pool(tracks, *, seed):
-  # Step 1: BPM clustering
-  early_exit = _check_size_early_exits(tracks)   # returns [] or [MixConcept] if applicable
-  if early_exit is not None: return early_exit
-
-  clusters = _find_bpm_peaks(tracks)             # returns list[list[Track]] | None
-  if clusters is None:                           # no peaks: uniform-spread fallback
-    n_groups = min(MAX_POOL_COUNT, len(tracks) // MIN_SHORTLIST)
-    if n_groups < 2: return [one MixConcept for all tracks]  # n_groups=0 or 1
-    clusters = _uniform_spread(tracks, n_groups) # contiguous BPM-sorted slices
-
-  # Step 2: Camelot sub-clustering (per BPM cluster)
-  shortlists: list[list[Track]] = []
-  for cluster in clusters:
-    components = _camelot_components(cluster)    # returns list[list[Track]] (Step 2 logic)
-    shortlists.extend(components)
-
-  # Step 3: Era split (per shortlist; applied independently)
-  expanded: list[list[Track]] = []
-  for sl in shortlists:
-    result = _era_split(sl, per_side_min=8)      # returns tuple[list,list] | None
-    if result is None:
-      expanded.append(sl)
+```python
+def partition_pool(tracks: list[Track], *, seed: int | None = None) -> list[MixConcept]:
+    # Step 1 early exits (see 'Early exits' section of Step 1 below)
+    if len(tracks) < ABSOLUTE_MIN:
+        return []
+    if len(tracks) < MIN_SHORTLIST:
+        title, mood = _infer_shortlist_mood(tracks)   # both early-exit paths use this
+        return [MixConcept(title=title, mood=mood, track_ids=[t.track_id for t in tracks])]
+    if max(t.bpm for t in tracks) - min(t.bpm for t in tracks) < 4:
+        clusters: list[list[Track]] = [list(tracks)]  # flat-BPM guard: one cluster, skip histogram
     else:
-      expanded.extend(result)                    # (era_old, era_new)
+        clusters = _find_bpm_peaks(tracks)            # Steps 1.1-1.7; returns clusters | None
+        if clusters is None:                          # no peaks detected: uniform-spread fallback
+            n_groups = min(MAX_POOL_COUNT, len(tracks) // MIN_SHORTLIST)
+            if n_groups < 2:                          # n_groups=1 (15-29 tracks, no peaks)
+                title, mood = _infer_shortlist_mood(tracks)
+                return [MixConcept(title=title, mood=mood, track_ids=[t.track_id for t in tracks])]
+            # n_groups >= 2: split into contiguous BPM-sorted slices (Step 1 uniform-spread)
+            bpm_sorted = sorted(tracks, key=lambda t: (t.bpm, t.track_id))
+            size, rem = divmod(len(bpm_sorted), n_groups)
+            clusters = []
+            i = 0
+            for g in range(n_groups):
+                end = i + size + (1 if g < rem else 0)
+                clusters.append(bpm_sorted[i:end])
+                i = end
 
-  # Steps 4: Sizing enforcement (oversized + undersized passes; pool-level merge)
-  shortlists = _resize_shortlists(expanded)
+    # Step 2: Camelot sub-clustering (per BPM cluster — NOT once for the whole pool)
+    shortlists: list[list[Track]] = []
+    for cluster in clusters:
+        components = _camelot_components(cluster)     # Step 2 logic; returns list[list[Track]]
+        shortlists.extend(components)
 
-  # Step 5–6: Mood/title inference and MixConcept assembly
-  return [MixConcept(_infer_shortlist_mood(sl), sl) for sl in shortlists]
+    # Step 3: Era split (per shortlist; applied independently to ALL shortlists including
+    # those from n_groups>=2 uniform-spread — the "Proceed to Step 2" text implies 2-4)
+    expanded: list[list[Track]] = []
+    for sl in shortlists:
+        result = _era_split(sl, per_side_min=8)       # returns (era_old, era_new) | None
+        if result is None:
+            expanded.append(sl)
+        else:
+            expanded.extend(result)                   # era_old first, then era_new
+
+    # Step 4: Sizing enforcement (oversized + undersized passes + pool-level merge)
+    shortlists = _resize_shortlists(expanded)
+
+    # Steps 5-6: Mood/title inference and MixConcept assembly
+    results: list[MixConcept] = []
+    for sl in shortlists:
+        title, mood = _infer_shortlist_mood(sl)       # unpack — do NOT pass tuple as positional
+        results.append(MixConcept(title=title, mood=mood, track_ids=[t.track_id for t in sl]))
+    return results
 ```
 
-This pseudocode shows which helper is called at which stage and in what order. The actual
-function bodies are described in the step-by-step sections below. Key ordering constraint:
-`_camelot_components` is called ONCE PER BPM CLUSTER (not once for the whole pool), and
-the loop happens BETWEEN `_find_bpm_peaks` and `_era_split`. Any engineer implementing
-`partition_pool` must preserve this per-cluster loop structure.
+This pseudocode is the authoritative call-sequence reference. Key constraints:
+- `_camelot_components` is called ONCE PER BPM CLUSTER (not once for the whole pool).
+- Step 3 era-split applies to ALL shortlists, including those from n_groups>=2 uniform-spread.
+- Both single-MixConcept early-exit paths (len<MIN_SHORTLIST and n_groups=1) call
+  `_infer_shortlist_mood` — they do NOT use a placeholder title/mood.
+- `MixConcept` is always constructed with three KEYWORD arguments (title=, mood=, track_ids=)
+  because `_infer_shortlist_mood` returns a 2-tuple; unpacking before passing is required.
+- `_check_size_early_exits` and `_uniform_spread` are NOT separate named helpers; the logic is
+  inlined above. The §6 file-change table lists the helpers that ARE separate functions.
 
 ### Shared constants
 
@@ -243,7 +267,7 @@ all tracks have bpm > 0 (see §3 precondition).
    above), a pool spanning [120.0, 127.0] (span=7, >=4, not caught by flat-BPM guard)
    with min_bpm=120.0 produces 3 buckets: [120,123), [123,126), [126,129).
    A narrower example — min=120.0, max=123.0 — has span=3 < 4 and is caught by the
-   flat-BPM guard (line 149) BEFORE histogram construction; that guard bypasses the
+   flat-BPM guard (the `max_bpm - min_bpm < 4` early exit above) BEFORE histogram construction; that guard bypasses the
    histogram entirely, so no 2-bucket histogram is actually constructed for it.
 3. If number of buckets (including empty ones) < 3: skip smoothing AND peak detection
    entirely; proceed directly to the uniform-spread fallback.
@@ -377,7 +401,8 @@ Otherwise: split into n_groups equal-sized groups using CONTIGUOUS slices of the
   Group sizes: if len(tracks) % n_groups != 0, the first (len(tracks) % n_groups)
   groups each receive one extra track. E.g. 31 tracks / 2 groups = [16, 15]
   (tracks[0:16] and tracks[16:31]).
-  Proceed to Step 2 with these groups.
+  Proceed to Steps 2–4 with these groups. Era split (Step 3) and sizing enforcement
+  (Step 4) apply to uniform-spread groups the same as to peak-detected clusters.
 ```
 
 **Note on `camelot_compatible` adjacency:** the existing `camelot_compatible()` function
