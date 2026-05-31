@@ -338,12 +338,16 @@ Attempt 1: split by Camelot component. Run BFS on the oversized shortlist's trac
   On success: replace the oversized shortlist with the two components in ascending
   _median_bpm() order (lower-BPM component first, at the original index).
 Attempt 2: re-apply the full Step 3 era-split logic (including the 60% coverage
-  gate) to the oversized shortlist.
+  gate) to the oversized shortlist. Attempt 2 succeeds only when the era conditions
+  pass AND len(era_old) >= MIN_SHORTLIST AND len(era_new) >= MIN_SHORTLIST. If either
+  half would be below MIN_SHORTLIST, treat Attempt 2 as failed and proceed to Attempt 3.
   On success: replace the oversized shortlist with era_old first (at original index),
   era_new second (at original index + 1).
 Attempt 3: rank by centrality ascending, keep the first MAX_SHORTLIST, attach
   the remainder to the nearest other shortlist by _median_bpm() distance measured
   from the TRIMMED shortlist (not from the remainder group).
+  Tie in distance: attach to the shortlist whose minimum track_id is
+  lexicographically smaller.
   If no other shortlist exists, discard the remainder.
 
   Centrality computation:
