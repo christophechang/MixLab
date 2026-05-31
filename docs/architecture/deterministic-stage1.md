@@ -204,12 +204,17 @@ Target: 2–6 raw BPM clusters before sizing adjustments.
 ```
 n_groups = min(MAX_POOL_COUNT, len(tracks) // MIN_SHORTLIST)
 If n_groups < 2:
-  Apply Steps 5–6 to assemble one MixConcept from all tracks and return it.
+  Skip Steps 2–4. Call _infer_shortlist_mood on all tracks, assemble one MixConcept,
+  and return a single-element list. (Do NOT interpret "Steps 5–6" as the intra-Step-1
+  numbered sub-items 5 and 6 — those are peak-merge and track-assignment, which
+  require peaks to exist.)
   Note: pools of 15–29 tracks yield n_groups = 1. The returned shortlist may have
   up to 29 tracks — 4 over MAX_SHORTLIST. This is accepted for flat-BPM pools where
   no meaningful split exists.
-Otherwise: split into n_groups equal-sized groups by sorted BPM rank. Proceed to
-  Step 2 with these groups.
+Otherwise: split into n_groups equal-sized groups by sorted BPM rank.
+  Group sizes: if len(tracks) % n_groups != 0, the first (len(tracks) % n_groups)
+  groups each receive one extra track. E.g. 31 tracks / 2 groups = [16, 15].
+  Proceed to Step 2 with these groups.
 ```
 
 **Note on `camelot_compatible` adjacency:** the existing `camelot_compatible()` function
@@ -309,6 +314,8 @@ Phase 1 — first attempt (closest partner only):
   - Otherwise: merge with the closest partner.
 
 Phase 2 — retry loop (only entered if Phase 1 merged but result still < MIN_SHORTLIST):
+  Use the post-Phase-1 merged shortlist's _median_bpm() as the reference for all
+  Phase 2 distance comparisons.
   For each remaining partner in ascending _median_bpm() distance order:
     - If this partner would cause overflow (merged len > MAX_SHORTLIST): skip it.
     - Otherwise: merge. If result >= MIN_SHORTLIST: STOP (success).
@@ -328,10 +335,15 @@ Attempt 1: split by Camelot component. Run BFS on the oversized shortlist's trac
   >= MIN_SHORTLIST tracks. Do NOT re-apply the Step 2.4 small-component merge rule
   here — use raw BFS components only. With 1 or 3+ BFS components, or with either
   component below MIN_SHORTLIST, skip to Attempt 2.
+  On success: replace the oversized shortlist with the two components in ascending
+  _median_bpm() order (lower-BPM component first, at the original index).
 Attempt 2: re-apply the full Step 3 era-split logic (including the 60% coverage
   gate) to the oversized shortlist.
+  On success: replace the oversized shortlist with era_old first (at original index),
+  era_new second (at original index + 1).
 Attempt 3: rank by centrality ascending, keep the first MAX_SHORTLIST, attach
-  the remainder to the nearest other shortlist by _median_bpm() distance.
+  the remainder to the nearest other shortlist by _median_bpm() distance measured
+  from the TRIMMED shortlist (not from the remainder group).
   If no other shortlist exists, discard the remainder.
 
   Centrality computation:
