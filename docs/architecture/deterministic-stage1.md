@@ -66,6 +66,9 @@ def partition_pool(
       - pools of 15–29 tracks where no detectable peaks exist (n_groups=1 fallback):
         one shortlist of up to 29 tracks — at most 4 over MAX_SHORTLIST. Accepted.
         This ONLY applies to 15–29 track pools (n_groups = min(5, len//15) = 1).
+        Note: for len < 15, min(5, len//15) = 0 — but the '< MIN_SHORTLIST' early
+        exit above fires first, so n_groups=0 is never reached in the fallback. The
+        fallback can only receive n_groups ∈ {1, 2, 3, 4, 5}.
         Larger no-peak pools (30+) compute n_groups >= 2, produce multiple equal-
         sized BPM-ordered groups, and proceed through Steps 2–4 normally — they do
         NOT produce a single oversize shortlist. The "up to 29" exception is strictly
@@ -439,9 +442,16 @@ Applied independently to each candidate shortlist *after* Camelot sub-clustering
    year known for all tracks. If --min-year is set, the 60% coverage gate effectively
    always passes. Implementers should be aware that era-split will trigger more often
    in --min-year runs than in unfiltered runs.
-   - era_old: tracks with year is not None and year > 0 and year <= gap_start
-   - era_new: tracks with year is not None and year > 0 and year >  gap_start
-   - Unknown-year tracks (year=None OR year<=0): assign ALL to era_old unconditionally.
+   - era_old: ALL tracks in the shortlist EXCEPT those with year>0 AND year>gap_start.
+     Equivalently: era_old = (known-year tracks with year > 0 AND year <= gap_start)
+                           ∪ (unknown-year tracks with year=None OR year<=0).
+     Unknown-year tracks are ALWAYS added to era_old — no conditional logic, no
+     centroid computation. era_old holds known-old tracks AND all unknowns.
+   - era_new: ONLY tracks with year is not None and year > 0 and year > gap_start.
+     Unknown-year tracks never appear in era_new.
+   Note: the era_old membership definition above supersedes the sub-bullet below —
+   do NOT implement era_old as just 'year>0 AND year<=gap_start'; you must include
+   the unknown-year tracks too.
      IMPORTANT: this is an unconditional rule — do not compute centroids or apply any
      conditional logic. era_old always receives unknown-year tracks.
 7. Otherwise: no era split.
@@ -875,9 +885,11 @@ cfg = CUSTOM_GENRES[genre]
 custom_genre_sub_genres = cfg["genres"]
 all_shortlists.extend(await stage1_concepts(stage1_pool, genre, cascade_state, custom=True))
 
-# After
-bpm_sorted_pool = sorted(pool, key=lambda t: t.bpm)   # unchanged — same sort line as Before
-bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # NEW: precondition filter (bpm>0)
+# After — replaces the entire Before block shown above. Line 578 is kept verbatim
+# (the sort), and the filter (next line) is inserted immediately after it. Do NOT
+# keep the original line 578 AND add the After block — that would double-sort.
+bpm_sorted_pool = sorted(pool, key=lambda t: t.bpm)   # KEPT from Before (line 578 unchanged)
+bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # INSERTED: precondition filter
 cfg = CUSTOM_GENRES[genre]
 custom_genre_sub_genres = cfg["genres"]
 # IMPORTANT: capture os.environ.get("MIXLAB_STAGE1_LLM") ONCE into a local bool BEFORE
@@ -942,9 +954,13 @@ need to preserve the old LLM skip behavior, re-add the guard inside the
 
 **Unused import:** after removing the `MIN_SHORTLIST_TRACKS` guard at call site B, the
 only remaining use of `MIN_SHORTLIST_TRACKS` in `__main__.py` (line ~604) is gone.
-Remove the `MIN_SHORTLIST_TRACKS` import from `llm.py` at the top of `__main__.py`
-(line ~31: `MIN_SHORTLIST_TRACKS,`). Leaving it causes an `F401` unused-import error
-that blocks the build per Ruff policy. Add this removal to the §6 file-change table.
+Remove ONLY the `MIN_SHORTLIST_TRACKS` name from the parenthesized `from mixlab.llm
+import (...)` block at the top of `__main__.py` (line ~31). Do NOT remove the entire
+block or any other name from it — `MAX_STAGE1_POOL_CUSTOM` and `select_stage1_window`
+are still imported from that same block and are still used by call site A's LLM path.
+Removing them would cause NameError when `MIXLAB_STAGE1_LLM=1`.
+Leaving `MIN_SHORTLIST_TRACKS` in causes an `F401` unused-import error that blocks the
+build per Ruff policy. Add this removal to the §6 file-change table.
 
 ```python
 # Before (wider context — show all lines that change or that MUST be kept)
@@ -1020,7 +1036,7 @@ else:
 
 | File | Change |
 |------|--------|
-| `src/mixlab/clustering.py` | Add `partition_pool()`, `_find_bpm_peaks()`, `_camelot_components()`, `_era_split()`, `_resize_shortlists()`, `_median_bpm()`, `_infer_shortlist_mood()`; add public module-level constants `MIN_SHORTLIST`, `MAX_SHORTLIST`, `ABSOLUTE_MIN`, `MIN_POOL_COUNT`, `MAX_POOL_COUNT`, `MIN_CAMELOT_COMPONENT` (no leading underscore — `ABSOLUTE_MIN` is imported by `__main__.py`). **Note:** `MIN_SHORTLIST = 15` is distinct from `MIN_SHORTLIST_TRACKS = 8` in `llm.py` — the latter is the LLM Stage 1 output filter threshold, unrelated to partition_pool sizing. Also add `from collections import Counter` and `import statistics` at module scope if not already present (used by centrality and _infer_shortlist_mood). |
+| `src/mixlab/clustering.py` | Add `partition_pool()`, `_find_bpm_peaks()`, `_camelot_components()`, `_era_split()`, `_resize_shortlists()`, `_median_bpm()`, `_infer_shortlist_mood()`; add public module-level constants `MIN_SHORTLIST`, `MAX_SHORTLIST`, `ABSOLUTE_MIN`, `MIN_POOL_COUNT`, `MAX_POOL_COUNT`, `MIN_CAMELOT_COMPONENT` (no leading underscore — `ABSOLUTE_MIN` is imported by `__main__.py`). **Note:** `MIN_SHORTLIST = 15` is distinct from `MIN_SHORTLIST_TRACKS = 8` in `llm.py` — the latter is the LLM Stage 1 output filter threshold, unrelated to partition_pool sizing. Also add `from collections import Counter` and `import statistics` at module scope if not already present (used by centrality and _infer_shortlist_mood). **Helper signatures:** `_era_split(shortlist: list[Track], *, per_side_min: int = 8) -> tuple[list[Track], list[Track]] \| None` — returns `(era_old, era_new)` when a split is found, or `None` when any skip condition fires (Step 3.2–3.6). `_infer_shortlist_mood(tracks: list[Track]) -> tuple[str, str]` — returns `(title, mood)`. `_median_bpm(shortlist: list[Track]) -> float`. `_camelot_components(tracks: list[Track]) -> list[list[Track]]` — returns list of components (each a list of tracks). `_resize_shortlists(shortlists: list[list[Track]]) -> list[list[Track]]` — applies Steps 4 and pool-level adjustments in-place and returns the final list. `_find_bpm_peaks(tracks: list[Track]) -> list[list[Track]] \| None` — returns list of clusters (one per peak + outliers attached), or `None` when no peaks found (triggers uniform-spread fallback in caller). |
 | `src/mixlab/__main__.py` | Replace all three Stage 1 LLM call sites; add `--stage1-seed` flag; add feature flag env var; add `stage1_seed: int \| None = None` to `run()` signature; remove unused `MIN_SHORTLIST_TRACKS` import (becomes F401 after call-site B guard removal) |
 | `src/mixlab/llm.py` | Mark `_STAGE1_SYSTEM*` prompts and `stage1_concepts()` as deprecated (remove after 30-day soak) |
 | `.env.example` | Add `MIXLAB_STAGE1_LLM=` (empty = deterministic path; set to `1` to restore LLM path during soak period) |
@@ -1095,6 +1111,12 @@ test_era_split_year_zero_tracks_treated_as_unknown_year
 test_era_split_unknown_year_tracks_include_zero_and_none_years
 test_era_split_gap_idx_points_to_last_track_before_gap
 test_era_split_counts_only_positive_year_tracks_for_side_guard
+test_era_split_attempt2_fails_when_era_old_known_below_per_side_min_despite_unknowns_inflating_total
+# ^ This test is specifically for the Attempt 2 trap: a shortlist where len(era_old)>=15
+# (because unknown-year tracks are included) but era_old_known<per_side_min=15 — condition
+# (a) fails (Step 3 produces no split) even though condition (b) would pass. An
+# implementation that checks len(era_old)>=15 instead of era_old_known>=per_side_min would
+# pass the other tests but fail this one.
 
 # Step 4 — Sizing enforcement
 test_resize_shortlists_merges_undersized_into_nearest_bpm_neighbour
@@ -1177,8 +1199,10 @@ Document `MIXLAB_STAGE1_LLM` in `.env.example`.
       (except documented edge cases: pool < ABSOLUTE_MIN returns []; pool < MIN_SHORTLIST
       returns exactly one shortlist; unimodal or thin pool may return 1–2 shortlists; pool-
       level merge may exceed 25; Phase 2 or last-iteration undersized merge may exceed 25;
-      Phase 1 overflow may leave one shortlist below 15; n_groups=1 fallback may return one
-      shortlist up to 29; Attempt 3 remainder-attach may push the target shortlist above 25)
+      Phase 1 overflow enters Phase 2 (never skips it), so a below-15 result only occurs
+      when Phase 2 ALSO exhausts or overflows all available partners (correct behavior, not
+      a bug); n_groups=1 fallback may return one shortlist up to 29; Attempt 3 remainder-
+      attach may push the target shortlist above 25)
 - [ ] Same pool + same seed → identical output across two runs
 - [ ] Stage 2 concept quality on manual review of 5 snapshots: equal or better than LLM Stage 1
 - [ ] No regression in `--mode all`, `--mode unplayed`, `--mode played`
