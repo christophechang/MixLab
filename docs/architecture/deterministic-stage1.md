@@ -84,8 +84,9 @@ def partition_pool(
 
     Note on seed: in v1 the output is fully deterministic — track_id is the final
     tie-breaker in every ordering where other criteria tie. (Not ALL tie-breaks use
-    track_id: peak-merge uses lower-BPM, pair-selection uses combined BPM, Step 3
-    uses smaller gap index, and pool-level merge uses index position as last resort.)
+    track_id: Step 1 peak-merge uses lower-BPM for survivor selection and lowest
+    combined BPM for merge-pair distance ties; Step 3 uses smaller gap index; pool-
+    level merge uses index position as last resort.)
     Every seed value (including None) produces identical output. The parameter is
     reserved for a future BPM-jitter extension. Callers may always pass seed=None.
 
@@ -243,7 +244,8 @@ n_groups = min(MAX_POOL_COUNT, len(tracks) // MIN_SHORTLIST)
 If n_groups < 2:
   Skip outer algorithm Steps 2, 3, and 4 (Camelot sub-clustering, era split, and
   sizing enforcement). Proceed directly to outer Step 5 (mood/title inference) and
-  outer Step 6 (MixConcept assembly) using all tracks as a single group, then return.
+  outer Step 6 (MixConcept assembly) using all tracks as a single group (in the
+  ascending-BPM order from Step 1.1), then return.
   Note: "outer Steps 5–6" refers to the top-level §4 algorithm steps, NOT to
   intra-Step-1 sub-items 5 (peak-merge) and 6 (track-assignment), which are
   inapplicable when no peaks exist.
@@ -273,7 +275,11 @@ adjacency is conservative and correct. Do not broaden the definition.
    (camelot_compatible returns False for any unparseable key, making that track a
    Camelot singleton. Tracks with unknown keys form their own singleton components
    and are merged into the largest component in Step 2.4.)
-2. Find connected components via BFS.
+2. Find connected components via BFS. For determinism:
+   - Sort all tracks ascending by track_id before building the adjacency graph.
+   - BFS queue: start from the unvisited track with the lexicographically smallest
+     track_id; expand neighbours in ascending track_id order.
+   - This fixes the internal track ordering within each component.
 3. If ALL tracks in the BPM cluster have no/unknown Camelot key (empty string or
    doesn't match _CAMELOT_RE): treat the entire cluster as a single component — keep
    as-is. This guard prevents the BFS from producing N singletons.
@@ -374,10 +380,11 @@ position may differ from its snapshot index — using reference lookup is correc
 **Under-sizing (len < MIN_SHORTLIST):**
 
 ```
-Search the current undersized-pass snapshot (excluding the shortlist being processed)
+Search the current undersized-pass snapshot (excluding the shortlist being processed
+AND excluding any shortlists already consumed/merged during the current undersized pass)
 for the other shortlist with the smallest abs(_median_bpm(this) - _median_bpm(other)).
 Do NOT include shortlists added to the live list during the current undersized pass
-itself — only snapshot shortlists are eligible partners.
+itself — only snapshot shortlists that still exist in the live list are eligible.
 Note: shortlists created by the preceding oversized pass ARE in the undersized-pass
 snapshot (the spec states they are eligible); they have defined snapshot indices.
 (Tie in BPM distance: choose the shortlist whose minimum track_id is lexicographically
@@ -413,7 +420,9 @@ Phase 2 — retry loop (only entered if Phase 1 merged but result still < MIN_SH
   from the reference BPM. Do NOT recompute after each merge — the ordering is fixed
   at Phase 2 entry regardless of merges that occur within Phase 2.
   Tie in distance: choose the partner with the lexicographically smaller min_track_id.
-  For each remaining partner in that fixed order:
+  "Remaining partners" = snapshot partners not yet processed in Phase 2 AND still
+  present in the live list (not consumed during the current undersized pass).
+  For each remaining partner in the fixed order:
     - Overflow check: use the CURRENT length of the accumulating merged shortlist
       (which grows after each successful Phase 2 merge), NOT the original length.
       Skip if current_len + partner_len > MAX_SHORTLIST.
@@ -442,7 +451,11 @@ Attempt 1: split by Camelot component. Run BFS on the oversized shortlist's trac
   produce 3+ raw BFS components, causing Attempt 1 to fail. This is expected and
   intentional — Attempts 2 and 3 serve as fallbacks for such shortlists.
   On success: replace the oversized shortlist with the two components in ascending
-  _median_bpm() order (lower-BPM component first, at the original index).
+  _median_bpm() order. Resolved by reference lookup:
+    - First component (lower-BPM): replaces the oversized shortlist at its current
+      live-list position.
+    - Second component (higher-BPM): inserted immediately after the first (at the
+      position directly following the first component in the live list).
   Tie (both components have equal _median_bpm()): place the component with the
   lexicographically smaller min_track_id first.
 Attempt 2: re-apply the full Step 3 era-split logic (including the 60% coverage
@@ -456,7 +469,7 @@ Attempt 2: re-apply the full Step 3 era-split logic (including the 60% coverage
   resolved by reference lookup), era_new second (at reference position + 1).
 Attempt 3: rank by centrality ascending, keep the first MAX_SHORTLIST tracks as the
   trimmed shortlist. Replace the oversized shortlist with the trimmed shortlist at
-  the original index.
+  its current live-list position (resolved by reference lookup).
   Attach the remainder (tracks beyond rank MAX_SHORTLIST) to the nearest other
   shortlist by _median_bpm() distance measured from the TRIMMED shortlist (not from
   the remainder group).
@@ -470,7 +483,12 @@ Attempt 3: rank by centrality ascending, keep the first MAX_SHORTLIST tracks as 
   Centrality computation:
     parsed_keys = [t.camelot_key for t in shortlist
                    if t.camelot_key and _CAMELOT_RE.match(t.camelot_key)]
-    dominant_key = Counter(parsed_keys).most_common(1)[0][0] if parsed_keys else None
+    # Deterministic dominant_key: sort by (-count, key_str) to break count ties.
+    # Counter.most_common() is non-deterministic for equal counts (heap insertion order).
+    dominant_key = (
+        min(parsed_keys, key=lambda k: (-Counter(parsed_keys)[k], k))
+        if parsed_keys else None
+    )
     bpm_vals = [t.bpm for t in shortlist]
     bpm_range = max(bpm_vals) - min(bpm_vals)
     if bpm_range < 1e-6:
@@ -539,7 +557,12 @@ def _infer_shortlist_mood(tracks: list[Track]) -> tuple[str, str]:
         t.camelot_key for t in tracks
         if t.camelot_key and _CAMELOT_RE.match(t.camelot_key)
     ]
-    dominant_key = Counter(parsed_keys).most_common(1)[0][0] if parsed_keys else "?"
+    # Deterministic dominant_key: sort by (-count, key_str). Counter.most_common() is
+    # non-deterministic for equal counts.
+    dominant_key = (
+        min(parsed_keys, key=lambda k: (-Counter(parsed_keys)[k], k))
+        if parsed_keys else "?"
+    )
 
     # Era window
     years = [t.year for t in tracks if t.year is not None and t.year > 0]
@@ -595,6 +618,28 @@ There are **three** Stage 1 call sites in `__main__.py`. All three must be repla
 The old signature `stage1_concepts(pool, genre, cascade_state, ...)` drops `genre` and
 `cascade_state` in the new path.
 
+**Add import at the top of `__main__.py`:**
+
+```python
+from mixlab.clustering import partition_pool, ABSOLUTE_MIN
+```
+
+**Update `run()`'s signature** to accept `stage1_seed` so `args.stage1_seed` is in scope:
+
+```python
+async def run(
+    args: argparse.Namespace,
+    stage1_seed: int | None = None,
+    # ... existing params ...
+) -> None:
+```
+
+And pass it at the `asyncio.run(run(...))` call site:
+
+```python
+asyncio.run(run(args, stage1_seed=args.stage1_seed, ...))
+```
+
 **Add the `--stage1-seed` argument to the argparse setup:**
 
 ```python
@@ -609,6 +654,11 @@ parser.add_argument(
 The current code calls `select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CUSTOM)`
 before Stage 1. That window is a **LLM cost-control measure only** — do not call it on
 the deterministic path. Pass the full `bpm_sorted_pool` to `partition_pool()`.
+
+**Precondition check:** before calling `partition_pool()` at all three call sites,
+ensure the pool contains only tracks with `bpm > 0`. Zero/negative-BPM tracks distort
+centroids. Add a filter if the pool-building code does not already exclude them:
+`pool = [t for t in pool if t.bpm > 0]`
 
 ```python
 # Before
@@ -751,7 +801,7 @@ test_resize_shortlists_drops_when_all_merges_exhausted_if_below_absolute_min
 test_resize_shortlists_keeps_both_when_merge_would_exceed_max
 test_resize_shortlists_drops_undersized_below_absolute_min_after_failed_merge
 test_resize_shortlists_lone_undersized_above_absolute_min_kept
-test_resize_shortlists_lone_undersized_below_absolute_min_returns_empty
+test_resize_shortlists_lone_undersized_below_absolute_min_kept_as_is
 test_resize_shortlists_splits_oversized_by_camelot_component
 test_resize_shortlists_centrality_ranks_ascending_keeps_central_tracks
 test_resize_shortlists_centrality_normalises_bpm_and_camelot_independently
@@ -774,7 +824,7 @@ test_infer_shortlist_mood_no_tags_falls_back_to_bpm_range
 
 # End-to-end partition_pool
 test_partition_pool_returns_three_to_five_shortlists_on_typical_input
-test_partition_pool_each_shortlist_has_15_to_25_tracks
+test_partition_pool_typical_input_shortlists_within_15_to_25_tracks
 test_partition_pool_same_seed_same_output_reproducibility
 test_partition_pool_tiny_pool_returns_single_shortlist
 test_partition_pool_below_absolute_min_returns_empty
@@ -813,6 +863,8 @@ Document `MIXLAB_STAGE1_LLM` in `.env.example`.
 ## 9. Acceptance criteria
 
 - [ ] `partition_pool()` produces 3–5 shortlists of 15–25 tracks on a real library snapshot
+      (except documented edge cases: pool-level merge may exceed 25; Phase 1 overflow may
+      leave one shortlist below 15; n_groups=1 fallback may return one shortlist up to 29)
 - [ ] Same pool + same seed → identical output across two runs
 - [ ] Stage 2 concept quality on manual review of 5 snapshots: equal or better than LLM Stage 1
 - [ ] No regression in `--mode all`, `--mode unplayed`, `--mode played`
