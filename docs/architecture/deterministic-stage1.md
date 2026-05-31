@@ -127,7 +127,8 @@ all tracks have bpm > 0 (see §3 precondition).
 - If len(tracks) < ABSOLUTE_MIN (< 5): return [].
 - If len(tracks) < MIN_SHORTLIST (< 15): return [all tracks as one MixConcept].
   Skip Steps 2–4. (No clustering needed — the pool is too small to split.)
-- If all tracks have |bpm_i - bpm_j| < 4 for all pairs: one cluster, skip to Step 2.
+- If all tracks have |bpm_i - bpm_j| < 4 for all pairs: treat all tracks as a single
+  BPM cluster and proceed directly to Step 2 with that one cluster.
 ```
 
 **Histogram construction:**
@@ -162,7 +163,8 @@ all tracks have bpm > 0 (see §3 precondition).
        * Interior plateau: compare leftmost bucket against the bucket immediately
          to its left and the bucket immediately after the run ends.
          Peak iff both comparisons are strictly greater.
-5. Merge peaks that are closer than 8 BPM (strict: distance < 8.0) — on each iteration:
+5. Complete ALL peak merges before beginning track assignment (Step 6).
+   Merge peaks that are closer than 8 BPM (strict: distance < 8.0) — on each iteration:
    - Find the pair with the smallest |centre_a - centre_b|.
    - Merge: keep the peak with the higher raw track count in its bucket ("heavier").
    - Tie (equal raw count): keep the lower-BPM peak.
@@ -201,11 +203,13 @@ Target: 2–6 raw BPM clusters before sizing adjustments.
 
 ```
 n_groups = min(MAX_POOL_COUNT, len(tracks) // MIN_SHORTLIST)
-If n_groups < 2: return the entire pool as one shortlist. Skip Steps 2–4.
+If n_groups < 2:
+  Apply Steps 5–6 to assemble one MixConcept from all tracks and return it.
   Note: pools of 15–29 tracks yield n_groups = 1. The returned shortlist may have
   up to 29 tracks — 4 over MAX_SHORTLIST. This is accepted for flat-BPM pools where
   no meaningful split exists.
-Otherwise: split into n_groups equal-sized groups by sorted BPM rank.
+Otherwise: split into n_groups equal-sized groups by sorted BPM rank. Proceed to
+  Step 2 with these groups.
 ```
 
 **Note on `camelot_compatible` adjacency:** the existing `camelot_compatible()` function
@@ -229,7 +233,8 @@ adjacency is conservative and correct. Do not broaden the definition.
    as-is. This guard prevents the BFS from producing N singletons.
    "All unknown" means every track in the cluster fails _CAMELOT_RE.match().
 4. For each component with < 8 tracks: merge it into the current-largest component
-   in the same BPM cluster.
+   in the same BPM cluster. The source component being merged is NOT a candidate
+   for "current-largest" — only other components are.
    - Apply merges in size-ascending order (smallest component first).
    - After each individual merge, recompute component sizes before the next merge.
    - Tie in size (two components to merge both have equal size): process the one
@@ -249,6 +254,7 @@ Applied independently to each candidate shortlist *after* Camelot sub-clustering
    "Unknown-year tracks" = all tracks NOT in KY (i.e. year is None OR year <= 0).
 2. If len(KY) / len(shortlist) < 0.60: skip era split for this cluster.
 3. Sort KY ascending by year. Call the sorted list ky (length K).
+   If K < 2: skip era split (no consecutive pair exists to compute a gap).
 4. Find gap_idx: the index i (0 ≤ i ≤ K-2) that maximises ky[i+1].year - ky[i].year.
    gap_idx is the index of the last track BEFORE the gap.
    Tie (two equal gap sizes): choose the smaller i.
@@ -260,12 +266,14 @@ Applied independently to each candidate shortlist *after* Camelot sub-clustering
 6. If gap_size >= 8 AND era_old_known >= 8 AND era_new_known >= 8:
    - era_old: tracks with year > 0 and year <= gap_start
    - era_new: tracks with year > 0 and year >  gap_start
-   - Unknown-year tracks (year=None OR year<=0): assign to the side whose centroid year
-     is closer.
+   - Unknown-year tracks (year=None OR year<=0): assign by comparing era centroids.
      centroid_old = mean(t.year for t in era_old)   # always >= 8 known-year tracks
      centroid_new = mean(t.year for t in era_new)   # always >= 8 known-year tracks
      For each unknown-year track: assign to era_old if centroid_old <= centroid_new,
      else assign to era_new. (Tie: assign to era_old.)
+     IMPORTANT: the centroid comparison does NOT use the unknown-year track's own year
+     value — all unknown-year tracks in a shortlist are assigned to the same side,
+     determined solely by comparing centroid_old vs centroid_new.
 7. Otherwise: no era split.
 ```
 
@@ -292,16 +300,21 @@ If no other shortlist exists (only one shortlist in the pool):
     and Steps 2–3 cannot reduce a shortlist below 8 tracks. This branch is a
     defensive guard only.
 
-If a merge partner exists:
-  - If merged len > MAX_SHORTLIST: keep both as-is, accept the under-sized one.
-    If len(undersized) < ABSOLUTE_MIN, drop it (do not merge or keep).
-  - Otherwise: merge. If the merged result is still < MIN_SHORTLIST, repeat —
-    find the next-closest neighbour and attempt another merge. On each iteration:
-    - If the current closest partner would overflow (merged len > MAX_SHORTLIST):
-      skip this partner and try the next-closest. Do NOT stop yet.
-    - Stop the loop when: (a) len >= MIN_SHORTLIST, (b) no un-skipped partners remain,
-      or (c) all remaining partners have been individually tested and each would overflow.
-    At the end of the loop: keep the shortlist if len >= ABSOLUTE_MIN, otherwise drop it.
+If a merge partner exists, apply in two phases:
+
+Phase 1 — first attempt (closest partner only):
+  - If merging the closest partner would exceed MAX_SHORTLIST:
+    Keep both as-is. If len(undersized) < ABSOLUTE_MIN, drop it. STOP — do not
+    enter Phase 2. (The closest partner overflows; no further attempts are made.)
+  - Otherwise: merge with the closest partner.
+
+Phase 2 — retry loop (only entered if Phase 1 merged but result still < MIN_SHORTLIST):
+  For each remaining partner in ascending _median_bpm() distance order:
+    - If this partner would cause overflow (merged len > MAX_SHORTLIST): skip it.
+    - Otherwise: merge. If result >= MIN_SHORTLIST: STOP (success).
+  End loop when: (a) result >= MIN_SHORTLIST, (b) no un-skipped partners remain,
+  or (c) all remaining partners would overflow.
+  After the loop: keep the shortlist if len >= ABSOLUTE_MIN, otherwise drop it.
 
 Note: shortlists dropped (< ABSOLUTE_MIN) during per-shortlist passes are not
 resurrected by the pool-level MIN_POOL_COUNT guard later.
@@ -310,10 +323,11 @@ resurrected by the pool-level MIN_POOL_COUNT guard later.
 **Over-sizing (len > MAX_SHORTLIST):**
 
 ```
-Attempt 1: split by Camelot component. This attempt succeeds only when BFS on
-  the oversized shortlist yields EXACTLY 2 surviving components (after applying the
-  < 8-track merge rule from Step 2.4), and both components have >= MIN_SHORTLIST tracks.
-  With 3+ BFS components, skip to Attempt 2 (do not try binary groupings).
+Attempt 1: split by Camelot component. Run BFS on the oversized shortlist's tracks.
+  This attempt succeeds only when BFS yields EXACTLY 2 components and both have
+  >= MIN_SHORTLIST tracks. Do NOT re-apply the Step 2.4 small-component merge rule
+  here — use raw BFS components only. With 1 or 3+ BFS components, or with either
+  component below MIN_SHORTLIST, skip to Attempt 2.
 Attempt 2: re-apply the full Step 3 era-split logic (including the 60% coverage
   gate) to the oversized shortlist.
 Attempt 3: rank by centrality ascending, keep the first MAX_SHORTLIST, attach
@@ -340,6 +354,7 @@ Attempt 3: rank by centrality ascending, keep the first MAX_SHORTLIST, attach
         # 7.0 is the maximum finite camelot_distance (e.g. '1A' to '7B' = 7).
         # The 999 guard must be kept — do not remove it as "dead code".
       centrality = bpm_norm + camelot_norm
+      # centrality ∈ [0, 2.0]. Do not cap or normalise — sort uses raw value.
     Ties in centrality score: break by ascending track_id (lexicographic, stable).
 ```
 
@@ -354,7 +369,8 @@ If total count > MAX_POOL_COUNT:
       1. Smallest min(min_track_id(A), min_track_id(B)) — lexicographically.
       2. Smallest sum of the pair's 0-based indices in the current shortlist list.
       3. Lowest index of the first shortlist in the pair.
-    Merge that pair.
+    Merge that pair. Insert the merged shortlist at the lower of the two original
+    indices; remove the higher-index shortlist. (This preserves stable ordering.)
   Until total count <= MAX_POOL_COUNT.
   Note: the pool-level merge may produce a shortlist exceeding MAX_SHORTLIST.
   Do NOT re-run per-shortlist sizing on the result — Stage 2 tolerates slight oversize.
@@ -463,7 +479,7 @@ cfg = CUSTOM_GENRES[genre]
 custom_genre_sub_genres = cfg["genres"]
 if os.environ.get("MIXLAB_STAGE1_LLM"):
     stage1_pool = select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CUSTOM)
-    if len(stage1_pool) < len(pool):
+    if len(stage1_pool) < len(bpm_sorted_pool):
         print(f"  Selected {len(stage1_pool)}-track window from pool for Stage 1 (randomised per run).")
     shortlists = await stage1_concepts(stage1_pool, genre, cascade_state, custom=True)
 else:
@@ -549,6 +565,7 @@ test_find_bpm_peaks_equidistant_track_assigned_to_lower_index_peak
 test_find_bpm_peaks_outliers_attached_to_nearest_cluster
 test_find_bpm_peaks_uniform_spread_falls_back_to_quantile_splits
 test_find_bpm_peaks_quantile_fallback_small_pool_returns_single_group
+test_find_bpm_peaks_quantile_fallback_single_shortlist_has_populated_title_mood
 test_find_bpm_peaks_single_bucket_histogram_uses_fallback_not_peak_detection
 test_find_bpm_peaks_two_bucket_histogram_uses_fallback
 test_find_bpm_peaks_pool_below_absolute_min_returns_empty
@@ -594,6 +611,7 @@ test_resize_shortlists_centrality_unparseable_key_capped_at_1_not_999_over_7
 test_resize_shortlists_centrality_tie_broken_by_track_id
 test_resize_shortlists_single_oversized_no_overflow_target_trims_in_place
 test_resize_shortlists_pool_level_merge_loops_until_max_pool_count
+test_resize_shortlists_pool_level_merge_inserts_at_lower_index
 test_resize_shortlists_pool_level_merge_may_exceed_max_shortlist
 test_resize_shortlists_dropped_shortlists_not_resurrected_by_min_pool_count
 
