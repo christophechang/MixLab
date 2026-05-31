@@ -162,10 +162,16 @@ all tracks have bpm > 0 (see §3 precondition).
    Example: min_bpm=122.4 → first bucket is [120, 123).
    A track with bpm at an exact boundary falls in the NEW bucket:
    bpm=123.0 falls in [123, 126), not [120, 123).
-3. If number of buckets < 3: skip smoothing AND peak detection entirely; proceed
-   directly to the uniform-spread fallback (no interior buckets can be peaks).
+   Create ALL consecutive buckets from the first start up to and including the bucket
+   that contains max_bpm, even if intermediate buckets are empty (count=0). Empty
+   interior buckets ARE included — they preserve the spatial structure of the BPM
+   distribution.
+   Total bucket count = (bucket_index(max_bpm) - bucket_index(min_bpm) + 1), where
+   bucket_index(b) = (floor(b / 3) * 3 - first_bucket_start) // 3.
+3. If number of buckets (including empty ones) < 3: skip smoothing AND peak detection
+   entirely; proceed directly to the uniform-spread fallback.
    Otherwise, smooth the histogram with a 3-bucket moving average.
-   Let N = (number of buckets - 1).
+   Let N = (total number of buckets - 1), counting all buckets including empty ones.
    - Interior bucket i (0 < i < N): smoothed[i] = (raw[i-1] + raw[i] + raw[i+1]) / 3
    - Left edge (i=0): smoothed[0] = (raw[0] + raw[1]) / 2
    - Right edge (i=N): smoothed[N] = (raw[N-1] + raw[N]) / 2
@@ -275,6 +281,10 @@ adjacency is conservative and correct. Do not broaden the definition.
    (camelot_compatible returns False for any unparseable key, making that track a
    Camelot singleton. Tracks with unknown keys form their own singleton components
    and are merged into the largest component in Step 2.4.)
+   **Key normalisation**: before all Camelot comparisons and Counter operations in
+   Steps 2 and 5, normalise every camelot_key to UPPERCASE (e.g. `key.upper()`).
+   _CAMELOT_RE uses IGNORECASE, so '8a' and '8A' are both parseable; without
+   normalisation they count as distinct keys, splitting frequency counts.
 2. Find connected components via BFS. For determinism:
    - Sort all tracks ascending by track_id before building the adjacency graph.
    - BFS queue: start from the unvisited track with the lexicographically smallest
@@ -288,6 +298,9 @@ adjacency is conservative and correct. Do not broaden the definition.
    current-largest component in the same BPM cluster. The source component being
    merged is NOT a candidate for "current-largest" — only other components are.
    Remove the source component from the component list immediately after merging.
+   Guard: if the component is the ONLY component in its BPM cluster (no other
+   component exists), keep it as-is and skip — this only occurs when the entire
+   BPM cluster has fewer than 8 tracks; Step 4 undersizing will handle it.
    - Apply merges in size-ascending order (smallest component first).
    - After each individual merge, recompute component sizes before the next merge.
    - Tie in size (two components to merge both have equal size): process the one
@@ -450,6 +463,9 @@ Attempt 1: split by Camelot component. Run BFS on the oversized shortlist's trac
   Note: shortlists formed in Step 2 by merging multiple small components typically
   produce 3+ raw BFS components, causing Attempt 1 to fail. This is expected and
   intentional — Attempts 2 and 3 serve as fallbacks for such shortlists.
+  Note: oversized shortlists of 26–29 tracks can NEVER satisfy 'two components each
+  >= MIN_SHORTLIST=15' (would need >= 30 tracks total). Attempt 1 is unreachable for
+  that size range — Attempt 2 or 3 always handles them.
   On success: replace the oversized shortlist with the two components in ascending
   _median_bpm() order. Resolved by reference lookup:
     - First component (lower-BPM): replaces the oversized shortlist at its current
@@ -465,6 +481,11 @@ Attempt 2: re-apply the full Step 3 era-split logic (including the 60% coverage
   Attempt 2 succeeds only when the era conditions pass AND len(era_old) >= MIN_SHORTLIST
   AND len(era_new) >= MIN_SHORTLIST. If either half would be below MIN_SHORTLIST, treat
   Attempt 2 as failed and proceed to Attempt 3.
+  Note: because all unknown-year tracks are assigned to era_old (Step 3.6), era_new
+  is drawn entirely from KY. A shortlist that passes the 60% coverage gate can still
+  have era_new < MIN_SHORTLIST if fewer than 15 known-year tracks fall after gap_start.
+  This structural bias means Attempt 2 fails more often than the coverage gate alone
+  suggests — do not assume Attempt 2 succeeds just because the gate passes.
   On success: replace the oversized shortlist with era_old first (at original index,
   resolved by reference lookup), era_new second (at reference position + 1).
 Attempt 3: rank by centrality ascending, keep the first MAX_SHORTLIST tracks as the
@@ -624,21 +645,14 @@ The old signature `stage1_concepts(pool, genre, cascade_state, ...)` drops `genr
 from mixlab.clustering import partition_pool, ABSOLUTE_MIN
 ```
 
-**Update `run()`'s signature** to accept `stage1_seed` so `args.stage1_seed` is in scope:
+Note: `ABSOLUTE_MIN` must be defined as a **public** (no leading underscore) module-level
+constant in `clustering.py`. If existing constants in that file use a leading underscore
+(private convention), ensure `ABSOLUTE_MIN` (and `MIN_SHORTLIST`, `MAX_SHORTLIST`, etc.)
+are declared without one so callers can import them.
 
-```python
-async def run(
-    args: argparse.Namespace,
-    stage1_seed: int | None = None,
-    # ... existing params ...
-) -> None:
-```
-
-And pass it at the `asyncio.run(run(...))` call site:
-
-```python
-asyncio.run(run(args, stage1_seed=args.stage1_seed, ...))
-```
+**No change to `run()`'s signature is required.** `run()` already receives the parsed
+`args: argparse.Namespace` object (standard CLI pattern). `args.stage1_seed` is
+therefore in scope at all three call sites inside `run()` — no extra parameter needed.
 
 **Add the `--stage1-seed` argument to the argparse setup:**
 
@@ -655,10 +669,16 @@ The current code calls `select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CU
 before Stage 1. That window is a **LLM cost-control measure only** — do not call it on
 the deterministic path. Pass the full `bpm_sorted_pool` to `partition_pool()`.
 
-**Precondition check:** before calling `partition_pool()` at all three call sites,
-ensure the pool contains only tracks with `bpm > 0`. Zero/negative-BPM tracks distort
-centroids. Add a filter if the pool-building code does not already exclude them:
-`pool = [t for t in pool if t.bpm > 0]`
+**Precondition check (MUST enforce):** before calling `partition_pool()` at all three
+call sites, filter out tracks with `bpm <= 0`. Zero/negative-BPM tracks distort
+centroids and histogram construction. If the pool-building code does not already
+exclude them, add:
+```python
+bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # call sites A, C
+sorted_tracks = [t for t in sorted_tracks if t.bpm > 0]      # call site B
+```
+This filter must be applied before the LLM-path window-trim check too, so both paths
+operate on the same cleaned pool.
 
 ```python
 # Before
@@ -830,7 +850,7 @@ test_partition_pool_tiny_pool_returns_single_shortlist
 test_partition_pool_below_absolute_min_returns_empty
 test_partition_pool_all_same_bpm_returns_camelot_subgroups_or_single
 test_partition_pool_outliers_attached_to_nearest_cluster
-test_partition_pool_uniform_spread_falls_back_to_quantile_splits
+test_partition_pool_no_peaks_uses_quantile_split_before_step2
 test_partition_pool_custom_genre_pool_respects_sub_genre_coherence
 ```
 
