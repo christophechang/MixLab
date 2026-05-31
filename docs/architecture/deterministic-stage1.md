@@ -445,15 +445,12 @@ Applied independently to each candidate shortlist *after* Camelot sub-clustering
    - era_old: ALL tracks in the shortlist EXCEPT those with year>0 AND year>gap_start.
      Equivalently: era_old = (known-year tracks with year > 0 AND year <= gap_start)
                            ∪ (unknown-year tracks with year=None OR year<=0).
-     Unknown-year tracks are ALWAYS added to era_old — no conditional logic, no
-     centroid computation. era_old holds known-old tracks AND all unknowns.
+     IMPORTANT: do NOT implement era_old as just 'year>0 AND year<=gap_start' — that
+     would silently drop all unknown-year tracks from the split. Unknown-year tracks
+     are ALWAYS added to era_old unconditionally — no conditional logic, no centroid
+     computation. era_old holds known-old tracks AND all unknowns.
    - era_new: ONLY tracks with year is not None and year > 0 and year > gap_start.
      Unknown-year tracks never appear in era_new.
-   Note: the era_old membership definition above supersedes the sub-bullet below —
-   do NOT implement era_old as just 'year>0 AND year<=gap_start'; you must include
-   the unknown-year tracks too.
-     IMPORTANT: this is an unconditional rule — do not compute centroids or apply any
-     conditional logic. era_old always receives unknown-year tracks.
 7. Otherwise: no era split.
 ```
 
@@ -598,13 +595,19 @@ Attempt 2: re-apply the full Step 3 era-split logic (including the 60% coverage
   gate) to the oversized shortlist. The coverage gate is evaluated on the oversized
   shortlist's current length — a larger shortlist may fail the 60% threshold even if
   its original sub-components would have passed it individually. This is intentional.
-  Attempt 2 succeeds only when ALL of the following hold:
-    (a) Step 3's logic produces a split (none of the skip conditions in Steps 3.2–3.6
-        fired — coverage gate passes, K >= 2, gap_size >= 8, both sides >=
-        per_side_min; for Attempt 2, per_side_min = 15, NOT the default 8 used in
-        base Step 3 — the step is re-invoked with per_side_min=15 here);
+  Attempt 2 succeeds only when ALL of the following hold, EVALUATED IN ORDER
+  (condition (a) MUST be checked first — conditions (b) and (c) require a successful
+  split result to unpack; if (a) fails _era_split returns None and (b)/(c) cannot
+  be evaluated without a TypeError):
+    (a) Step 3's logic produces a split (_era_split returns a non-None result — i.e.
+        none of the skip conditions in Steps 3.2–3.6 fired: coverage gate passes,
+        K >= 2, gap_size >= 8, both sides >= per_side_min; for Attempt 2,
+        per_side_min = 15, NOT the default 8 used in base Step 3);
     (b) len(era_old) >= MIN_SHORTLIST; AND
     (c) len(era_new) >= MIN_SHORTLIST.
+  Implementation pattern: `result = _era_split(shortlist, per_side_min=15); if result
+  is None: → Attempt 3; era_old, era_new = result; if len(era_old) < MIN_SHORTLIST or
+  len(era_new) < MIN_SHORTLIST: → Attempt 3.` Do NOT unpack result before the None check.
   NOTE on population differences: conditions (a), (b), and (c) check DIFFERENT
   populations. Condition (a) gates on era_old_known and era_new_known (KY-only
   counts, i.e. only tracks with confirmed known year). Conditions (b) and (c) gate
@@ -892,13 +895,13 @@ bpm_sorted_pool = sorted(pool, key=lambda t: t.bpm)   # KEPT from Before (line 5
 bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # INSERTED: precondition filter
 cfg = CUSTOM_GENRES[genre]
 custom_genre_sub_genres = cfg["genres"]
-# IMPORTANT: capture os.environ.get("MIXLAB_STAGE1_LLM") ONCE into a local bool BEFORE
-# any branch that assigns stage1_pool. A second os.environ lookup in the bookkeeping
-# block (below) may evaluate differently in tests (monkeypatched env), leaving
-# stage1_pool unbound if the first if-branch was not entered. Use:
-#   use_llm = bool(os.environ.get("MIXLAB_STAGE1_LLM"))
-# and replace both os.environ.get() calls below with `use_llm`. Shown as two separate
-# checks here for readability only.
+# IMPLEMENTATION NOTE: capture os.environ.get("MIXLAB_STAGE1_LLM") once into a local
+# bool (e.g. use_llm = bool(os.environ.get("MIXLAB_STAGE1_LLM"))) and use it for the
+# if-branch below. The shown After code uses only ONE os.environ.get() call (fine as
+# written), but if the bookkeeping block is ever expanded with a second env-var check,
+# having two separate lookups risks inconsistent truthiness in monkeypatched tests.
+# The stage1_pool_size variable is captured in BOTH branches so it is always defined
+# after the if/else — no NameError risk in the current structure.
 if os.environ.get("MIXLAB_STAGE1_LLM"):
     stage1_pool = select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CUSTOM)
     if len(stage1_pool) < len(bpm_sorted_pool):  # compare against filtered pool
@@ -1036,7 +1039,7 @@ else:
 
 | File | Change |
 |------|--------|
-| `src/mixlab/clustering.py` | Add `partition_pool()`, `_find_bpm_peaks()`, `_camelot_components()`, `_era_split()`, `_resize_shortlists()`, `_median_bpm()`, `_infer_shortlist_mood()`; add public module-level constants `MIN_SHORTLIST`, `MAX_SHORTLIST`, `ABSOLUTE_MIN`, `MIN_POOL_COUNT`, `MAX_POOL_COUNT`, `MIN_CAMELOT_COMPONENT` (no leading underscore — `ABSOLUTE_MIN` is imported by `__main__.py`). **Note:** `MIN_SHORTLIST = 15` is distinct from `MIN_SHORTLIST_TRACKS = 8` in `llm.py` — the latter is the LLM Stage 1 output filter threshold, unrelated to partition_pool sizing. Also add `from collections import Counter` and `import statistics` at module scope if not already present (used by centrality and _infer_shortlist_mood). **Helper signatures:** `_era_split(shortlist: list[Track], *, per_side_min: int = 8) -> tuple[list[Track], list[Track]] \| None` — returns `(era_old, era_new)` when a split is found, or `None` when any skip condition fires (Step 3.2–3.6). `_infer_shortlist_mood(tracks: list[Track]) -> tuple[str, str]` — returns `(title, mood)`. `_median_bpm(shortlist: list[Track]) -> float`. `_camelot_components(tracks: list[Track]) -> list[list[Track]]` — returns list of components (each a list of tracks). `_resize_shortlists(shortlists: list[list[Track]]) -> list[list[Track]]` — applies Steps 4 and pool-level adjustments in-place and returns the final list. `_find_bpm_peaks(tracks: list[Track]) -> list[list[Track]] \| None` — returns list of clusters (one per peak + outliers attached), or `None` when no peaks found (triggers uniform-spread fallback in caller). |
+| `src/mixlab/clustering.py` | Add `partition_pool()`, `_find_bpm_peaks()`, `_camelot_components()`, `_era_split()`, `_resize_shortlists()`, `_median_bpm()`, `_infer_shortlist_mood()`; add public module-level constants `MIN_SHORTLIST`, `MAX_SHORTLIST`, `ABSOLUTE_MIN`, `MIN_POOL_COUNT`, `MAX_POOL_COUNT`, `MIN_CAMELOT_COMPONENT` (no leading underscore — `ABSOLUTE_MIN` is imported by `__main__.py`). **Note:** `MIN_SHORTLIST = 15` is distinct from `MIN_SHORTLIST_TRACKS = 8` in `llm.py` — the latter is the LLM Stage 1 output filter threshold, unrelated to partition_pool sizing. Also add `from collections import Counter` and `import statistics` at module scope if not already present (used by centrality and _infer_shortlist_mood). **Helper signatures:** `_era_split(shortlist: list[Track], *, per_side_min: int = 8) -> tuple[list[Track], list[Track]] \| None` — returns `(era_old, era_new)` when a split is found, or `None` when any skip condition fires (Step 3.2–3.6). `_infer_shortlist_mood(tracks: list[Track]) -> tuple[str, str]` — returns `(title, mood)`. `_median_bpm(shortlist: list[Track]) -> float`. `_camelot_components(tracks: list[Track]) -> list[list[Track]]` — returns list of components (each a list of tracks). `_resize_shortlists(shortlists: list[list[Track]]) -> list[list[Track]]` — applies Steps 4 and pool-level adjustments in-place and returns the final list. `_find_bpm_peaks(tracks: list[Track]) -> list[list[Track]] \| None` — encompasses ALL of Steps 1.1–1.7 (sort tracks, build histogram, smooth, detect peaks, merge peaks, assign tracks to peaks, attach outliers to nearest cluster). Returns list of fully-assembled clusters (one per surviving peak, with outliers already attached per Step 1.7), or `None` when no peaks are found (the caller uses the uniform-spread fallback). The function name "peaks" refers to the primary clustering mechanism, not the return shape; the return is complete clusters, NOT bare peak objects. This is why tests like `test_find_bpm_peaks_outliers_*` test cluster membership (the outlier-become-cluster-member outcome), not an intermediate outlier object. |
 | `src/mixlab/__main__.py` | Replace all three Stage 1 LLM call sites; add `--stage1-seed` flag; add feature flag env var; add `stage1_seed: int \| None = None` to `run()` signature; remove unused `MIN_SHORTLIST_TRACKS` import (becomes F401 after call-site B guard removal) |
 | `src/mixlab/llm.py` | Mark `_STAGE1_SYSTEM*` prompts and `stage1_concepts()` as deprecated (remove after 30-day soak) |
 | `.env.example` | Add `MIXLAB_STAGE1_LLM=` (empty = deterministic path; set to `1` to restore LLM path during soak period) |
@@ -1126,7 +1129,16 @@ test_resize_shortlists_drops_when_all_merges_exhausted_if_below_absolute_min
 test_resize_shortlists_keeps_both_when_merge_would_exceed_max
 test_resize_shortlists_drops_undersized_below_absolute_min_after_failed_merge
 test_resize_shortlists_lone_undersized_above_absolute_min_kept
-test_resize_shortlists_lone_undersized_below_absolute_min_kept_as_is
+test_resize_shortlists_lone_undersized_below_absolute_min_kept_by_lone_guard
+# ^ Specifically tests the lone-shortlist defensive guard (line 522-527 of spec): when
+# there is ONLY ONE shortlist in the pool and it is below ABSOLUTE_MIN, the guard keeps
+# it as-is (cannot merge — no partner; dropping it would leave empty output). This is
+# explicitly stated as unreachable via normal Step 2–3 execution (Step 1 early-exits
+# pools < ABSOLUTE_MIN), but the guard is tested defensively. Do NOT confuse with the
+# post-loop drop rule (line 569): a shortlist below ABSOLUTE_MIN that HAS peers but
+# exhausts all merge options IS dropped (see test_resize_shortlists_drops_when_*).
+# The "kept_as_is" suffix was renamed to "kept_by_lone_guard" to avoid implying the
+# normal (reachable) path keeps below-ABSOLUTE_MIN shortlists — it does not.
 test_resize_shortlists_splits_oversized_by_camelot_component
 test_resize_shortlists_centrality_ranks_ascending_keeps_central_tracks
 test_resize_shortlists_centrality_normalises_bpm_and_camelot_independently
