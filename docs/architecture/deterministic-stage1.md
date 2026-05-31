@@ -152,17 +152,24 @@ all tracks have bpm > 0 (see §3 precondition).
 **Peak detection:**
 
 ```
-4. Find local maxima (peaks) in the smoothed histogram:
-   - A bucket at index i is a peak iff:
-       smoothed[i] > smoothed[i-1]  AND  smoothed[i] > smoothed[i+1]
-   - Edge buckets (i=0 and i=N) are NEVER peaks.
-   - Plateaus (consecutive equal smoothed counts) — only the leftmost bucket of
-     the run is the peak candidate:
-       * Plateau starts at i=0 (left-edge plateau): treat as non-peak.
-       * Plateau ends at i=N (right-edge plateau): treat as non-peak.
-       * Interior plateau: compare leftmost bucket against the bucket immediately
-         to its left and the bucket immediately after the run ends.
-         Peak iff both comparisons are strictly greater.
+4. Find local maxima using a plateau-aware algorithm:
+   a. Decompose the smoothed histogram into maximal runs of consecutive equal values.
+      A run of length 1 is a single-bucket (non-plateau) run.
+   b. For each run:
+      L = smoothed value of the bucket immediately to the left of the run
+          (treat as -infinity if the run starts at i=0)
+      R = smoothed value of the bucket immediately to the right of the run
+          (treat as -infinity if the run ends at i=N)
+      If the run starts at i=0 OR ends at i=N: no peak (edge run).
+      Else if run_value > L AND run_value > R: the leftmost bucket of the run is
+        a peak. (Single-bucket runs with this property are standard strict peaks.)
+      Else: no peak for this run.
+
+Note: this unified algorithm replaces the "strict rule + plateau exception" framing.
+It produces identical results to the strict rule for single-bucket runs, and correctly
+identifies plateau peaks for multi-bucket runs — both as a single pass, no separate
+plateau detection step required.
+
 5. Complete ALL peak merges before beginning track assignment (Step 6).
    Merge peaks that are closer than 8 BPM (strict: distance < 8.0) — on each iteration:
    - Find the pair with the smallest |centre_a - centre_b|.
@@ -290,9 +297,10 @@ the 15–25 track target. All comparisons use current shortlist contents.
 **Sizing pass order:** execute as a loop of at most 3 iterations, where one iteration
 = one oversized pass followed by one undersized pass. "Current pass" means the
 half-iteration currently executing (oversized OR undersized), not the whole iteration.
-Within each pass, snapshot the shortlist list sorted by length (descending for
-oversized, ascending for undersized) at the start of that pass; iterate through the
-snapshot in order. During iteration:
+Within each pass, snapshot the shortlist list sorted at the start of that pass:
+  - Oversized pass: sort by (length descending, min_track_id ascending).
+  - Undersized pass: sort by (length ascending, min_track_id ascending).
+Iterate through the snapshot in order. During iteration:
   - Shortlists created or split during the current pass are NOT in the snapshot and
     are NOT processed in the current pass. A shortlist created by the oversized pass
     IS eligible for the immediately following undersized pass of the same iteration.
