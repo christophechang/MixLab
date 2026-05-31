@@ -132,6 +132,48 @@ when falling back to `stage1_concepts()`.
 
 ## 4. Algorithm
 
+### Top-level control flow of `partition_pool`
+
+```
+partition_pool(tracks, *, seed):
+  # Step 1: BPM clustering
+  early_exit = _check_size_early_exits(tracks)   # returns [] or [MixConcept] if applicable
+  if early_exit is not None: return early_exit
+
+  clusters = _find_bpm_peaks(tracks)             # returns list[list[Track]] | None
+  if clusters is None:                           # no peaks: uniform-spread fallback
+    n_groups = min(MAX_POOL_COUNT, len(tracks) // MIN_SHORTLIST)
+    if n_groups < 2: return [one MixConcept for all tracks]  # n_groups=0 or 1
+    clusters = _uniform_spread(tracks, n_groups) # contiguous BPM-sorted slices
+
+  # Step 2: Camelot sub-clustering (per BPM cluster)
+  shortlists: list[list[Track]] = []
+  for cluster in clusters:
+    components = _camelot_components(cluster)    # returns list[list[Track]] (Step 2 logic)
+    shortlists.extend(components)
+
+  # Step 3: Era split (per shortlist; applied independently)
+  expanded: list[list[Track]] = []
+  for sl in shortlists:
+    result = _era_split(sl, per_side_min=8)      # returns tuple[list,list] | None
+    if result is None:
+      expanded.append(sl)
+    else:
+      expanded.extend(result)                    # (era_old, era_new)
+
+  # Steps 4: Sizing enforcement (oversized + undersized passes; pool-level merge)
+  shortlists = _resize_shortlists(expanded)
+
+  # Step 5–6: Mood/title inference and MixConcept assembly
+  return [MixConcept(_infer_shortlist_mood(sl), sl) for sl in shortlists]
+```
+
+This pseudocode shows which helper is called at which stage and in what order. The actual
+function bodies are described in the step-by-step sections below. Key ordering constraint:
+`_camelot_components` is called ONCE PER BPM CLUSTER (not once for the whole pool), and
+the loop happens BETWEEN `_find_bpm_peaks` and `_era_split`. Any engineer implementing
+`partition_pool` must preserve this per-cluster loop structure.
+
 ### Shared constants
 
 ```python
@@ -484,8 +526,13 @@ of > MAX_SHORTLIST results are:
   2. Attempt 3 remainder-attach (in the oversized pass): trimming a 30-track shortlist
      to 25 and attaching the 5-track remainder to a 24-track neighbour yields a
      29-track neighbour (> MAX_SHORTLIST). The modified neighbour is not re-processed
-     in the current pass (it was already handled or was not in the oversized snapshot).
-     If this is the last iteration, that oversized neighbour is returned as-is.
+     in the current PASS (it was already handled or was not in the oversized snapshot).
+     However, if further iterations remain (the change-detection flag is set since
+     Attempt 3 IS a change), the next iteration's oversized pass WILL take a fresh
+     snapshot that includes the 29-track neighbour, and WILL attempt to trim it via
+     Attempt 1/2/3 in that iteration. So the oversized remainder-attach result is
+     not silently ignored — it gets a chance to be fixed in the next iteration.
+     Only if this is the last (3rd) iteration does the 29-track neighbour survive.
 The §9 parenthetical covers both.
 **A change** is defined as: any shortlist being merged (under-sizing), split into two
 (Attempt 1 or 2), trimmed with or without remainder attached (Attempt 3), or dropped
@@ -968,7 +1015,7 @@ build per Ruff policy. Add this removal to the §6 file-change table.
 ```python
 # Before (wider context — show all lines that change or that MUST be kept)
 pools = partition_bpm_pools(cluster_tracks)
-bpm_filtered_counts[genre_label] = len(pools.core)     # ← REPLACED (moved into if/else in After)
+bpm_filtered_counts[genre_label] = len(pools.core)     # ← REPLACED — After records len(sorted_tracks) ONCE before if/else (not split into branches)
 if len(pools.core) < MIN_SHORTLIST_TRACKS:             # ← REMOVE this entire block
     print(
         f"Stage 1: skipping {genre_label} — {len(pools.core)} tracks in core BPM pool "
@@ -1150,6 +1197,14 @@ test_resize_shortlists_single_oversized_no_overflow_target_trims_in_place
 test_resize_shortlists_pool_level_merge_loops_until_max_pool_count
 test_resize_shortlists_pool_level_merge_inserts_at_lower_index
 test_resize_shortlists_pool_level_merge_may_exceed_max_shortlist
+test_resize_shortlists_pool_level_merge_tiebreak_step2_picks_smaller_index_sum
+# ^ Tests tie-break step 2: two pairs with equal BPM distance and equal lex-min track_id
+# → the pair with the smaller sum of 0-based indices is chosen.
+test_resize_shortlists_pool_level_merge_tiebreak_step3_picks_lower_index_member
+# ^ Tests tie-break step 3: two pairs sharing equal BPM distance, equal lex-min track_id,
+# AND equal index sum → the pair whose lower-index member has the smaller index wins.
+# (In practice step 3 always resolves, since two distinct pairs cannot share the same
+# lower-index member; the test exercises the step-3 path specifically.)
 test_resize_shortlists_dropped_shortlists_not_resurrected_by_min_pool_count
 
 # Step 5 — Mood/title inference
