@@ -209,7 +209,9 @@ plateau detection step required.
    - Merge: keep the peak with the higher raw track count in its bucket ("heavier").
      "Raw track count" = the count from the original histogram bucket (step 2), NOT
      the accumulated cluster size after any prior merges.
-   - Tie (equal raw count): keep the lower-BPM peak.
+     Note: smoothed peaks can sit on empty raw buckets (count=0); if both peaks have
+     raw count 0, this is still a tie resolved by the rule below.
+   - Tie (equal raw count, including both=0): keep the lower-BPM peak.
    - Distance tie (two pairs are equidistant): choose the pair with the lowest
      combined peak BPM (sum of the two centres).
    - Combined-BPM tie (two pairs share equal distance AND equal centre-sum): choose
@@ -248,7 +250,10 @@ it simply finds no candidate peak during assignment.)
    in the sorted ascending-BPM peak list (same list used in Step 6).
 ```
 
-Target: 2–6 raw BPM clusters before sizing adjustments.
+Typically 2–6 raw BPM clusters before sizing adjustments. A unimodal pool may yield
+exactly 1 cluster (one dominant peak after merging); the uniform-spread fallback also
+produces exactly n_groups clusters. The 2-6 range is a description of the typical
+case, not a hard guarantee.
 
 **Uniform-spread fallback** (triggered when: no peaks found, or histogram has < 3 buckets):
 
@@ -342,9 +347,9 @@ Applied independently to each candidate shortlist *after* Camelot sub-clustering
 1. Collect known-year tracks: t.year is not None and t.year > 0. Call this set KY.
    "Unknown-year tracks" = all tracks NOT in KY (i.e. year is None OR year <= 0).
 2. If len(KY) / len(shortlist) < 0.60: skip era split for this cluster.
-   len(shortlist) is the total count of all tracks in the shortlist as passed to
-   this step — not filtered. This includes any tracks with bpm <= 0 if the caller
-   did not exclude them (see §3 precondition).
+   len(shortlist) is the total count of all tracks in the shortlist (including
+   unknown-year tracks, which are not in KY). Tracks with bpm <= 0 are excluded by
+   the §3 precondition and will never reach this step.
 3. Sort KY ascending by year, then by track_id (lexicographic) for tracks with
    equal year. Call the sorted list ky (length K).
    If K < 2: skip era split (no consecutive pair exists to compute a gap).
@@ -357,6 +362,11 @@ Applied independently to each candidate shortlist *after* Camelot sub-clustering
    Count era_new_known = number of tracks in KY with year >  gap_start.
    (These counts use only KY — unknown-year tracks are not counted here.)
 6. If gap_size >= 8 AND era_old_known >= 8 AND era_new_known >= 8:
+   Note: the >=8 per-side threshold is intentionally LOWER than MIN_SHORTLIST=15.
+   A 20-track shortlist split into two 10-track halves (each with 10 known-year
+   tracks) passes Step 3 but produces two sub-MIN_SHORTLIST shortlists. Step 4
+   under-sizing then merges them back (or grows them). This is the intended
+   design — Step 3 splits optimistically; Step 4 enforces the size contract.
    - era_old: tracks with year is not None and year > 0 and year <= gap_start
    - era_new: tracks with year is not None and year > 0 and year >  gap_start
    - Unknown-year tracks (year=None OR year<=0): assign ALL to era_old.
@@ -677,9 +687,31 @@ constant in `clustering.py`. If existing constants in that file use a leading un
 (private convention), ensure `ABSOLUTE_MIN` (and `MIN_SHORTLIST`, `MAX_SHORTLIST`, etc.)
 are declared without one so callers can import them.
 
-**No change to `run()`'s signature is required.** `run()` already receives the parsed
-`args: argparse.Namespace` object (standard CLI pattern). `args.stage1_seed` is
-therefore in scope at all three call sites inside `run()` — no extra parameter needed.
+**`run()` takes individual keyword parameters, NOT an `args` namespace.** Add
+`stage1_seed: int | None = None` to `run()`'s signature, and pass
+`stage1_seed=args.stage1_seed` at the `asyncio.run(run(...))` call in `main()`.
+
+```python
+# run() signature — add the new parameter:
+async def run(
+    genre: str | None,
+    export_dir: Path | None,
+    mode: TrackMode = "unplayed",
+    ...,
+    stage1_seed: int | None = None,   # ← new
+) -> None: ...
+
+# asyncio.run(run(...)) call in main() — add the argument:
+asyncio.run(
+    run(
+        args.genre,
+        export_dir,
+        args.mode,
+        ...,
+        stage1_seed=args.stage1_seed,   # ← new
+    )
+)
+```
 
 **Add the `--stage1-seed` argument to the argparse setup:**
 
@@ -724,11 +756,11 @@ cfg = CUSTOM_GENRES[genre]
 custom_genre_sub_genres = cfg["genres"]
 if os.environ.get("MIXLAB_STAGE1_LLM"):
     stage1_pool = select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CUSTOM)
-    if len(stage1_pool) < len(bpm_sorted_pool):  # compare against filtered pool
+    if len(stage1_pool) < len(bpm_sorted_pool):  # compare against filtered pool (behavior change: was pool before bpm>0 filter)
         print(f"  Selected {len(stage1_pool)}-track window from pool for Stage 1 (randomised per run).")
     shortlists = await stage1_concepts(stage1_pool, genre, cascade_state, custom=True)
 else:
-    shortlists = partition_pool(bpm_sorted_pool, seed=args.stage1_seed)
+    shortlists = partition_pool(bpm_sorted_pool, seed=stage1_seed)
 all_shortlists.extend(shortlists)
 # Note: no early-exit at call site A — it is not inside a loop.
 # Call site B (below) uses `continue` because it IS inside a for-loop.
@@ -748,6 +780,14 @@ Stage 1 call (approximately: `if len(pools.core) < MIN_SHORTLIST_TRACKS: continu
 shortlist for < MIN_SHORTLIST), so this guard is **no longer needed on the deterministic
 path**. Remove it and rely on the `if not shortlists: continue` check shown below.
 
+**Behavior change:** genre clusters with 5–7 core tracks (previously skipped by the
+MIN_SHORTLIST_TRACKS=8 guard) now produce one shortlist instead of being skipped.
+This is intentional — `partition_pool` returns a usable single shortlist for these
+pools. The feature-flag LLM path also drops the MIN_SHORTLIST_TRACKS guard in the
+After code below, so it too will now call stage1_concepts for 5–7 track pools. If you
+need to preserve the old LLM skip behavior, re-add the guard inside the
+`if os.environ.get("MIXLAB_STAGE1_LLM"):` branch.
+
 ```python
 # Before
 all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label, cascade_state))
@@ -757,7 +797,7 @@ sorted_tracks = [t for t in sorted_tracks if t.bpm > 0]  # precondition filter
 if os.environ.get("MIXLAB_STAGE1_LLM"):
     shortlists = await stage1_concepts(sorted_tracks, genre_label, cascade_state)
 else:
-    shortlists = partition_pool(sorted_tracks, seed=args.stage1_seed)
+    shortlists = partition_pool(sorted_tracks, seed=stage1_seed)
 if not shortlists:
     print(f"Stage 1: pool too small to partition — skipping {genre_label}.", file=sys.stderr)
     continue  # valid: this is inside the for-genre_label loop
@@ -766,10 +806,15 @@ all_shortlists.extend(shortlists)
 
 ### Call site C — outlier / "Misc" pool (line ~616–617, inside `if len(genre_outliers) >= 4:`)
 
-The existing guard `len(genre_outliers) >= 4` must be updated to `>= ABSOLUTE_MIN`
-(>= 5) because `partition_pool` returns `[]` for pools smaller than ABSOLUTE_MIN=5.
-A pool of exactly 4 outliers would silently produce no shortlist on the deterministic
-path (whereas the LLM path accepted it). Update the guard to match the new contract.
+The existing guard `len(genre_outliers) >= 4` must be updated for the deterministic
+path to `>= ABSOLUTE_MIN` (>=5) because `partition_pool` returns `[]` for pools
+smaller than ABSOLUTE_MIN=5. A pool of exactly 4 outliers would silently produce no
+shortlist on the deterministic path (whereas the LLM path accepted it).
+
+The LLM path must preserve the original `>= 4` threshold to fully restore pre-refactor
+behaviour when `MIXLAB_STAGE1_LLM=1`. Using a single unified guard of `>= ABSOLUTE_MIN`
+would silently change the LLM path too, violating the §9 "restores LLM path without code
+change" criterion.
 
 ```python
 # Before
@@ -777,13 +822,15 @@ if len(genre_outliers) >= 4:
     all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc", cascade_state))
 
 # After
-genre_outliers = [t for t in genre_outliers if t.bpm > 0]  # must be before the guard
-if len(genre_outliers) >= ABSOLUTE_MIN:  # was >= 4; updated to match partition_pool contract
-    if os.environ.get("MIXLAB_STAGE1_LLM"):
+genre_outliers = [t for t in genre_outliers if t.bpm > 0]  # must be before the guards
+if os.environ.get("MIXLAB_STAGE1_LLM"):
+    if len(genre_outliers) >= 4:  # original threshold preserved on LLM path
         shortlists = await stage1_concepts(genre_outliers, "Misc", cascade_state)
-    else:
-        shortlists = partition_pool(genre_outliers, seed=args.stage1_seed)
-    all_shortlists.extend(shortlists)
+        all_shortlists.extend(shortlists)
+else:
+    if len(genre_outliers) >= ABSOLUTE_MIN:  # deterministic path requires ≥ 5
+        shortlists = partition_pool(genre_outliers, seed=stage1_seed)
+        all_shortlists.extend(shortlists)
 # Note: no early-exit at call site C — it is not inside a loop.
 ```
 
@@ -824,10 +871,12 @@ test_find_bpm_peaks_track_beyond_7_bpm_becomes_outlier
 test_find_bpm_peaks_equidistant_track_assigned_to_lower_index_peak
 test_find_bpm_peaks_outliers_have_no_candidate_peak_within_7_bpm
 test_find_bpm_peaks_uniform_spread_returns_equal_bpm_groups_not_peaks
-test_find_bpm_peaks_quantile_fallback_small_pool_returns_equal_groups
+test_find_bpm_peaks_uniform_spread_small_pool_returns_equal_sized_groups
 test_partition_pool_n_groups_one_fallback_returns_single_shortlist_up_to_29_tracks
+test_partition_pool_n_groups_one_fallback_bypasses_step4_unlike_same_size_peaks_cluster
 test_find_bpm_peaks_single_bucket_histogram_triggers_fallback
 test_find_bpm_peaks_two_bucket_histogram_triggers_fallback
+test_find_bpm_peaks_three_bucket_all_equal_histogram_triggers_fallback
 test_partition_pool_below_absolute_min_returns_empty
 test_partition_pool_small_but_above_absolute_min_returns_single_shortlist
 
@@ -839,6 +888,7 @@ test_camelot_components_some_unknown_keys_become_singletons_then_merged
 test_camelot_components_three_components_small_one_merged_into_largest
 test_camelot_components_merge_recomputes_largest_after_each_step
 test_camelot_components_merge_tie_uses_min_track_id
+test_camelot_components_merge_tie_min_track_id_is_lexicographic_not_numeric
 
 # Step 3 — Era split
 test_era_split_applies_when_gap_large_and_both_sides_sufficient
@@ -890,7 +940,7 @@ test_partition_pool_tiny_pool_returns_single_shortlist
 test_partition_pool_below_absolute_min_returns_empty
 test_partition_pool_all_same_bpm_returns_camelot_subgroups_or_single
 test_partition_pool_outliers_attached_to_nearest_cluster
-test_partition_pool_no_peaks_uses_quantile_split_before_step2
+test_partition_pool_no_peaks_uses_equal_bpm_split_before_step2
 test_partition_pool_custom_genre_pool_respects_sub_genre_coherence
 ```
 
@@ -923,8 +973,10 @@ Document `MIXLAB_STAGE1_LLM` in `.env.example`.
 ## 9. Acceptance criteria
 
 - [ ] `partition_pool()` produces 3–5 shortlists of 15–25 tracks on a real library snapshot
-      (except documented edge cases: pool-level merge may exceed 25; Phase 1 overflow may
-      leave one shortlist below 15; n_groups=1 fallback may return one shortlist up to 29)
+      (except documented edge cases: pool < ABSOLUTE_MIN returns []; pool < MIN_SHORTLIST
+      returns exactly one shortlist; unimodal or thin pool may return 1–2 shortlists; pool-
+      level merge may exceed 25; Phase 1 overflow may leave one shortlist below 15; n_groups=1
+      fallback may return one shortlist up to 29)
 - [ ] Same pool + same seed → identical output across two runs
 - [ ] Stage 2 concept quality on manual review of 5 snapshots: equal or better than LLM Stage 1
 - [ ] No regression in `--mode all`, `--mode unplayed`, `--mode played`
