@@ -287,13 +287,13 @@ Applied independently to each candidate shortlist *after* Camelot sub-clustering
 After BPM + Camelot + era passes, the candidate shortlists are resized to meet
 the 15–25 track target. All comparisons use current shortlist contents.
 
-**Sizing pass order:** at the start of each pass, snapshot the current shortlist list
-sorted by the relevant key (length descending for oversized, length ascending for
-undersized). Iterate through that snapshot in order. Shortlists created or grown
-during the pass (by Attempt 1/2 splits or Attempt 3 remainder attachment) are NOT
-processed in the current pass — they are picked up by subsequent iterations.
-Repeat both passes (oversized then undersized) until no shortlist needs resizing, up
-to a maximum of 3 full iterations. In practice, two passes suffice.
+**Sizing pass order:** execute as a loop of at most 3 iterations, where one iteration
+= one oversized pass followed by one undersized pass. Within each pass, snapshot the
+shortlist list sorted by length (descending for oversized, ascending for undersized)
+at the start of that pass; iterate through the snapshot in order. Shortlists created
+or grown during a pass (by Attempt 1/2 splits or Attempt 3 remainder attachment) are
+NOT processed in the current pass — they are picked up by a subsequent iteration.
+Exit the loop early (before 3 iterations) if neither pass made any change.
 
 **Under-sizing (len < MIN_SHORTLIST):**
 
@@ -375,7 +375,9 @@ Attempt 3: rank by centrality ascending, keep the first MAX_SHORTLIST, attach
         # The 999 guard must be kept — do not remove it as "dead code".
       centrality = bpm_norm + camelot_norm
       # centrality ∈ [0, 2.0]. Do not cap or normalise — sort uses raw value.
-    Ties in centrality score: break by ascending track_id (lexicographic, stable).
+    Sort key: 2-tuple (centrality, track_id) ascending. Using track_id as the
+    explicit secondary key (not relying on input-list order + sort stability) ensures
+    the result is deterministic regardless of how tracks were ordered in the shortlist.
 ```
 
 **Pool-level adjustments (after all per-shortlist passes):**
