@@ -83,6 +83,9 @@ def partition_pool(
           the lowest-BPM tracks and will distort cluster centroids.
         - An empty tracks list is valid input: the `len < ABSOLUTE_MIN` early exit
           returns [] immediately without reaching any helper that requires non-empty.
+        - All track_ids in the pool must be unique. Duplicate track_ids produce
+          non-deterministic min_track_id tie-breaks and BFS ordering. The caller
+          (genre pool construction in __main__.py) must ensure uniqueness.
 
     Note: this function accepts only tracks and seed. The genre label and
     cascade_state passed to the old stage1_concepts() are not needed — genre
@@ -161,6 +164,12 @@ all tracks have bpm > 0 (see §3 precondition).
   cluster and proceed directly to Step 2 with that one cluster.
   This bypasses histogram construction, smoothing, peak detection, AND the
   uniform-spread fallback entirely.
+  Boundary note: a span of EXACTLY 4.0 (max_bpm - min_bpm == 4.0) does NOT satisfy
+  the strict < 4 guard and falls through to histogram construction. With e.g.
+  min=120.0, max=124.0 the alignment may produce only 2 buckets ([120,123) and
+  [123,126)), which triggers the "< 3 buckets → skip smoothing and peak detection,
+  proceed directly to uniform-spread fallback" rule below. This is expected and
+  acceptable — a 4-BPM span is effectively flat.
 ```
 
 **Histogram construction:**
@@ -408,11 +417,22 @@ Applied independently to each candidate shortlist *after* Camelot sub-clustering
    (These counts use only KY — unknown-year tracks are not counted here.)
 6. If gap_size >= 8 AND era_old_known >= per_side_min AND era_new_known >= per_side_min:
    where per_side_min is a parameter (default 8 for base Step 3; 15 for Step 4 Attempt 2).
+   IMPORTANT: per_side_min is checked against era_old_known and era_new_known — counts
+   of KNOWN-year tracks only (from KY). Unknown-year tracks assigned to era_old in
+   Step 3.6 do NOT count toward the era_old_known >= per_side_min threshold. A
+   shortlist with many unknown-year tracks (assigned to era_old unconditionally) can
+   still fail the era_old_known guard if fewer than per_side_min tracks have a
+   confirmed known year <= gap_start.
    Note: the default >=8 per-side threshold is intentionally LOWER than MIN_SHORTLIST=15.
    A 20-track shortlist split into two 10-track halves (each with 10 known-year
    tracks) passes Step 3 but produces two sub-MIN_SHORTLIST shortlists. Step 4
    under-sizing then merges them back (or grows them). This is the intended
    design — Step 3 splits optimistically; Step 4 enforces the size contract.
+   Note on --min-year interaction: the caller's --min-year CLI flag (applied upstream
+   before Stage 1) means every track in the pool has a year >= min_year, making
+   year known for all tracks. If --min-year is set, the 60% coverage gate effectively
+   always passes. Implementers should be aware that era-split will trigger more often
+   in --min-year runs than in unfiltered runs.
    - era_old: tracks with year is not None and year > 0 and year <= gap_start
    - era_new: tracks with year is not None and year > 0 and year >  gap_start
    - Unknown-year tracks (year=None OR year<=0): assign ALL to era_old unconditionally.
@@ -564,7 +584,9 @@ Attempt 2: re-apply the full Step 3 era-split logic (including the 60% coverage
   its original sub-components would have passed it individually. This is intentional.
   Attempt 2 succeeds only when ALL of the following hold:
     (a) Step 3's logic produces a split (none of the skip conditions in Steps 3.2–3.6
-        fired — coverage gate passes, K >= 2, gap_size >= 8, both sides >= 8);
+        fired — coverage gate passes, K >= 2, gap_size >= 8, both sides >=
+        per_side_min; for Attempt 2, per_side_min = 15, NOT the default 8 used in
+        base Step 3 — the step is re-invoked with per_side_min=15 here);
     (b) len(era_old) >= MIN_SHORTLIST; AND
     (c) len(era_new) >= MIN_SHORTLIST.
   If Step 3 produces no split (any skip condition fires), OR if either half is below
@@ -646,7 +668,10 @@ If total count > MAX_POOL_COUNT:
          shortlist with the overall minimum track_id), this step does NOT resolve
          the tie — fall through to step 2.
       2. Smallest sum of the pair's 0-based indices in the current shortlist list.
-      3. Lowest index of the first shortlist in the pair.
+      3. Lowest index of the lower-index member of the pair (i.e. min of the two
+         shortlists' indices in the current shortlist list). "First shortlist in the
+         pair" means the member with the lower 0-based index — not the shortlist that
+         was discovered first or listed first in a BPM sort.
     Merge that pair. Insert the merged shortlist at the lower of the two original
     indices; remove the higher-index shortlist. (This preserves stable ordering.)
   Until total count <= MAX_POOL_COUNT.
@@ -823,7 +848,9 @@ The filter at A and B must be applied before the LLM-path window-trim check too,
 so both paths operate on the same cleaned pool.
 
 ```python
-# Before
+# Before (lines ~578–584; include the sort line at ~578 as it is context for the filter
+# placement change — the After block replaces the filter but keeps the sort unchanged)
+bpm_sorted_pool = sorted(pool, key=lambda t: t.bpm)   # line ~578 — UNCHANGED; shown for context
 stage1_pool = select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CUSTOM)
 if len(stage1_pool) < len(pool):
     print(f"  Selected {len(stage1_pool)}-track window from pool for Stage 1 (randomised per run).")
@@ -832,7 +859,8 @@ custom_genre_sub_genres = cfg["genres"]
 all_shortlists.extend(await stage1_concepts(stage1_pool, genre, cascade_state, custom=True))
 
 # After
-bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # precondition filter
+bpm_sorted_pool = sorted(pool, key=lambda t: t.bpm)   # unchanged — same sort line as Before
+bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # NEW: precondition filter (bpm>0)
 cfg = CUSTOM_GENRES[genre]
 custom_genre_sub_genres = cfg["genres"]
 if os.environ.get("MIXLAB_STAGE1_LLM"):
@@ -842,6 +870,8 @@ if os.environ.get("MIXLAB_STAGE1_LLM"):
     shortlists = await stage1_concepts(stage1_pool, genre, cascade_state, custom=True)
 else:
     shortlists = partition_pool(bpm_sorted_pool, seed=stage1_seed)
+if not shortlists:
+    print(f"Stage 1: pool too small to partition — skipping {genre} (custom).", file=sys.stderr)
 all_shortlists.extend(shortlists)
 # Bookkeeping — keep these lines immediately after the stage1 block.
 # genre_unplayed_track_ids_source and genre_cluster_counts use the UNFILTERED `pool`
@@ -891,7 +921,7 @@ that blocks the build per Ruff policy. Add this removal to the §6 file-change t
 ```python
 # Before (wider context — show all lines that change or that MUST be kept)
 pools = partition_bpm_pools(cluster_tracks)
-bpm_filtered_counts[genre_label] = len(pools.core)     # ← KEEP — not replaced
+bpm_filtered_counts[genre_label] = len(pools.core)     # ← REPLACED (moved into if/else in After)
 if len(pools.core) < MIN_SHORTLIST_TRACKS:             # ← REMOVE this entire block
     print(
         f"Stage 1: skipping {genre_label} — {len(pools.core)} tracks in core BPM pool "
@@ -901,14 +931,17 @@ if len(pools.core) < MIN_SHORTLIST_TRACKS:             # ← REMOVE this entire 
 sorted_tracks = sort_by_camelot(pools.core)
 all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label, cascade_state))  # ← REPLACE
 
-# After (replace only the guard+stage1 call block; keep bpm_filtered_counts line above)
+# After (replace only the guard+stage1 call block; bpm_filtered_counts is now
+# PATH-SPLIT — it records core pool size on LLM path but bpm>0-filtered size on
+# deterministic path; both are intentional)
 pools = partition_bpm_pools(cluster_tracks)
-bpm_filtered_counts[genre_label] = len(pools.core)     # unchanged — still records core pool size
 sorted_tracks = sort_by_camelot(pools.core)
 sorted_tracks = [t for t in sorted_tracks if t.bpm > 0]  # precondition filter
 if os.environ.get("MIXLAB_STAGE1_LLM"):
+    bpm_filtered_counts[genre_label] = len(pools.core)    # LLM: core pool size (pre-filter)
     shortlists = await stage1_concepts(sorted_tracks, genre_label, cascade_state)
 else:
+    bpm_filtered_counts[genre_label] = len(sorted_tracks) # deterministic: bpm>0-filtered size
     shortlists = partition_pool(sorted_tracks, seed=stage1_seed)
 if not shortlists:
     print(f"Stage 1: pool too small to partition — skipping {genre_label}.", file=sys.stderr)
@@ -940,10 +973,13 @@ if os.environ.get("MIXLAB_STAGE1_LLM"):
         shortlists = await stage1_concepts(genre_outliers, "Misc", cascade_state)
         all_shortlists.extend(shortlists)
 else:
-    # Deterministic path: filter bpm<=0, use ABSOLUTE_MIN threshold
-    genre_outliers = [t for t in genre_outliers if t.bpm > 0]
-    if len(genre_outliers) >= ABSOLUTE_MIN:
-        shortlists = partition_pool(genre_outliers, seed=stage1_seed)
+    # Deterministic path: filter bpm<=0, use ABSOLUTE_MIN threshold.
+    # Use a LOCAL variable (bpm_filtered_outliers) — do NOT reassign genre_outliers,
+    # which is read later (line ~733) for XML export. Mutating it here would silently
+    # drop bpm<=0 tracks from the export even though the LLM path does not.
+    bpm_filtered_outliers = [t for t in genre_outliers if t.bpm > 0]
+    if len(bpm_filtered_outliers) >= ABSOLUTE_MIN:
+        shortlists = partition_pool(bpm_filtered_outliers, seed=stage1_seed)
         all_shortlists.extend(shortlists)
 # Note: no early-exit at call site C — it is not inside a loop.
 ```
@@ -986,15 +1022,26 @@ test_find_bpm_peaks_equidistant_track_assigned_to_lower_index_peak
 test_find_bpm_peaks_outliers_have_no_candidate_peak_within_7_bpm
 test_partition_pool_no_peaks_uniform_spread_returns_equal_bpm_ordered_groups
 test_partition_pool_no_peaks_small_pool_uniform_spread_equal_sized_groups
-test_find_bpm_peaks_single_bucket_histogram_triggers_fallback
-test_find_bpm_peaks_two_bucket_histogram_triggers_fallback
+test_partition_pool_single_bucket_histogram_triggers_fallback
+test_partition_pool_two_bucket_histogram_triggers_fallback
 test_find_bpm_peaks_three_bucket_all_equal_histogram_triggers_fallback
+# Note: single- and two-bucket fallbacks are tested at partition_pool level (the
+# _find_bpm_peaks helper is not directly involved — the < 3 bucket check short-
+# circuits before peak detection runs). Three-bucket tests that do reach _find_bpm_peaks
+# can keep the helper prefix.
 # Note: the following test_partition_pool_* tests cover Step-1 fallback behaviour at
 # the partition_pool level (not the _find_bpm_peaks helper, which returns peak objects):
 test_partition_pool_below_absolute_min_returns_empty
 test_partition_pool_small_but_above_absolute_min_returns_single_shortlist
 test_partition_pool_n_groups_one_fallback_no_peaks_returns_single_shortlist_up_to_29_tracks
 test_partition_pool_n_groups_one_fallback_bypasses_step4_peaks_path_same_size_does_not
+# Fixture note for both n_groups=1 fallback tests above: tracks must have span >= 4.0
+# (to bypass the flat-BPM guard — which fires ONLY when max_bpm - min_bpm < 4.0) AND
+# a histogram distribution that produces NO detectable peaks after smoothing. A pool of
+# tracks all sharing exactly the same BPM has span=0 and triggers the flat-BPM guard,
+# not the n_groups=1 fallback. Suitable fixture: 15–29 tracks with varied BPMs spanning
+# 4+ BPM but arranged so the smoothed histogram is monotone or produces only edge peaks
+# (e.g. all BPMs increasing linearly across the range).
 
 # Step 2 — Camelot components
 test_camelot_components_connected_keys_form_single_component
@@ -1101,7 +1148,7 @@ Document `MIXLAB_STAGE1_LLM` in `.env.example`.
       returns exactly one shortlist; unimodal or thin pool may return 1–2 shortlists; pool-
       level merge may exceed 25; Phase 2 or last-iteration undersized merge may exceed 25;
       Phase 1 overflow may leave one shortlist below 15; n_groups=1 fallback may return one
-      shortlist up to 29)
+      shortlist up to 29; Attempt 3 remainder-attach may push the target shortlist above 25)
 - [ ] Same pool + same seed → identical output across two runs
 - [ ] Stage 2 concept quality on manual review of 5 snapshots: equal or better than LLM Stage 1
 - [ ] No regression in `--mode all`, `--mode unplayed`, `--mode played`
