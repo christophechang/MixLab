@@ -60,8 +60,8 @@ def partition_pool(
     """Partition a genre-scoped track pool into 3–5 shortlists of 15–25 tracks.
 
     Deterministic replacement for the Stage 1 LLM call. Same pool + same seed =
-    same output across runs. With seed=None, tie-breaking is stable (sorted track_ids)
-    but pools with equal-density BPM clusters may vary ordering.
+    same output across runs. All tie-breaking is by sorted track_id — output is
+    fully deterministic regardless of seed value.
 
     Preconditions:
         - tracks must be non-empty.
@@ -269,8 +269,8 @@ Applied independently to each candidate shortlist *after* Camelot sub-clustering
    Count era_new_known = number of tracks in KY with year >  gap_start.
    (These counts use only KY — unknown-year tracks are not counted here.)
 6. If gap_size >= 8 AND era_old_known >= 8 AND era_new_known >= 8:
-   - era_old: tracks with year > 0 and year <= gap_start
-   - era_new: tracks with year > 0 and year >  gap_start
+   - era_old: tracks with year is not None and year > 0 and year <= gap_start
+   - era_new: tracks with year is not None and year > 0 and year >  gap_start
    - Unknown-year tracks (year=None OR year<=0): assign by comparing era centroids.
      centroid_old = mean(t.year for t in era_old)   # always >= 8 known-year tracks
      centroid_new = mean(t.year for t in era_new)   # always >= 8 known-year tracks
@@ -287,9 +287,13 @@ Applied independently to each candidate shortlist *after* Camelot sub-clustering
 After BPM + Camelot + era passes, the candidate shortlists are resized to meet
 the 15–25 track target. All comparisons use current shortlist contents.
 
-**Sizing pass order:** make one oversized pass (descending size order), then one
-undersized pass (ascending size order). Repeat both passes until no shortlist needs
-resizing, up to a maximum of 3 full iterations. In practice, two passes suffice.
+**Sizing pass order:** at the start of each pass, snapshot the current shortlist list
+sorted by the relevant key (length descending for oversized, length ascending for
+undersized). Iterate through that snapshot in order. Shortlists created or grown
+during the pass (by Attempt 1/2 splits or Attempt 3 remainder attachment) are NOT
+processed in the current pass — they are picked up by subsequent iterations.
+Repeat both passes (oversized then undersized) until no shortlist needs resizing, up
+to a maximum of 3 full iterations. In practice, two passes suffice.
 
 **Under-sizing (len < MIN_SHORTLIST):**
 
