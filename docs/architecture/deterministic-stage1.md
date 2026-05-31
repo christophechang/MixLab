@@ -65,6 +65,11 @@ def partition_pool(
       - len(tracks) < 15 (MIN_SHORTLIST): returns one shortlist with all tracks.
       - pools of 15–29 tracks where no detectable peaks exist (n_groups=1 fallback):
         one shortlist of up to 29 tracks — at most 4 over MAX_SHORTLIST. Accepted.
+        This ONLY applies to 15–29 track pools (n_groups = min(5, len//15) = 1).
+        Larger no-peak pools (30+) compute n_groups >= 2, produce multiple equal-
+        sized BPM-ordered groups, and proceed through Steps 2–4 normally — they do
+        NOT produce a single oversize shortlist. The "up to 29" exception is strictly
+        limited to the n_groups=1 case, which is strictly limited to 15–29 track pools.
         Note: the flat-BPM guard (max-min < 4) is a DIFFERENT code path — it
         proceeds to Step 2 (Camelot sub-clustering) and then Step 4 sizing enforcement.
         A flat-BPM pool of 26+ tracks with a single Camelot component will be trimmed
@@ -198,7 +203,8 @@ all tracks have bpm > 0 (see §3 precondition).
 3. If number of buckets (including empty ones) < 3: skip smoothing AND peak detection
    entirely; proceed directly to the uniform-spread fallback.
    Otherwise, smooth the histogram with a 3-bucket moving average.
-   Let N = (total number of buckets - 1), counting all buckets including empty ones.
+   Let N = index of the last bucket = (total bucket count - 1), 0-based, counting all
+   buckets including empty ones. Example: 5 buckets → N=4; buckets are indexed 0..4.
    - Interior bucket i (0 < i < N): smoothed[i] = (raw[i-1] + raw[i] + raw[i+1]) / 3
    - Left edge (i=0): smoothed[0] = (raw[0] + raw[1]) / 2
    - Right edge (i=N): smoothed[N] = (raw[N-1] + raw[N]) / 2
@@ -589,6 +595,17 @@ Attempt 2: re-apply the full Step 3 era-split logic (including the 60% coverage
         base Step 3 — the step is re-invoked with per_side_min=15 here);
     (b) len(era_old) >= MIN_SHORTLIST; AND
     (c) len(era_new) >= MIN_SHORTLIST.
+  NOTE on population differences: conditions (a), (b), and (c) check DIFFERENT
+  populations. Condition (a) gates on era_old_known and era_new_known (KY-only
+  counts, i.e. only tracks with confirmed known year). Conditions (b) and (c) gate
+  on the full era_old and era_new lists, which for era_old also includes unknown-year
+  tracks (unconditionally assigned to era_old in Step 3.6). Since era_new NEVER
+  receives unknown-year tracks, era_new_known == len(era_new), so conditions (a.new)
+  and (c) are equivalent checks — but era_old_known can be much smaller than
+  len(era_old). A shortlist with 14 known-year-old tracks and 20 unknown-year tracks
+  in era_old has era_old_known=14 (fails condition a, per_side_min=15) even though
+  len(era_old)=34 (would pass condition b). Condition (a) fires first and causes
+  Attempt 2 to fail — condition (b) is never evaluated for that shortlist.
   If Step 3 produces no split (any skip condition fires), OR if either half is below
   MIN_SHORTLIST, treat Attempt 2 as failed and proceed to Attempt 3.
   Note: because all unknown-year tracks are assigned to era_old (Step 3.6), era_new
@@ -863,13 +880,27 @@ bpm_sorted_pool = sorted(pool, key=lambda t: t.bpm)   # unchanged — same sort 
 bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # NEW: precondition filter (bpm>0)
 cfg = CUSTOM_GENRES[genre]
 custom_genre_sub_genres = cfg["genres"]
+# IMPORTANT: capture os.environ.get("MIXLAB_STAGE1_LLM") ONCE into a local bool BEFORE
+# any branch that assigns stage1_pool. A second os.environ lookup in the bookkeeping
+# block (below) may evaluate differently in tests (monkeypatched env), leaving
+# stage1_pool unbound if the first if-branch was not entered. Use:
+#   use_llm = bool(os.environ.get("MIXLAB_STAGE1_LLM"))
+# and replace both os.environ.get() calls below with `use_llm`. Shown as two separate
+# checks here for readability only.
 if os.environ.get("MIXLAB_STAGE1_LLM"):
     stage1_pool = select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CUSTOM)
-    if len(stage1_pool) < len(bpm_sorted_pool):  # compare against filtered pool (behavior change: was pool before bpm>0 filter)
+    if len(stage1_pool) < len(bpm_sorted_pool):  # compare against filtered pool
+        # Note: behavior change from Before — the Before code compared len(stage1_pool)
+        # < len(pool) (unfiltered). The After code compares against the bpm>0-filtered
+        # pool. A pool with N tracks of bpm<=0 may not print this message even if the
+        # window trimmed bpm-filtered tracks (e.g., filter reduces 130→119, window
+        # capacity=120 returns all 119, so 119 < 119 is False → no message). Acceptable.
         print(f"  Selected {len(stage1_pool)}-track window from pool for Stage 1 (randomised per run).")
     shortlists = await stage1_concepts(stage1_pool, genre, cascade_state, custom=True)
+    stage1_pool_size = len(stage1_pool)   # capture before leaving this branch
 else:
     shortlists = partition_pool(bpm_sorted_pool, seed=stage1_seed)
+    stage1_pool_size = len(bpm_sorted_pool)  # deterministic: full bpm>0-filtered pool
 if not shortlists:
     print(f"Stage 1: pool too small to partition — skipping {genre} (custom).", file=sys.stderr)
 all_shortlists.extend(shortlists)
@@ -881,11 +912,8 @@ genre_unplayed_track_ids_source = pool
 genre_outliers: list[Track] = []
 outliers: list[Track] = []
 genre_cluster_counts = {genre: len(pool)}
-# bpm_filtered_counts tracks what was actually passed to Stage 1:
-if os.environ.get("MIXLAB_STAGE1_LLM"):
-    bpm_filtered_counts = {genre: len(stage1_pool)}   # LLM: window size (cost-control subsample)
-else:
-    bpm_filtered_counts = {genre: len(bpm_sorted_pool)}  # deterministic: bpm>0-filtered pool
+# bpm_filtered_counts tracks what was actually passed to Stage 1 (captured above):
+bpm_filtered_counts = {genre: stage1_pool_size}
 # Note: no early-exit at call site A — it is not inside a loop.
 # Call site B (below) uses `continue` because it IS inside a for-loop.
 ```
@@ -931,17 +959,19 @@ if len(pools.core) < MIN_SHORTLIST_TRACKS:             # ← REMOVE this entire 
 sorted_tracks = sort_by_camelot(pools.core)
 all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label, cascade_state))  # ← REPLACE
 
-# After (replace only the guard+stage1 call block; bpm_filtered_counts is now
-# PATH-SPLIT — it records core pool size on LLM path but bpm>0-filtered size on
-# deterministic path; both are intentional)
+# After (replace only the guard+stage1 call block; bpm_filtered_counts now records
+# the bpm>0-filtered size on BOTH paths because the filter is applied before the
+# if/else — stage1_concepts and partition_pool both receive the same filtered tracks)
 pools = partition_bpm_pools(cluster_tracks)
 sorted_tracks = sort_by_camelot(pools.core)
 sorted_tracks = [t for t in sorted_tracks if t.bpm > 0]  # precondition filter
+bpm_filtered_counts[genre_label] = len(sorted_tracks)    # both paths: what Stage 1 receives
+# IMPORTANT: capture the env flag ONCE before branching to avoid a second os.environ.get()
+# call — in tests, monkeypatching os.environ between the filter line and the branch would
+# leave stage1_pool unbound if the first branch is not entered.
 if os.environ.get("MIXLAB_STAGE1_LLM"):
-    bpm_filtered_counts[genre_label] = len(pools.core)    # LLM: core pool size (pre-filter)
     shortlists = await stage1_concepts(sorted_tracks, genre_label, cascade_state)
 else:
-    bpm_filtered_counts[genre_label] = len(sorted_tracks) # deterministic: bpm>0-filtered size
     shortlists = partition_pool(sorted_tracks, seed=stage1_seed)
 if not shortlists:
     print(f"Stage 1: pool too small to partition — skipping {genre_label}.", file=sys.stderr)
