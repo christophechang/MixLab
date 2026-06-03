@@ -183,6 +183,7 @@ class DiscordClient:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 channel_id = await self._resolve_channel(client)
+                print(f"Discord: posting to channel {channel_id}...")
                 chunks = self._chunk_text(message)
                 for i, chunk in enumerate(chunks):
                     await self._post_raw(client, channel_id, chunk)
@@ -193,6 +194,8 @@ class DiscordClient:
                     await asyncio.sleep(_CHUNK_SLEEP)
                     label = filename.removesuffix(".xml").replace("_", " ")
                     await self._post_with_files(client, channel_id, f"🎵 **{label}**", [(filename, data)])
+            n_attachments = len(attachments) if attachments else 0
+            print(f"Discord: delivered {len(chunks)} message(s) + {n_attachments} attachment(s).")
             return True
         except Exception as exc:  # noqa: BLE001 — never crash the pipeline
             print(f"Discord delivery failed: {exc}")

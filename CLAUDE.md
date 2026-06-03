@@ -29,3 +29,28 @@ Commands:
 ```
 
 Run via `./mixlab [args]` or `PYTHONPATH=.../MixLab/src .venv/bin/python -m mixlab [args]`.
+
+## Deploy Release Process
+
+When user says **"deploy release"**:
+
+1. **Determine version** — inspect `CHANGELOG.md` for the next version to use (or decide based on unreleased changes: patch/minor/major).
+
+2. **Update CHANGELOG.md** — gather all changes that are either:
+   - Uncommitted (working tree / staged), or
+   - Committed but not yet pushed to `origin/develop`
+   Add them under a new version header with today's date.
+
+2. **Update README.md** — check readme to check for stale / incorrect details. If inconsistencies found, update the file.
+
+3. **Commit changelog** — stage and commit `CHANGELOG.md` (and any other uncommitted changes) with message `chore: prepare vX.Y.Z release`.
+
+4. **Push develop** — `git push origin develop`.
+
+5. **Tag the release** — `git tag vX.Y.Z` then `git push origin vX.Y.Z`.
+
+6. **Deploy to production server** — SSH as `christophechang@192.168.1.122` and run:
+   ```bash
+   cd /Users/christophechang/OpenClaw/Automations/MixLab && git checkout main && git pull origin main
+   ```
+   Confirm the pull succeeded and the working tree is clean before reporting done.
