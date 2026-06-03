@@ -116,17 +116,18 @@ To populate these, run Mixed In Key on your collection, enable **Write to Rekord
 
 Tracks without energy scores or tags still work — MixLab reasons from BPM, key, genre, and artist knowledge when supplementary data is absent.
 
-#### Track colours (optional)
+#### Track colours — enrichment confidence
 
-MixLab reads Rekordbox track colours and maps them to energy tiers passed to the AI:
+MixLab reads the Rekordbox `Colour` field as a match-confidence signal set by the enrichment pipeline:
 
-| Colour | Tier | Meaning |
+| Colour | Confidence | Meaning |
 |---|---|---|
-| Red | High energy | Peak / floor-filling track |
-| Orange | Mid energy | Builder or transition track |
-| Green | Chill | Opener, palette cleanser, or warm-up |
+| Green | High (≥ 0.85) | Auto-matched, safe to use |
+| Orange | Medium (0.65–0.85) | LLM-assisted, worth a glance |
+| Red | Low (< 0.65) | Heuristic label — inspect before relying on |
+| Blank | None | No match found |
 
-Colour-code your tracks in Rekordbox manually to give the AI an additional signal beyond the Mixed In Key energy score. Mixed In Key can also set colours automatically based on energy level if you configure it to do so.
+Tracks flagged low-confidence are marked `[unverified]` in prompts sent to the AI. You do not need to set colours manually — the enrichment project populates them.
 
 #### The `/* tags */` block — an example tagging setup
 
@@ -166,7 +167,7 @@ The `Label` field in Rekordbox is passed to the AI as context. Useful if your co
 #### Summary — what to do before your first run
 
 1. Analyse your collection with Mixed In Key and write Camelot keys, energy scores, and tags back to Rekordbox
-2. Optionally colour-code tracks in Rekordbox (or let Mixed In Key do it by energy level)
+2. Optionally run the enrichment pipeline — it sets track colours as confidence signals
 3. Export your collection: **File → Export Collection in xml format**
 4. Move the file to `import/rekordbox.xml`
 5. Re-export after any library changes (new tracks, updated tags)
