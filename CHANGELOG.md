@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.0 — 2026-06-03
+
+First stable release. No new features — version bump marks the pipeline as production-complete: deterministic Stage 1 (`partition_pool`), two-pass Stage 2 (Anthropic-only), Mix Canvas selection, post-run validation, concept history and novelty scoring, playlist mode, and all operating modes (`unplayed`/`played`/`all`) are stable. See v0.13.0 and prior entries for the full feature history.
+
+---
+
 ## v0.13.0 — 2026-06-03
 
 - **Deterministic Stage 1 via `partition_pool`.** Stage 1 shortlisting is now a pure-Python algorithm — same pool and same seed always produce identical output. Helpers `_median_bpm`, `_min_track_id`, `_infer_shortlist_mood`, `_find_bpm_peaks`, `_camelot_components`, `_era_split`, and `_resize_shortlists` underpin the public `partition_pool()` entry-point. All three Stage 1 call sites in `__main__.py` are wired to `partition_pool`; the original LLM path is retained behind `MIXLAB_STAGE1_LLM=1` (documented in `.env.example`) for soak-period comparison. `--stage1-seed` CLI flag added for reproducible runs. Old `stage1_concepts` / `select_stage1_window` / `_STAGE1_SYSTEM*` are deprecated.
