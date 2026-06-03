@@ -1401,7 +1401,20 @@ def _resize_shortlists(shortlists: list[list[Track]]) -> list[list[Track]]:
                 live.insert(idx + 1, era_new)
                 continue
 
-            # Attempt 3: centrality trim + attach remainder
+            # Attempt 3: Camelot sector split (lower keys 1–6 vs upper keys 7–12)
+            lower_sector = [t for t in snap_sl if _camelot_number(t.camelot_key.upper()) <= 6]
+            upper_sector = [t for t in snap_sl if _camelot_number(t.camelot_key.upper()) > 6]
+            if len(lower_sector) >= MIN_SHORTLIST and len(upper_sector) >= MIN_SHORTLIST:
+                sectors_sorted = sorted(
+                    [lower_sector, upper_sector],
+                    key=lambda c: (_median_bpm(c), _min_track_id(c)),
+                )
+                idx = live.index(snap_sl)
+                live[idx] = sectors_sorted[0]
+                live.insert(idx + 1, sectors_sorted[1])
+                continue
+
+            # Attempt 4: centrality trim + attach remainder
             parsed_keys = [t.camelot_key.upper() for t in snap_sl if t.camelot_key and _CAMELOT_RE.match(t.camelot_key)]
             dominant_key: str | None = (
                 min(parsed_keys, key=lambda k: (-Counter(parsed_keys)[k], k)) if parsed_keys else None
@@ -1444,7 +1457,7 @@ def _resize_shortlists(shortlists: list[list[Track]]) -> list[list[Track]]:
                     target.extend(remainder)
                 else:
                     print(
-                        f"partition_pool: Attempt 3 discarded {len(remainder)} tracks (no split target).",
+                        f"partition_pool: Attempt 4 discarded {len(remainder)} tracks (no split target).",
                         file=sys.stderr,
                     )
 
@@ -1612,7 +1625,7 @@ def partition_pool(
         clusters = [bpm_sorted]
     else:
         _peaks = _find_bpm_peaks(bpm_sorted)
-        if _peaks is None:
+        if _peaks is None or len(_peaks) == 1:
             n_groups = min(MAX_POOL_COUNT, len(bpm_sorted) // MIN_SHORTLIST)
             if n_groups < 2:
                 return [_make_concept(bpm_sorted)]

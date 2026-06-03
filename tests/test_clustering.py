@@ -2250,6 +2250,35 @@ def test_partition_pool_no_peaks_uses_equal_bpm_split_before_step2() -> None:
     assert all_ids == {str(i) for i in range(45)}
 
 
+def test_partition_pool_single_peak_uses_n_groups_fallback() -> None:
+    # All DnB-style tracks within 5 BPM → _find_bpm_peaks merges into 1 peak →
+    # treated as no-peaks → n_groups fallback splits into multiple shortlists.
+    # 75 tracks across mixed keys, all 170–175 BPM, which is the real-world DnB case.
+    keys = ["1A", "2A", "3A", "4A", "5A", "6A", "7A", "8A", "9A", "10A", "11A", "12A"]
+    tracks = [
+        _pt(track_id=f"T{i:03d}", bpm=170.0 + (i % 6), camelot_key=keys[i % len(keys)])
+        for i in range(75)
+    ]
+    result = partition_pool(tracks)
+    assert len(result) >= 2
+    all_ids = {tid for c in result for tid in c.track_ids}
+    assert all_ids == {f"T{i:03d}" for i in range(75)}
+
+
+def test_partition_pool_camelot_sector_split_fires_on_tight_bpm_oversized_pool() -> None:
+    # Oversized shortlist where Camelot BFS and era split both fail →
+    # sector split (keys 1–6 vs 7–12) produces two valid shortlists.
+    lower_keys = ["1A", "2A", "3A", "4A", "5A", "6A"]
+    upper_keys = ["7A", "8A", "9A", "10A", "11A", "12A"]
+    lower = [_pt(track_id=f"L{i}", bpm=174.0, camelot_key=lower_keys[i % 6]) for i in range(20)]
+    upper = [_pt(track_id=f"U{i}", bpm=174.0, camelot_key=upper_keys[i % 6]) for i in range(20)]
+    tracks = lower + upper
+    result = partition_pool(tracks)
+    assert len(result) >= 2
+    all_ids = {tid for c in result for tid in c.track_ids}
+    assert all_ids == {f"L{i}" for i in range(20)} | {f"U{i}" for i in range(20)}
+
+
 def test_partition_pool_custom_genre_pool_respects_sub_genre_coherence() -> None:
     # Mix of keys from two disconnected Camelot regions → sub-grouped by Camelot.
     tracks = (
