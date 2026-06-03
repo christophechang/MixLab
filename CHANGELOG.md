@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.13.0 — 2026-06-03
+
+- **Deterministic Stage 1 via `partition_pool`.** Stage 1 shortlisting is now a pure-Python algorithm — same pool and same seed always produce identical output. Helpers `_median_bpm`, `_min_track_id`, `_infer_shortlist_mood`, `_find_bpm_peaks`, `_camelot_components`, `_era_split`, and `_resize_shortlists` underpin the public `partition_pool()` entry-point. All three Stage 1 call sites in `__main__.py` are wired to `partition_pool`; the original LLM path is retained behind `MIXLAB_STAGE1_LLM=1` (documented in `.env.example`) for soak-period comparison. `--stage1-seed` CLI flag added for reproducible runs. Old `stage1_concepts` / `select_stage1_window` / `_STAGE1_SYSTEM*` are deprecated.
+- **Fix: Camelot sector split for tight-BPM pools.** When BPM-peak detection merges peaks that should be distinct clusters, `partition_pool` now splits the resulting pool by Camelot sector, yielding musically coherent sub-pools rather than one over-sized merged cluster. Prevents tight-BPM genres (e.g. techno at 130–132 BPM) from collapsing into a single undifferentiated shortlist.
+- **`--intent` signal parsing.** `_parse_user_intent()` added to `llm.py`: heuristic keyword extraction of register, mood, occasion, arc-hint, era, and audience signals from the `--intent` string. Extracted signals are injected as a `Parsed signals:` line in the `USER INTENT` block so Stage 2 can key on structured cues even when the intent is written in free prose. Present only when at least one signal fires; absent when no signals match.
+- **`--intent` prompt placement and meta-instruction strengthened.** `recent_concepts` block now precedes `genre_intent_block` in both genre-mode prompt branches so intent reads as the dominant override after seeing prior history. Meta-instruction rewritten from passive suggestion to primary curatorial lens: Stage 2 must serve the stated direction and surface conflicts in Assumptions when the pool makes full compliance impossible. `--intent` help text updated with examples, word-count guidance, and axis coverage.
+- **`_warn_intent()` validation.** Extracted as a testable helper; warns on empty, <5-word, or >100-word intents before the run proceeds. Catches accidental flag misuse (e.g. passing a filename as intent) without aborting the run.
+- **Intent/mood parsing hardening.** Series of targeted fixes to `_parse_user_intent`: position-aware mood suppression (re-scans all register-key spans, handles multiple occurrences), mood prefix collision resolved, whitespace normalisation, dict ordering stabilised, missing aliases added (`podcast`, etc.), negation caveat strengthened. `_kw_match` consistency fixes from adversarial review.
+
+---
+
 ## v0.12.4
 
 - **Pool-relative opener/closer fallback in `_infer_roles`.** When absolute energy thresholds yield no opener or closer candidates (e.g. D&B pools where MIK tags everything 6–7), the minimum-energy track(s) in the pool are promoted as relative opener/closer candidates. Avoids spurious "weak opener pool" / "weak closer pool" risk notes on high-energy but internally-varied pools. Risk-note threshold also tightened: notes fire only when the candidate list is completely empty, not merely `< 2`.

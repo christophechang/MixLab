@@ -41,6 +41,8 @@ When user says **"deploy release"**:
    - Committed but not yet pushed to `origin/develop`
    Add them under a new version header with today's date.
 
+2. **Update README.md** — check readme to check for stale / incorrect details. If inconsistencies found, update the file.
+
 3. **Commit changelog** — stage and commit `CHANGELOG.md` (and any other uncommitted changes) with message `chore: prepare vX.Y.Z release`.
 
 4. **Push develop** — `git push origin develop`.
