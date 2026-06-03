@@ -13,12 +13,14 @@ from dotenv import load_dotenv
 from mixlab.cache import load_genre_cache, save_genre_cache
 from mixlab.client import fetch_mix_names, fetch_played_tracks
 from mixlab.clustering import (
+    ABSOLUTE_MIN,
     build_custom_genre_pool,
     build_mix_canvas,
     count_available_by_genre,
     count_outlier_genres,
     partition_bpm_pools,
     partition_outliers,
+    partition_pool,
     resolve_genre_clusters,
     select_canvases,
     sort_by_camelot,
@@ -28,7 +30,6 @@ from mixlab.discord_client import send_report
 from mixlab.history import HistoryEntry, append_run, load_history
 from mixlab.llm import (
     MAX_STAGE1_POOL_CUSTOM,
-    MIN_SHORTLIST_TRACKS,
     make_cascade_state,
     select_stage1_window,
     stage0_intent_brief,
@@ -471,6 +472,7 @@ async def run(
     intent: str | None = None,
     deep: bool = False,
     debug: bool = False,
+    stage1_seed: int | None = None,
 ) -> None:
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
@@ -573,21 +575,30 @@ async def run(
             print(f"No tracks found for custom genre '{genre}'.", file=sys.stderr)
             sys.exit(1)
         print(f"Custom genre '{genre}': {len(pool)} tracks in pool.")
-        # Sort by BPM for Stage 1 window selection — ensures each window is BPM-coherent.
+        # Sort by BPM for Stage 1 — ensures BPM-coherent ordering.
         # (Camelot walk not used here: it can span large BPM gaps across sub-genres.)
         bpm_sorted_pool = sorted(pool, key=lambda t: t.bpm)
-        stage1_pool = select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CUSTOM)
-        if len(stage1_pool) < len(pool):
-            print(f"  Selected {len(stage1_pool)}-track window from pool for Stage 1 (randomised per run).")
+        bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # precondition filter
         cfg = CUSTOM_GENRES[genre]
         custom_genre_sub_genres = cfg["genres"]
-        all_shortlists.extend(await stage1_concepts(stage1_pool, genre, cascade_state, custom=True))
+        if os.environ.get("MIXLAB_STAGE1_LLM"):
+            stage1_pool = select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CUSTOM)
+            if len(stage1_pool) < len(bpm_sorted_pool):
+                print(f"  Selected {len(stage1_pool)}-track window from pool for Stage 1 (randomised per run).")
+            shortlists = await stage1_concepts(stage1_pool, genre, cascade_state, custom=True)
+            stage1_pool_size = len(stage1_pool)
+        else:
+            shortlists = partition_pool(bpm_sorted_pool, seed=stage1_seed)
+            stage1_pool_size = len(bpm_sorted_pool)
+        if not shortlists:
+            print(f"Stage 1: pool too small to partition — skipping {genre} (custom).", file=sys.stderr)
+        all_shortlists.extend(shortlists)
         genre_unplayed_track_ids_source = pool
         # No outlier handling for custom genres — pool is already the full scope.
         genre_outliers: list[Track] = []
         outliers: list[Track] = []
         genre_cluster_counts = {genre: len(pool)}
-        bpm_filtered_counts = {genre: len(stage1_pool)}
+        bpm_filtered_counts = {genre: stage1_pool_size}
     else:
         clusters, outliers = partition_outliers(unplayed, GENRE_MAP)
         clusters = resolve_genre_clusters(genre, clusters, GENRE_MAP)
@@ -597,24 +608,35 @@ async def run(
             print(f"No tracks found for genre '{genre}'.", file=sys.stderr)
             sys.exit(1)
 
-        # 6a. LLM Stage 1 — standard path.
+        # 6a. Stage 1 — deterministic path (or LLM path when MIXLAB_STAGE1_LLM=1).
         for genre_label, cluster_tracks in clusters.items():
             pools = partition_bpm_pools(cluster_tracks)
-            bpm_filtered_counts[genre_label] = len(pools.core)
-            if len(pools.core) < MIN_SHORTLIST_TRACKS:
-                print(
-                    f"Stage 1: skipping {genre_label} — {len(pools.core)} tracks in core BPM pool "
-                    f"(minimum {MIN_SHORTLIST_TRACKS})"
-                )
-                continue
             sorted_tracks = sort_by_camelot(pools.core)
-            all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label, cascade_state))
+            sorted_tracks = [t for t in sorted_tracks if t.bpm > 0]  # precondition filter
+            bpm_filtered_counts[genre_label] = len(sorted_tracks)
+            if os.environ.get("MIXLAB_STAGE1_LLM"):
+                shortlists = await stage1_concepts(sorted_tracks, genre_label, cascade_state)
+            else:
+                shortlists = partition_pool(sorted_tracks, seed=stage1_seed)
+            if not shortlists:
+                print(f"Stage 1: pool too small to partition — skipping {genre_label}.", file=sys.stderr)
+                continue
+            all_shortlists.extend(shortlists)
 
-        # Outliers ≥ 4 within this genre scope — shortlist as Misc.
+        # Outliers within this genre scope — shortlist as Misc.
         genre_outliers = [t for t in outliers if t.genre.lower() == genre.lower()]
         same_genre_outlier_count = len(genre_outliers)
-        if len(genre_outliers) >= 4:
-            all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc", cascade_state))
+        if os.environ.get("MIXLAB_STAGE1_LLM"):
+            # LLM path: preserve original threshold exactly
+            if len(genre_outliers) >= 4:
+                all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc", cascade_state))
+        else:
+            # Deterministic path: filter bpm<=0, use ABSOLUTE_MIN threshold.
+            # Use a local variable — do NOT reassign genre_outliers (used later for XML export).
+            bpm_filtered_outliers = [t for t in genre_outliers if t.bpm > 0]
+            if len(bpm_filtered_outliers) >= ABSOLUTE_MIN:
+                shortlists = partition_pool(bpm_filtered_outliers, seed=stage1_seed)
+                all_shortlists.extend(shortlists)
 
         genre_unplayed_track_ids_source = [t for cluster_tracks in clusters.values() for t in cluster_tracks]
 
@@ -966,6 +988,13 @@ examples:
         action="store_true",
         help="Emit verbose canvas scoring diagnostics to stderr. Also enabled by MIXLAB_DEBUG_SCORE=1.",
     )
+    parser.add_argument(
+        "--stage1-seed",
+        type=int,
+        default=None,
+        dest="stage1_seed",
+        help="Seed for deterministic Stage 1 tie-breaking. Default: None (stable sort).",
+    )
     args = parser.parse_args()
     _validate_range_args(
         min_bpm=args.min_bpm,
@@ -1028,6 +1057,7 @@ examples:
             intent=args.intent,
             deep=args.deep,
             debug=debug,
+            stage1_seed=args.stage1_seed,
         )
     )
 

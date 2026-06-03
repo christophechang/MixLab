@@ -83,6 +83,8 @@ def _strip_thinking(text: str) -> str:
 # Stage 1 — candidate shortlisting (provider cascade)
 # ---------------------------------------------------------------------------
 
+# DEPRECATED (issue #17): _STAGE1_SYSTEM*, stage1_concepts, and select_stage1_window
+# are kept for the 30-day soak period behind MIXLAB_STAGE1_LLM=1. Remove after soak.
 _STAGE1_SYSTEM = """\
 You are a music data analyst pre-screening a DJ's track collection to build candidate shortlists for mix concepts.
 
@@ -637,7 +639,7 @@ async def _call_stage1_once(
     raise RuntimeError(f"All Stage 1 providers exhausted for genre '{genre}'.")
 
 
-async def stage1_concepts(
+async def stage1_concepts(  # DEPRECATED (issue #17) — remove after 30-day soak
     cluster: list[Track],
     genre: str,
     state: CascadeState,
@@ -656,7 +658,7 @@ async def stage1_concepts(
     return concepts
 
 
-def select_stage1_window(tracks: list[Track], max_count: int) -> list[Track]:
+def select_stage1_window(tracks: list[Track], max_count: int) -> list[Track]:  # DEPRECATED (issue #17)
     """Pick a random contiguous window of up to max_count tracks from a Camelot-sorted pool.
 
     Each run starts at a different position in the sorted list, giving variety across runs

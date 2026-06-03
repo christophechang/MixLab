@@ -23,6 +23,7 @@ import math
 import re
 import statistics
 import sys
+from collections import Counter, deque
 
 from mixlab.config import CustomGenre
 from mixlab.history import ConceptHistory, similarity_breakdown_to_history, similarity_to_history
@@ -1076,3 +1077,571 @@ def select_canvases(
             print(f"  #{i} {c.canvas_id}", file=sys.stderr)
 
     return picked
+
+
+# ---------------------------------------------------------------------------
+# Deterministic Stage 1 — partition_pool()
+# ---------------------------------------------------------------------------
+
+MIN_SHORTLIST: int = 15
+MAX_SHORTLIST: int = 25
+ABSOLUTE_MIN: int = 5
+MIN_POOL_COUNT: int = 3
+MAX_POOL_COUNT: int = 5
+MIN_CAMELOT_COMPONENT: int = 8
+
+
+def _median_bpm(shortlist: list[Track]) -> float:
+    return statistics.median(t.bpm for t in shortlist)
+
+
+def _min_track_id(shortlist: list[Track]) -> str:
+    return min(t.track_id for t in shortlist)
+
+
+def _infer_shortlist_mood(tracks: list[Track]) -> tuple[str, str]:
+    """Return (title, mood) for a non-empty shortlist."""
+    bpm_vals = [t.bpm for t in tracks]
+    bpm_lo, bpm_hi = round(min(bpm_vals)), round(max(bpm_vals))
+
+    parsed_keys = [t.camelot_key.upper() for t in tracks if t.camelot_key and _CAMELOT_RE.match(t.camelot_key)]
+    dominant_key = min(parsed_keys, key=lambda k: (-Counter(parsed_keys)[k], k)) if parsed_keys else "?"
+
+    years = [t.year for t in tracks if t.year is not None and t.year > 0]
+    era = f"{min(years)}–{max(years)}" if years else ""
+
+    all_tags: list[str] = [tag for t in tracks for tag in t.tags]
+    tag_counts = Counter(all_tags)
+    top_tags = (
+        ", ".join(tag_str for tag_str, _ in sorted(tag_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:2])
+        if tag_counts
+        else ""
+    )
+
+    parts: list[str] = [f"{bpm_lo}–{bpm_hi} BPM", dominant_key]
+    if era:
+        parts.append(era)
+    if top_tags:
+        parts.append(top_tags)
+
+    title = " / ".join(parts)
+    mood = top_tags or f"{bpm_lo}–{bpm_hi} BPM"
+    return title, mood
+
+
+def _find_bpm_peaks(tracks: list[Track]) -> list[list[Track]] | None:
+    """Steps 1.1–1.7: histogram → smooth → peaks → merge → assign → attach outliers.
+
+    Returns list of clusters (one per surviving peak, outliers already attached), or
+    None when no peaks are found (caller should use uniform-spread fallback).
+    Input must be non-empty and already sorted by (bpm, track_id).
+    """
+    # Step 1.1 — sort (idempotent if already sorted by caller)
+    bpm_sorted = sorted(tracks, key=lambda t: (t.bpm, t.track_id))
+
+    # Step 1.2 — histogram buckets
+    min_bpm = bpm_sorted[0].bpm
+    max_bpm = bpm_sorted[-1].bpm
+    first_start = math.floor(min_bpm / 3) * 3
+    last_start = math.floor(max_bpm / 3) * 3
+    n_buckets = (last_start - first_start) // 3 + 1
+    raw: list[int] = [0] * n_buckets
+
+    for t in bpm_sorted:
+        idx = int((math.floor(t.bpm / 3) * 3 - first_start) // 3)
+        raw[idx] += 1
+
+    # Step 1.3 — < 3 buckets → no peaks
+    if n_buckets < 3:
+        return None
+
+    # Smooth: last_idx = last index
+    last_idx = n_buckets - 1
+    smoothed: list[float] = [0.0] * n_buckets
+    for i in range(n_buckets):
+        if i == 0:
+            smoothed[0] = (raw[0] + raw[1]) / 2
+        elif i == last_idx:
+            smoothed[last_idx] = (raw[last_idx - 1] + raw[last_idx]) / 2
+        else:
+            smoothed[i] = (raw[i - 1] + raw[i] + raw[i + 1]) / 3
+
+    # Step 1.4 — plateau-aware peak detection
+    # Build runs of consecutive equal smoothed values
+    peaks: list[tuple[int, float, int]] = []  # (bucket_idx, centre_bpm, raw_count)
+
+    i = 0
+    while i < n_buckets:
+        j = i
+        while j + 1 < n_buckets and smoothed[j + 1] == smoothed[i]:
+            j += 1
+        # run = [i..j]
+        if i == 0 or j == last_idx:
+            i = j + 1
+            continue
+        left_val = smoothed[i - 1]
+        right_val = smoothed[j + 1]
+        if smoothed[i] > left_val and smoothed[i] > right_val:
+            bucket_start = first_start + i * 3
+            centre = bucket_start + 1.5
+            plateau_count = sum(raw[k] for k in range(i, j + 1))
+            peaks.append((i, centre, plateau_count))
+        i = j + 1
+
+    if not peaks:
+        return None
+
+    # Step 1.5 — merge peaks closer than 8 BPM
+    while len(peaks) >= 2:
+        min_dist = None
+        merge_a = merge_b = -1
+        for x in range(len(peaks)):
+            for y in range(x + 1, len(peaks)):
+                dist = abs(peaks[x][1] - peaks[y][1])
+                if dist >= 8.0:
+                    continue
+                if min_dist is None or dist < min_dist:
+                    min_dist = dist
+                    merge_a, merge_b = x, y
+                elif dist == min_dist:
+                    # tie: smallest combined centre sum
+                    cur_sum = peaks[merge_a][1] + peaks[merge_b][1]
+                    new_sum = peaks[x][1] + peaks[y][1]
+                    if new_sum < cur_sum:
+                        merge_a, merge_b = x, y
+                    elif new_sum == cur_sum and peaks[x][0] < peaks[merge_a][0]:
+                        # tie: lower-BPM peak has lower bucket index
+                        merge_a, merge_b = x, y
+        if min_dist is None:
+            break
+        pa, pb = peaks[merge_a], peaks[merge_b]
+        # Keep heavier (higher raw count); tie → keep lower-BPM
+        survivor = pa if pa[2] >= pb[2] else pb
+        peaks = [p for idx, p in enumerate(peaks) if idx not in (merge_a, merge_b)]
+        peaks.append(survivor)
+        peaks.sort(key=lambda p: p[1])  # keep ascending BPM order for tie-breaks
+
+    # Step 1.6 — assign tracks to peaks (±7 BPM window)
+    peak_centres = [p[1] for p in peaks]
+    clusters: list[list[Track]] = [[] for _ in peaks]
+    outliers: list[Track] = []
+
+    for t in bpm_sorted:
+        candidates = [(abs(t.bpm - c), idx) for idx, c in enumerate(peak_centres) if abs(t.bpm - c) <= 7.0]
+        if not candidates:
+            outliers.append(t)
+        else:
+            candidates.sort()  # (distance, index) — lower index wins ties
+            clusters[candidates[0][1]].append(t)
+
+    # Step 1.7 — attach outliers to nearest cluster
+    for t in outliers:
+        nearest = min(
+            range(len(peak_centres)),
+            key=lambda idx: (abs(t.bpm - peak_centres[idx]), idx),
+        )
+        clusters[nearest].append(t)
+
+    return clusters
+
+
+def _camelot_components(tracks: list[Track]) -> list[list[Track]]:
+    """Step 2: BFS Camelot sub-clustering within a BPM cluster.
+
+    Returns list of components (≥1).  Small components (< MIN_CAMELOT_COMPONENT)
+    are merged into the largest.
+    """
+    if not tracks:
+        return []
+
+    # Step 2.2 — sort by track_id for deterministic BFS
+    sorted_t = sorted(tracks, key=lambda t: t.track_id)
+
+    # Step 2.3 — all-unknown guard
+    if all(not t.camelot_key or not _CAMELOT_RE.match(t.camelot_key) for t in sorted_t):
+        return [list(sorted_t)]
+
+    # Build adjacency using normalised keys
+    id_to_track = {t.track_id: t for t in sorted_t}
+    ids = [t.track_id for t in sorted_t]
+
+    adj: dict[str, list[str]] = {tid: [] for tid in ids}
+    for i, a in enumerate(ids):
+        for b in ids[i + 1 :]:
+            ka = id_to_track[a].camelot_key.upper()
+            kb = id_to_track[b].camelot_key.upper()
+            if camelot_compatible(ka, kb):
+                adj[a].append(b)
+                adj[b].append(a)
+
+    # BFS
+    visited: set[str] = set()
+    components: list[list[Track]] = []
+    for start in ids:
+        if start in visited:
+            continue
+        component: list[Track] = []
+        q: deque[str] = deque([start])
+        visited.add(start)
+        while q:
+            cur = q.popleft()
+            component.append(id_to_track[cur])
+            for nb in sorted(adj[cur]):
+                if nb not in visited:
+                    visited.add(nb)
+                    q.append(nb)
+        components.append(component)
+
+    # Step 2.4 — merge components < MIN_CAMELOT_COMPONENT into largest
+    sources = sorted(
+        [c for c in components if len(c) < MIN_CAMELOT_COMPONENT],
+        key=lambda c: (len(c), _min_track_id(c)),
+    )
+    for src in sources:
+        if src not in components:
+            continue
+        others = [c for c in components if c is not src]
+        if not others:
+            break
+        target = max(others, key=lambda c: (len(c), -ord(_min_track_id(c)[0]) if _min_track_id(c) else 0))
+        # tie: largest by len, then lex-smallest min_track_id
+        max_len = max(len(c) for c in others)
+        candidates = [c for c in others if len(c) == max_len]
+        target = min(candidates, key=_min_track_id)
+        target.extend(src)
+        components.remove(src)
+
+    return components
+
+
+def _era_split(
+    shortlist: list[Track],
+    *,
+    per_side_min: int = 8,
+) -> tuple[list[Track], list[Track]] | None:
+    """Step 3: era split. Returns (era_old, era_new) or None if no split."""
+    ky = [t for t in shortlist if t.year is not None and t.year > 0]
+    if len(ky) / len(shortlist) < 0.60:
+        return None
+    # Extract (year, track) pairs with confirmed int years for typed arithmetic.
+    ky_pairs: list[tuple[int, Track]] = sorted(
+        ((t.year, t) for t in ky if t.year is not None),
+        key=lambda p: (p[0], p[1].track_id),
+    )
+    k_count = len(ky_pairs)
+    if k_count < 2:
+        return None
+
+    # Find largest gap
+    best_gap = -1
+    gap_idx = 0
+    for i in range(k_count - 1):
+        gap = ky_pairs[i + 1][0] - ky_pairs[i][0]
+        if gap > best_gap or (gap == best_gap and i < gap_idx):
+            best_gap = gap
+            gap_idx = i
+
+    if best_gap < 8:
+        return None
+
+    gap_start: int = ky_pairs[gap_idx][0]
+    era_old_known = sum(1 for yr, _ in ky_pairs if yr <= gap_start)
+    era_new_known = sum(1 for yr, _ in ky_pairs if yr > gap_start)
+
+    if era_old_known < per_side_min or era_new_known < per_side_min:
+        return None
+
+    era_old = [t for t in shortlist if t.year is not None and t.year > 0 and t.year <= gap_start]
+    era_new = [t for t in shortlist if t.year is not None and t.year > 0 and t.year > gap_start]
+    unknowns = [t for t in shortlist if t.year is None or t.year <= 0]
+    era_old = era_old + unknowns
+
+    if len(era_old) < MIN_SHORTLIST or len(era_new) < MIN_SHORTLIST:
+        return None
+
+    return era_old, era_new
+
+
+def _resize_shortlists(shortlists: list[list[Track]]) -> list[list[Track]]:
+    """Step 4: sizing enforcement — 3 iterations of oversized+undersized passes,
+    then pool-level MIN/MAX_POOL_COUNT adjustments.
+    """
+    live = list(shortlists)
+
+    for _iter in range(3):
+        changed = False
+
+        # --- Oversized pass ---
+        snap_over = sorted(
+            live,
+            key=lambda s: (-len(s), _min_track_id(s)),
+        )
+        for snap_sl in snap_over:
+            if snap_sl not in live:
+                continue
+            if len(snap_sl) <= MAX_SHORTLIST:
+                continue
+            changed = True
+
+            # Attempt 1: Camelot BFS split into exactly 2 components ≥ MIN_SHORTLIST
+            comps = _camelot_components(snap_sl)
+            if len(comps) == 2 and len(comps[0]) >= MIN_SHORTLIST and len(comps[1]) >= MIN_SHORTLIST:
+                comps_sorted = sorted(comps, key=lambda c: (_median_bpm(c), _min_track_id(c)))
+                idx = live.index(snap_sl)
+                live[idx] = comps_sorted[0]
+                live.insert(idx + 1, comps_sorted[1])
+                continue
+
+            # Attempt 2: era split with per_side_min=15
+            era_result = _era_split(snap_sl, per_side_min=15)
+            if era_result is not None:
+                era_old, era_new = era_result
+                idx = live.index(snap_sl)
+                live[idx] = era_old
+                live.insert(idx + 1, era_new)
+                continue
+
+            # Attempt 3: centrality trim + attach remainder
+            parsed_keys = [t.camelot_key.upper() for t in snap_sl if t.camelot_key and _CAMELOT_RE.match(t.camelot_key)]
+            dominant_key: str | None = (
+                min(parsed_keys, key=lambda k: (-Counter(parsed_keys)[k], k)) if parsed_keys else None
+            )
+            bpm_vals = [t.bpm for t in snap_sl]
+            bpm_range = max(bpm_vals) - min(bpm_vals)
+            if bpm_range < 1e-6:
+                bpm_range = 1.0
+            med = _median_bpm(snap_sl)
+
+            def _centrality(
+                t: Track,
+                *,
+                _med: float = med,
+                _bpm_range: float = bpm_range,
+                _dominant_key: str | None = dominant_key,
+            ) -> tuple[float, str]:
+                bpm_norm = abs(t.bpm - _med) / _bpm_range
+                if _dominant_key is None:
+                    camelot_norm = 1.0
+                else:
+                    d = camelot_distance(t.camelot_key.upper(), _dominant_key)
+                    camelot_norm = 1.0 if d >= 999 else d / 7.0
+                return (bpm_norm + camelot_norm, t.track_id)
+
+            ranked = sorted(snap_sl, key=_centrality)
+            trimmed = ranked[:MAX_SHORTLIST]
+            remainder = ranked[MAX_SHORTLIST:]
+            idx = live.index(snap_sl)
+            live[idx] = trimmed
+
+            if remainder:
+                others = [s for s in live if s is not trimmed]
+                if others:
+                    trimmed_med = _median_bpm(trimmed)
+                    target = min(
+                        others,
+                        key=lambda s: (abs(_median_bpm(s) - trimmed_med), _min_track_id(s)),
+                    )
+                    target.extend(remainder)
+                else:
+                    print(
+                        f"partition_pool: Attempt 3 discarded {len(remainder)} tracks (no split target).",
+                        file=sys.stderr,
+                    )
+
+        # --- Undersized pass ---
+        snap_under = sorted(
+            live,
+            key=lambda s: (len(s), _min_track_id(s)),
+        )
+        for snap_sl in snap_under:
+            if snap_sl not in live:
+                continue
+            if len(snap_sl) >= MIN_SHORTLIST:
+                continue
+            changed = True
+
+            others = [s for s in snap_under if s is not snap_sl and s in live]
+            if not others:
+                # lone shortlist — keep as-is
+                continue
+
+            # Find closest partner
+            this_med = _median_bpm(snap_sl)
+            closest = min(
+                others,
+                key=lambda s: (abs(_median_bpm(s) - this_med), _min_track_id(s)),
+            )
+
+            # Phase 1
+            if len(snap_sl) + len(closest) > MAX_SHORTLIST:
+                # overflow — enter Phase 2 directly with pre-Phase-1 reference BPM
+                phase2_ref = this_med
+                phase2_entry = "overflow"
+            else:
+                # merge
+                if len(snap_sl) < ABSOLUTE_MIN:
+                    if snap_sl in live:
+                        live.remove(snap_sl)
+                    continue
+                merged = snap_sl + closest
+                snap_idx = snap_under.index(snap_sl)
+                closest_idx = snap_under.index(closest)
+                lower_idx = min(snap_idx, closest_idx)
+                higher_idx = max(snap_idx, closest_idx)
+                # place at lower original snapshot index (by reference lookup)
+                lower_sl = snap_under[lower_idx]
+                higher_sl = snap_under[higher_idx]
+                if lower_sl in live:
+                    live[live.index(lower_sl)] = merged
+                if higher_sl in live and higher_sl is not merged:
+                    live.remove(higher_sl)
+                if len(merged) >= MIN_SHORTLIST:
+                    continue
+                phase2_ref = _median_bpm(merged)
+                phase2_entry = "still_small"
+                snap_sl = merged  # noqa: PLW2901 — intentional reassign for Phase 2
+
+            # Phase 2 — retry loop
+            phase2_partners = sorted(
+                [s for s in snap_under if s is not snap_sl and s in live],
+                key=lambda s: (abs(_median_bpm(s) - phase2_ref), _min_track_id(s)),
+            )
+            first = True
+            for partner in phase2_partners:
+                if partner not in live:
+                    continue
+                if first and phase2_entry == "overflow":
+                    first = False
+                    # skip the overflowing closest partner
+                    if len(snap_sl) + len(partner) > MAX_SHORTLIST:
+                        continue
+                first = False
+                if len(snap_sl) + len(partner) > MAX_SHORTLIST:
+                    continue
+                # merge
+                merged2 = snap_sl + partner
+                if snap_sl in live:
+                    snap_idx2 = live.index(snap_sl)
+                else:
+                    live.append(merged2)
+                    if partner in live:
+                        live.remove(partner)
+                    snap_sl = merged2  # noqa: PLW2901
+                    if len(snap_sl) >= MIN_SHORTLIST:
+                        break
+                    continue
+                partner_idx2 = live.index(partner) if partner in live else len(live)
+                if snap_idx2 <= partner_idx2:
+                    live[snap_idx2] = merged2
+                    if partner in live:
+                        live.remove(partner)
+                else:
+                    live[partner_idx2] = merged2
+                    live.remove(snap_sl)
+                snap_sl = merged2  # noqa: PLW2901
+                if len(snap_sl) >= MIN_SHORTLIST:
+                    break
+
+            # post-loop drop if below ABSOLUTE_MIN
+            if snap_sl in live and len(snap_sl) < ABSOLUTE_MIN:
+                live.remove(snap_sl)
+
+        if not changed:
+            break
+
+    # Pool-level adjustments
+    if len(live) > MAX_POOL_COUNT:
+        while len(live) > MAX_POOL_COUNT:
+            # find closest pair
+            best_dist: float | None = None
+            best_a = best_b = -1
+            for x in range(len(live)):
+                for y in range(x + 1, len(live)):
+                    dist = abs(_median_bpm(live[x]) - _median_bpm(live[y]))
+                    if best_dist is None or dist < best_dist:
+                        best_dist = dist
+                        best_a, best_b = x, y
+                    elif dist == best_dist:
+                        # tie-break 1: lex-min of min_track_ids
+                        cur_min = min(_min_track_id(live[best_a]), _min_track_id(live[best_b]))
+                        new_min = min(_min_track_id(live[x]), _min_track_id(live[y]))
+                        if new_min < cur_min:
+                            best_a, best_b = x, y
+                        elif new_min == cur_min:
+                            # tie-break 2: smallest sum of indices
+                            if x + y < best_a + best_b:
+                                best_a, best_b = x, y
+                            elif x + y == best_a + best_b and min(x, y) < min(best_a, best_b):
+                                # tie-break 3: lower-index member
+                                best_a, best_b = x, y
+            merged_pool = live[best_a] + live[best_b]
+            lower = min(best_a, best_b)
+            higher = max(best_a, best_b)
+            live[lower] = merged_pool
+            del live[higher]
+
+    return live
+
+
+def partition_pool(
+    tracks: list[Track],
+    *,
+    seed: int | None = None,
+) -> list[MixConcept]:
+    """Partition a genre-scoped track pool into shortlists for Stage 2.
+
+    Returns 3–5 MixConcepts of 15–25 tracks each (see spec for edge-case exceptions).
+    Same pool + same seed → identical output. seed is reserved for future use (v1: no effect).
+    """
+    _ = seed  # reserved
+
+    if len(tracks) < ABSOLUTE_MIN:
+        return []
+
+    bpm_sorted = sorted(tracks, key=lambda t: (t.bpm, t.track_id))
+
+    def _make_concept(sl: list[Track]) -> MixConcept:
+        title, mood = _infer_shortlist_mood(sl)
+        return MixConcept(title=title, mood=mood, track_ids=[t.track_id for t in sl])
+
+    if len(bpm_sorted) < MIN_SHORTLIST:
+        return [_make_concept(bpm_sorted)]
+
+    clusters: list[list[Track]]
+    if bpm_sorted[-1].bpm - bpm_sorted[0].bpm < 4:
+        clusters = [bpm_sorted]
+    else:
+        _peaks = _find_bpm_peaks(bpm_sorted)
+        if _peaks is None:
+            n_groups = min(MAX_POOL_COUNT, len(bpm_sorted) // MIN_SHORTLIST)
+            if n_groups < 2:
+                return [_make_concept(bpm_sorted)]
+            size, rem = divmod(len(bpm_sorted), n_groups)
+            clusters = []
+            i = 0
+            for g in range(n_groups):
+                end = i + size + (1 if g < rem else 0)
+                clusters.append(bpm_sorted[i:end])
+                i = end
+        else:
+            clusters = _peaks
+
+    # Step 2: Camelot sub-clustering per BPM cluster
+    shortlists: list[list[Track]] = []
+    for cluster in clusters:
+        shortlists.extend(_camelot_components(cluster))
+
+    # Step 3: era split per shortlist
+    expanded: list[list[Track]] = []
+    for sl in shortlists:
+        result = _era_split(sl)
+        if result is None:
+            expanded.append(sl)
+        else:
+            expanded.extend(result)
+
+    # Step 4: sizing enforcement
+    final = _resize_shortlists(expanded)
+
+    # Steps 5–6: mood/title + MixConcept assembly
+    return [_make_concept(sl) for sl in final]
