@@ -1513,10 +1513,9 @@ def test_partition_pool_single_bucket_histogram_triggers_fallback() -> None:
 def test_partition_pool_two_bucket_histogram_triggers_fallback() -> None:
     # Two distinct BPMs (3 BPM apart → 2 buckets) → n_buckets=2 < 3 → None.
     # BPM span = 3.0 < 4.0, so flat-BPM guard fires.
-    tracks = (
-        [_pt(track_id=f"A{i}", bpm=174.0) for i in range(15)]
-        + [_pt(track_id=f"B{i}", bpm=177.0) for i in range(15)]
-    )
+    tracks = [_pt(track_id=f"A{i}", bpm=174.0) for i in range(15)] + [
+        _pt(track_id=f"B{i}", bpm=177.0) for i in range(15)
+    ]
     result = partition_pool(tracks)
     assert len(result) >= 1
 
@@ -1787,10 +1786,9 @@ def test_era_split_unknown_year_tracks_include_zero_and_none_years() -> None:
 def test_era_split_gap_idx_points_to_last_track_before_gap() -> None:
     # The gap_idx should correspond to the largest year gap.
     # Build: 2000, 2001 (15 tracks), 2010, 2011 (15 tracks) → gap between 2001 and 2010 (9 years).
-    tracks = (
-        [_pt(track_id=f"A{i}", bpm=174.0 + i * 0.1, year=2000 + (i % 2)) for i in range(15)]
-        + [_pt(track_id=f"B{i}", bpm=175.0 + i * 0.1, year=2010 + (i % 2)) for i in range(15)]
-    )
+    tracks = [_pt(track_id=f"A{i}", bpm=174.0 + i * 0.1, year=2000 + (i % 2)) for i in range(15)] + [
+        _pt(track_id=f"B{i}", bpm=175.0 + i * 0.1, year=2010 + (i % 2)) for i in range(15)
+    ]
     result = _era_split(tracks, per_side_min=8)
     assert result is not None
     era_old, era_new = result
@@ -2017,8 +2015,7 @@ def test_resize_shortlists_single_oversized_no_overflow_target_trims_in_place() 
 def test_resize_shortlists_pool_level_merge_loops_until_max_pool_count() -> None:
     # 7 shortlists of exactly 15 tracks each → pool-level merge down to MAX_POOL_COUNT=5.
     shortlists = [
-        [_pt(track_id=f"SL{sl_i}T{i}", bpm=160.0 + sl_i * 5 + i * 0.1) for i in range(15)]
-        for sl_i in range(7)
+        [_pt(track_id=f"SL{sl_i}T{i}", bpm=160.0 + sl_i * 5 + i * 0.1) for i in range(15)] for sl_i in range(7)
     ]
     result = _resize_shortlists(shortlists)
     assert len(result) <= MAX_POOL_COUNT
@@ -2027,8 +2024,7 @@ def test_resize_shortlists_pool_level_merge_loops_until_max_pool_count() -> None
 def test_resize_shortlists_pool_level_merge_inserts_at_lower_index() -> None:
     # After pool-level merge, merged shortlist goes to lower of the two original indices.
     shortlists = [
-        [_pt(track_id=f"SL{sl_i}T{i}", bpm=160.0 + sl_i * 5 + i * 0.1) for i in range(15)]
-        for sl_i in range(6)
+        [_pt(track_id=f"SL{sl_i}T{i}", bpm=160.0 + sl_i * 5 + i * 0.1) for i in range(15)] for sl_i in range(6)
     ]
     result = _resize_shortlists(shortlists)
     # Result should have at most MAX_POOL_COUNT=5 shortlists.
@@ -2043,8 +2039,7 @@ def test_resize_shortlists_pool_level_merge_may_exceed_max_shortlist() -> None:
     # Pool-level merge joins two shortlists regardless of MAX_SHORTLIST.
     # Two shortlists of 20 tracks each → merged = 40 > MAX_SHORTLIST=25 (allowed).
     shortlists = [
-        [_pt(track_id=f"SL{sl_i}T{i}", bpm=160.0 + sl_i * 5 + i * 0.1) for i in range(20)]
-        for sl_i in range(6)
+        [_pt(track_id=f"SL{sl_i}T{i}", bpm=160.0 + sl_i * 5 + i * 0.1) for i in range(20)] for sl_i in range(6)
     ]
     result = _resize_shortlists(shortlists)
     assert len(result) <= MAX_POOL_COUNT
@@ -2060,8 +2055,7 @@ def test_resize_shortlists_pool_level_merge_tiebreak_step2_picks_smaller_index_s
     # All consecutive pairs are 5 BPM apart → tie. Tie-break 1: lex-min track_id.
     # All shortlists have min_track_id "SL{i}T0" — lex comparison should pick minimum.
     shortlists = [
-        [_pt(track_id=f"SL{sl_i}T{i}", bpm=170.0 + sl_i * 5 + i * 0.1) for i in range(15)]
-        for sl_i in range(6)
+        [_pt(track_id=f"SL{sl_i}T{i}", bpm=170.0 + sl_i * 5 + i * 0.1) for i in range(15)] for sl_i in range(6)
     ]
     result = _resize_shortlists(shortlists)
     assert len(result) <= MAX_POOL_COUNT
@@ -2075,8 +2069,7 @@ def test_resize_shortlists_pool_level_merge_tiebreak_step3_picks_lower_index_mem
     # the one with the lower-index member wins.
     # This test verifies correctness of the result structure.
     shortlists = [
-        [_pt(track_id=f"XX{sl_i}T{i}", bpm=170.0 + sl_i * 5 + i * 0.1) for i in range(15)]
-        for sl_i in range(6)
+        [_pt(track_id=f"XX{sl_i}T{i}", bpm=170.0 + sl_i * 5 + i * 0.1) for i in range(15)] for sl_i in range(6)
     ]
     result = _resize_shortlists(shortlists)
     assert len(result) <= MAX_POOL_COUNT
@@ -2255,10 +2248,7 @@ def test_partition_pool_single_peak_uses_n_groups_fallback() -> None:
     # treated as no-peaks → n_groups fallback splits into multiple shortlists.
     # 75 tracks across mixed keys, all 170–175 BPM, which is the real-world DnB case.
     keys = ["1A", "2A", "3A", "4A", "5A", "6A", "7A", "8A", "9A", "10A", "11A", "12A"]
-    tracks = [
-        _pt(track_id=f"T{i:03d}", bpm=170.0 + (i % 6), camelot_key=keys[i % len(keys)])
-        for i in range(75)
-    ]
+    tracks = [_pt(track_id=f"T{i:03d}", bpm=170.0 + (i % 6), camelot_key=keys[i % len(keys)]) for i in range(75)]
     result = partition_pool(tracks)
     assert len(result) >= 2
     all_ids = {tid for c in result for tid in c.track_ids}
@@ -2281,10 +2271,9 @@ def test_partition_pool_camelot_sector_split_fires_on_tight_bpm_oversized_pool()
 
 def test_partition_pool_custom_genre_pool_respects_sub_genre_coherence() -> None:
     # Mix of keys from two disconnected Camelot regions → sub-grouped by Camelot.
-    tracks = (
-        [_pt(track_id=f"G1_{i}", bpm=172.0 + i * 0.3, camelot_key="1A", genre="Drum & Bass") for i in range(25)]
-        + [_pt(track_id=f"G2_{i}", bpm=172.0 + i * 0.3, camelot_key="6A", genre="Jungle") for i in range(25)]
-    )
+    tracks = [
+        _pt(track_id=f"G1_{i}", bpm=172.0 + i * 0.3, camelot_key="1A", genre="Drum & Bass") for i in range(25)
+    ] + [_pt(track_id=f"G2_{i}", bpm=172.0 + i * 0.3, camelot_key="6A", genre="Jungle") for i in range(25)]
     result = partition_pool(tracks)
     assert len(result) >= 1
     # All tracks represented.

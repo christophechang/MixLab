@@ -2376,6 +2376,7 @@ async def stage2_curate_and_report(
     mode: TrackMode | None = None,
     deep: bool = False,
     debug: bool = False,
+    mix_length: int | None = None,
 ) -> tuple[list[MixConcept], str]:
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
     if not stage2_key:
@@ -2544,6 +2545,14 @@ async def stage2_curate_and_report(
                 f"a thin shortlist may yield none — but each concept must draw only from tracks within a single shortlist.\n\n"
                 + "\n\n".join(sections)
             )
+
+    if mix_length is not None and playlist_name is not None:
+        target_tracks = max(10, round(mix_length / 4.0))
+        prompt += (
+            f"\n\nSet length target: {mix_length} minutes (~{target_tracks} tracks at ~4 min average). "
+            f"Aim for approximately {target_tracks} tracks per concept. "
+            f"Maintain arc quality — cut any track that weakens the set rather than padding to hit the number."
+        )
 
     if custom_genre_label and custom_genre_sub_genres:
         sub_genre_str = ", ".join(custom_genre_sub_genres)
