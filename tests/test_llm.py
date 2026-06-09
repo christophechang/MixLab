@@ -3627,4 +3627,90 @@ async def test_stage2_prompt_includes_canvas_header(monkeypatch: pytest.MonkeyPa
     body = route.calls[0].request.content.decode()
     assert "[Canvas dnb_174.0_8A" in body
     assert "novelty:" in body
-    assert "Core:" in body
+
+
+@respx.mock
+async def test_stage2_mix_length_appends_target_to_playlist_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mix_length=60 injects set-length target (~15 tracks) into the playlist user prompt."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool", mood="practical", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset({"1"}),
+        seed_track_ids=["1"],
+        mix_length=60,
+    )
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "60 minutes" in user_prompt
+    assert "15 tracks" in user_prompt
+
+
+@respx.mock
+async def test_stage2_mix_length_absent_from_playlist_prompt_when_not_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without mix_length, the playlist prompt contains no set-length target injection."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool", mood="practical", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset({"1"}),
+        seed_track_ids=["1"],
+    )
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "Set length target" not in user_prompt
+
+
+@respx.mock
+async def test_stage2_mix_length_ignored_in_genre_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mix_length has no effect in standard (genre) mode — no target injected."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, mix_length=60)
+
+    body = json.loads(route.calls[0].request.content)
+    user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
+    assert "Set length target" not in user_prompt

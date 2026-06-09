@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.0 — 2026-06-09
+
+- **`--mix-length` flag for playlist mode.** Pass `--mix-length <minutes>` with `--playlist` to scale the number of tracks Stage 2 selects. Formula: `max(10, round(minutes / 4))` — e.g. 60 min targets ~15 tracks, 90 min targets ~22. Without the flag, playlist mode defaults to 10–14 tracks as before. Standard genre mode is entirely unaffected. The target is injected as a soft instruction in the Stage 2 user prompt; arc quality still takes priority over hitting the number.
+
+---
+
 ## v1.0.0 — 2026-06-03
 
 First stable release. No new features — version bump marks the pipeline as production-complete: deterministic Stage 1 (`partition_pool`), two-pass Stage 2 (Anthropic-only), Mix Canvas selection, post-run validation, concept history and novelty scoring, playlist mode, and all operating modes (`unplayed`/`played`/`all`) are stable. See v0.13.0 and prior entries for the full feature history.

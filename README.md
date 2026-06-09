@@ -244,6 +244,8 @@ For standard and custom genre runs, a Rekordbox-compatible merged XML file can b
 ./mixlab --playlist "Sets/Monday Night"
 ./mixlab --playlist "Monday Night" --mode all
 ./mixlab --playlist "Monday Night" --mode played
+./mixlab --playlist "Monday Night" --mix-length 60   # target ~15 tracks for a 1-hour set
+./mixlab --playlist "Monday Night" --mix-length 90   # target ~22 tracks for a 90-minute set
 ```
 
 Playlist mode is a different workflow from genre mode:
@@ -254,6 +256,8 @@ Playlist mode is a different workflow from genre mode:
 - Each zone becomes a shortlist containing the seed tracks for that zone plus nearby library tracks
 - Stage 2 generates exactly three completion variants (`practical`, `balanced`, and `adventurous`) and MixLab auto-selects the strongest one
 - The final report explains which seed tracks were retained, which were dropped, which library tracks were added, and which alternative strategy was rejected
+
+`--mix-length <minutes>` scales the number of tracks Stage 2 selects for each playlist completion variant. Without it, playlist mode targets 10–14 tracks. With it, the target is derived as `max(10, round(minutes / 4))` — for example 60 minutes → ~15 tracks, 90 minutes → ~22 tracks. Arc quality takes priority: Stage 2 will cut weak tracks rather than padding to hit the count.
 
 Important playlist-mode rules:
 

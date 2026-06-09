@@ -361,6 +361,7 @@ def test_run_playlist_mode_happy_path(
         canvases: object = None,
         concept_history: object = None,
         debug: bool = False,
+        mix_length: int | None = None,
     ) -> tuple[list[MixConcept], str]:
         assert playlist_name == "Monday Night"
         assert seed_ids == frozenset({"1", "2", "3", "4"})
@@ -451,6 +452,7 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
         canvases: object = None,
         concept_history: object = None,
         debug: bool = False,
+        mix_length: int | None = None,
     ) -> tuple[list[MixConcept], str]:
         del shortlists, tracks_by_id, custom_genre_label, custom_genre_sub_genres
         del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief, used_mix_names, canvases, debug
@@ -491,6 +493,7 @@ def test_run_playlist_mode_exports_all_ranked_variants(monkeypatch: pytest.Monke
         canvases: object = None,
         concept_history: object = None,
         debug: bool = False,
+        mix_length: int | None = None,
     ) -> tuple[list[MixConcept], str]:
         del shortlists, tracks_by_id, custom_genre_label, custom_genre_sub_genres
         del playlist_name, seed_ids, seed_track_ids, unplayed_ids, intent_brief, used_mix_names, canvases, debug

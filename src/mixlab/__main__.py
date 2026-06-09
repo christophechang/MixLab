@@ -267,6 +267,7 @@ async def run_playlist_mode(
     min_year: int | None = None,
     max_year: int | None = None,
     debug: bool = False,
+    mix_length: int | None = None,
 ) -> None:
     tracks = parse_collection(_XML_PATH)
     tracks, _ = _apply_do_not_recommend_filter(tracks, _XML_PATH)
@@ -372,6 +373,7 @@ async def run_playlist_mode(
         used_mix_names=mix_names or None,
         concept_history=history,
         debug=debug,
+        mix_length=mix_length,
     )
     if not all_concepts:
         print(report, file=sys.stderr)
@@ -975,6 +977,18 @@ examples:
         ),
     )
     parser.add_argument(
+        "--mix-length",
+        type=int,
+        default=None,
+        metavar="MINUTES",
+        dest="mix_length",
+        help=(
+            "Target set length in minutes (playlist mode only). "
+            "Scales the number of tracks Stage 2 selects — e.g. 60 targets ~15 tracks, 90 targets ~22. "
+            "Without this flag, playlist mode defaults to 10–14 tracks as before."
+        ),
+    )
+    parser.add_argument(
         "--deep",
         action="store_true",
         help=(
@@ -1039,9 +1053,16 @@ examples:
                 min_year=args.min_year,
                 max_year=args.max_year,
                 debug=debug,
+                mix_length=args.mix_length,
             )
         )
         return
+
+    if args.mix_length is not None:
+        print(
+            "--mix-length is only used in playlist mode (--playlist). Ignored for genre runs.",
+            file=sys.stderr,
+        )
 
     _warn_intent(args.intent)
 
