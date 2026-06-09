@@ -70,6 +70,8 @@ def _format_report_context(
     mode: TrackMode,
     export_dir: Path | None,
     intent: str | None = None,
+    mix_length: int | None = None,
+    locked: bool = False,
 ) -> str:
     base_label: str
     details: list[str] = []
@@ -90,6 +92,10 @@ def _format_report_context(
 
     mode_label = {"all": "All Tracks", "unplayed": "unplayed tracks", "played": "played tracks"}[mode]
     details.append(mode_label)
+    if mix_length is not None:
+        details.append(f"{mix_length}min set")
+    if locked:
+        details.append("locked pool")
     if export_dir is not None:
         details.append("export enabled")
 
@@ -268,6 +274,7 @@ async def run_playlist_mode(
     max_year: int | None = None,
     debug: bool = False,
     mix_length: int | None = None,
+    locked: bool = False,
 ) -> None:
     tracks = parse_collection(_XML_PATH)
     tracks, _ = _apply_do_not_recommend_filter(tracks, _XML_PATH)
@@ -337,12 +344,16 @@ async def run_playlist_mode(
             sys.exit(1)
         print(f"Playlist mode genre filter '{genre}': {len(library_source)} tracks in scope.")
 
-    library_tracks = [t for t in library_source if t.track_id not in seed_ids]
-    library_tracks = _apply_range_filters(
-        library_tracks, min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year
-    )
-    if mode == "played" and played_track_ids_set:
-        library_tracks = [t for t in library_tracks if t.track_id in played_track_ids_set]
+    if locked:
+        print(f"--locked: library additions disabled — Stage 2 selects from {len(seed_tracks)} seed tracks only.")
+        library_tracks: list[Track] = []
+    else:
+        library_tracks = [t for t in library_source if t.track_id not in seed_ids]
+        library_tracks = _apply_range_filters(
+            library_tracks, min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year
+        )
+        if mode == "played" and played_track_ids_set:
+            library_tracks = [t for t in library_tracks if t.track_id in played_track_ids_set]
 
     try:
         shortlists = build_zone_shortlists(
@@ -387,6 +398,8 @@ async def run_playlist_mode(
         playlist_name=playlist_name,
         mode=mode,
         export_dir=export_dir,
+        mix_length=mix_length,
+        locked=locked,
     )
     report += f'\n\n---\n\nPlaylist completion: "{playlist_name}"'
     report += f"\n⏱ Generated in {elapsed_str}"
@@ -883,6 +896,7 @@ examples:
   mixlab --genre house --deep          opt-in critique pass per concept (2x Stage 2 cost)
   mixlab --playlist "Monday Night" --mix-length 60   target ~15 tracks for a 1-hour set
   mixlab --playlist "Monday Night" --mix-length 90   target ~22 tracks for a 90-minute set
+  mixlab --playlist "Monday Night" --locked          trim seed playlist only, no library additions
   mixlab --genres                     show cached counts from last run (no API)
   mixlab --export-unplayed            export all unplayed tracks as Rekordbox XML + post to Discord
 """,
@@ -991,6 +1005,15 @@ examples:
         ),
     )
     parser.add_argument(
+        "--locked",
+        action="store_true",
+        help=(
+            "Playlist mode only. Prevents Stage 2 from adding tracks outside the seed playlist. "
+            "Stage 2 can only remove or reorder — useful when you have already curated a pool "
+            "and just want to trim it to fit a set length."
+        ),
+    )
+    parser.add_argument(
         "--deep",
         action="store_true",
         help=(
@@ -1056,6 +1079,7 @@ examples:
                 max_year=args.max_year,
                 debug=debug,
                 mix_length=args.mix_length,
+                locked=args.locked,
             )
         )
         return
@@ -1063,6 +1087,11 @@ examples:
     if args.mix_length is not None:
         print(
             "--mix-length is only used in playlist mode (--playlist). Ignored for genre runs.",
+            file=sys.stderr,
+        )
+    if args.locked:
+        print(
+            "--locked is only used in playlist mode (--playlist). Ignored for genre runs.",
             file=sys.stderr,
         )
 
