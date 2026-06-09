@@ -881,6 +881,8 @@ examples:
   mixlab --genre drum_and_bass --min-year 2020       tracks from 2020 onwards only
   mixlab --genre house --intent "warmup, melodic, outdoor afternoon"  creative direction
   mixlab --genre house --deep          opt-in critique pass per concept (2x Stage 2 cost)
+  mixlab --playlist "Monday Night" --mix-length 60   target ~15 tracks for a 1-hour set
+  mixlab --playlist "Monday Night" --mix-length 90   target ~22 tracks for a 90-minute set
   mixlab --genres                     show cached counts from last run (no API)
   mixlab --export-unplayed            export all unplayed tracks as Rekordbox XML + post to Discord
 """,
