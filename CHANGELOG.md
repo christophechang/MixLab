@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.0 — 2026-06-09
+
+- **`--locked` flag for playlist mode.** Prevents Stage 2 from adding tracks outside the seed playlist — it can only remove or reorder. Useful when you have already curated a pool (e.g. 31 tracks for a 1-hour set) and want MixLab to trim it without pulling from the library. Shown in report context as "locked pool" and surfaced on Discord. Ignored outside `--playlist` mode with a stderr warning.
+- **`--mix-length` shown in Discord report.** Report context line now includes the set length when `--mix-length` is used, e.g. `(Uk Bass, unplayed tracks, 60min set)`.
+
+---
+
 ## v1.1.0 — 2026-06-09
 
 - **`--mix-length` flag for playlist mode.** Pass `--mix-length <minutes>` with `--playlist` to scale the number of tracks Stage 2 selects. Formula: `max(10, round(minutes / 4))` — e.g. 60 min targets ~15 tracks, 90 min targets ~22. Without the flag, playlist mode defaults to 10–14 tracks as before. Standard genre mode is entirely unaffected. The target is injected as a soft instruction in the Stage 2 user prompt; arc quality still takes priority over hitting the number.
