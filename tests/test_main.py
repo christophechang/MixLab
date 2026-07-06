@@ -871,6 +871,28 @@ def test_main_directions_defaults_to_mixed_in_genre_mode(
     assert run_mock.await_args.kwargs["directions"] == "mixed"
 
 
+def test_main_no_revise_defaults_false_and_threaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["no_revise"] is False
+
+
+def test_main_no_revise_flag_sets_kwarg_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--no-revise"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["no_revise"] is True
+
+
 def test_main_directions_off_accepted_in_genre_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

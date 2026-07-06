@@ -13,6 +13,7 @@ from mixlab.models import (
     CanvasScore,
     CompletionVariant,
     ContrastAssets,
+    Critique,
     DJPracticalityScore,
     MixCanvas,
     MixConcept,
@@ -4270,3 +4271,305 @@ def test_validate_stage2_output_thread_artist_four_plus_still_warns() -> None:
     canvas = _direction_canvas(ids, direction_type="artist_thread", thread_artist="SpineGuy")
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
     assert any("SpineGuy" in w and "appears 4 times" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# Bounded self-revision (#55)
+# ---------------------------------------------------------------------------
+
+
+def _revision_lib(key_by_id: dict[str, str], bpm: float = 174.0) -> dict[str, Track]:
+    """Library where each id gets an explicit Camelot key (defaults to 8A)."""
+    return {
+        i: Track(
+            track_id=i,
+            artist=f"Artist_{i}",
+            title=f"Title_{i}",
+            bpm=bpm,
+            camelot_key=key_by_id.get(i, "8A"),
+            genre="house",
+        )
+        for i in key_by_id
+    }
+
+
+def test_qualifies_for_revision_single_hard_finding_returns_false() -> None:
+    from mixlab.llm import _qualifies_for_revision
+
+    concept = MixConcept(title="X", mood="m", track_ids=["1", "2", "3", "4"])
+    warnings = ["[X] track ID 5 not found in library"]
+    assert _qualifies_for_revision(concept, warnings) is False
+
+
+def test_qualifies_for_revision_two_hard_findings_returns_true() -> None:
+    from mixlab.llm import _qualifies_for_revision
+
+    concept = MixConcept(title="X", mood="m", track_ids=["1", "2", "3", "4"])
+    warnings = [
+        "[X] track ID 5 not found in library",
+        "[X] BPM jump 22.0 between A — a and B — b",
+    ]
+    assert _qualifies_for_revision(concept, warnings) is True
+
+
+def test_qualifies_for_revision_soft_only_warnings_returns_false() -> None:
+    from mixlab.llm import _qualifies_for_revision
+
+    concept = MixConcept(title="X", mood="m", track_ids=["1", "2", "3", "4"])
+    warnings = [
+        "[X] no wind-down in final 3 tracks (all energy >4/8)",
+        "[X] all tracks high-energy (≥6/8) — no dynamic range",
+        "Concept title 'X' matches generic [Adjective][Noun] pattern — review for distinctiveness",
+    ]
+    assert _qualifies_for_revision(concept, warnings) is False
+
+
+def test_qualifies_for_revision_weak_critique_returns_true() -> None:
+    from mixlab.llm import _qualifies_for_revision
+
+    concept = MixConcept(title="X", mood="m", track_ids=["1", "2", "3", "4"], critique=Critique(verdict="weak"))
+    assert _qualifies_for_revision(concept, []) is True
+
+
+def test_qualifies_for_revision_needs_attention_with_substitution_returns_true() -> None:
+    from mixlab.llm import _qualifies_for_revision
+
+    concept = MixConcept(
+        title="X",
+        mood="m",
+        track_ids=["1", "2", "3", "4"],
+        critique=Critique(verdict="needs_attention", suggested_substitution="track 3 → ID:9"),
+    )
+    assert _qualifies_for_revision(concept, []) is True
+
+
+def test_qualifies_for_revision_needs_attention_without_substitution_returns_false() -> None:
+    from mixlab.llm import _qualifies_for_revision
+
+    concept = MixConcept(
+        title="X",
+        mood="m",
+        track_ids=["1", "2", "3", "4"],
+        critique=Critique(verdict="needs_attention", suggested_substitution=None),
+    )
+    assert _qualifies_for_revision(concept, []) is False
+
+
+def _revision_canvas(pool_ids: list[str]) -> MixCanvas:
+    concept = MixConcept(title="pool", mood="m", track_ids=pool_ids)
+    return MixCanvas(
+        canvas_id="rev_canvas",
+        genre="house",
+        bpm_range=(170.0, 178.0),
+        dominant_bpm=174.0,
+        dominant_camelot="8A",
+        core_track_ids=pool_ids,
+        bridge_track_ids=[],
+        wildcard_track_ids=[],
+        roles=CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[]),
+        contrast=ContrastAssets(
+            vocal_moments=[], texture_changes=[], darker_turns=[], brighter_lifts=[], lower_pressure_resets=[]
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=concept,
+    )
+
+
+@respx.mock
+async def test_revise_concepts_happy_path_accepts_and_annotates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import revise_concepts, validate_stage2_output
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    # Pool ids 1..9 all 8A except id 3 (2A) — the offending track. Id 9 is a spare 8A.
+    pool = [str(i) for i in range(1, 10)]
+    lib = _revision_lib({i: ("2A" if i == "3" else "8A") for i in pool})
+    canvas = _revision_canvas(pool)
+    original = MixConcept(title="Jump Fix", mood="steady", track_ids=[str(i) for i in range(1, 9)])
+
+    warnings = validate_stage2_output([original], [canvas], lib, played_ids=set(), denylist_ids=set(), genre="house")
+    assert len([w for w in warnings if "Camelot jump" in w]) == 2
+
+    # Revision swaps the 2A track (3) for the spare 8A track (9) → no jumps.
+    revision_payload = json.dumps(
+        [
+            {
+                "title": "Jump Fix",
+                "name_reason": "steady",
+                "mood": "steady",
+                "track_ids": ["1", "2", "9", "4", "5", "6", "7", "8"],
+                "transitions": [],
+            }
+        ]
+    )
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(revision_payload)))
+
+    concepts, report, final_warnings = await revise_concepts(
+        [original],
+        "PROSE REPORT",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+
+    assert route.call_count == 1
+    assert concepts[0].track_ids == ["1", "2", "9", "4", "5", "6", "7", "8"]
+    assert "**Revised**" in report
+    assert not any("Camelot jump" in w for w in final_warnings)
+    assert len(final_warnings) < len(warnings)
+
+
+@respx.mock
+async def test_revise_concepts_worse_revision_keeps_original(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mixlab.llm import revise_concepts, validate_stage2_output
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    pool = [str(i) for i in range(1, 11)]
+    lib = _revision_lib({i: ("2A" if i in ("3", "6") else "8A") for i in pool})
+    canvas = _revision_canvas(pool)
+    original = MixConcept(title="Steady", mood="steady", track_ids=["1", "2", "3", "4", "5", "7", "8", "9"])
+
+    warnings = validate_stage2_output([original], [canvas], lib, played_ids=set(), denylist_ids=set(), genre="house")
+    assert len([w for w in warnings if "Camelot jump" in w]) == 2
+
+    # Revision scatters BOTH 2A tracks (3 and 6) between 8A tracks → four jumps (worse).
+    revision_payload = json.dumps(
+        [
+            {
+                "title": "Steady",
+                "name_reason": "steady",
+                "mood": "steady",
+                "track_ids": ["1", "3", "2", "6", "4", "5", "7", "8"],
+                "transitions": [],
+            }
+        ]
+    )
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(revision_payload)))
+
+    concepts, report, _final = await revise_concepts(
+        [original],
+        "PROSE REPORT",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+
+    assert concepts[0].track_ids == original.track_ids
+    assert "**Revised**" not in report
+    assert "did not improve" in capsys.readouterr().err
+
+
+@respx.mock
+async def test_revise_concepts_unparseable_response_keeps_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import revise_concepts, validate_stage2_output
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    pool = [str(i) for i in range(1, 10)]
+    lib = _revision_lib({i: ("2A" if i == "3" else "8A") for i in pool})
+    canvas = _revision_canvas(pool)
+    original = MixConcept(title="Jump Fix", mood="steady", track_ids=[str(i) for i in range(1, 9)])
+    warnings = validate_stage2_output([original], [canvas], lib, played_ids=set(), denylist_ids=set(), genre="house")
+
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response("sorry, cannot help")))
+
+    concepts, report, _final = await revise_concepts(
+        [original],
+        "PROSE REPORT",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+
+    assert concepts[0].track_ids == original.track_ids
+    assert "**Revised**" not in report
+
+
+@respx.mock
+async def test_revise_concepts_calls_once_per_qualifying_concept_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import revise_concepts, validate_stage2_output
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    pool = [str(i) for i in range(1, 10)]
+    lib = _revision_lib({i: ("2A" if i == "3" else "8A") for i in pool})
+    canvas = _revision_canvas(pool)
+    # Qualifying: two Camelot jumps around id 3.
+    flagged = MixConcept(title="Flagged", mood="m", track_ids=[str(i) for i in range(1, 9)])
+    # Clean: no jumps, no critique — must NOT be revised.
+    clean = MixConcept(title="Clean", mood="m", track_ids=["1", "2", "4", "5", "6", "7", "8", "9"])
+
+    warnings = validate_stage2_output(
+        [flagged, clean], [canvas], lib, played_ids=set(), denylist_ids=set(), genre="house"
+    )
+    revision_payload = json.dumps(
+        [
+            {
+                "title": "Flagged",
+                "name_reason": "m",
+                "mood": "m",
+                "track_ids": ["1", "2", "4", "5", "6", "7", "8", "9"],
+                "transitions": [],
+            }
+        ]
+    )
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(revision_payload)))
+
+    await revise_concepts(
+        [flagged, clean],
+        "PROSE REPORT",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_revise_concepts_no_api_key_returns_inputs_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import revise_concepts
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    pool = [str(i) for i in range(1, 10)]
+    lib = _revision_lib({i: "8A" for i in pool})
+    canvas = _revision_canvas(pool)
+    original = MixConcept(title="X", mood="m", track_ids=[str(i) for i in range(1, 9)])
+    warnings = ["[X] BPM jump 20.0 between a and b", "[X] Camelot jump 6 between 8A and 2A"]
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response("[]")))
+
+    concepts, report, final_warnings = await revise_concepts(
+        [original],
+        "PROSE REPORT",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+
+    assert route.call_count == 0
+    assert concepts[0] is original
+    assert report == "PROSE REPORT"
+    assert final_warnings == warnings

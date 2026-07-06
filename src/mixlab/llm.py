@@ -2190,6 +2190,279 @@ async def _call_stage2_reports(
     )
 
 
+# ---------------------------------------------------------------------------
+# Stage 2 bounded self-revision (#55). One minimal-repair pass per flagged concept.
+# Runs from __main__.run() AFTER validation, acting on the same warnings the user sees.
+# Genre mode only — playlist mode has its own variant-scoring path.
+# ---------------------------------------------------------------------------
+
+# Warning substrings that count as HARD findings — technical/structural problems a
+# minimal track swap/reorder/drop can plausibly resolve. Soft warnings (no wind-down,
+# all-high-energy, generic name, distinctiveness) are excluded: they are advisory and
+# a revision pass cannot reliably fix them without regenerating the concept.
+_HARD_FINDING_MARKERS: tuple[str, ...] = (
+    "not found in library",
+    "is denylisted",
+    "has been played",
+    "BPM jump",
+    "Camelot jump",
+    "arc mismatch",
+    "used without a justified transition",
+)
+
+# Hard-finding marker → short human label used in the report annotation's resolved list.
+_HARD_FINDING_KIND_LABELS: tuple[tuple[str, str], ...] = (
+    ("not found in library", "missing track"),
+    ("is denylisted", "denylist"),
+    ("has been played", "played track"),
+    ("BPM jump", "BPM jump"),
+    ("Camelot jump", "Camelot jump"),
+    ("arc mismatch", "arc mismatch"),
+    ("used without a justified transition", "unjustified transition"),
+)
+
+_STAGE2_REVISION_SYSTEM = """\
+You curated this concept moments ago. It has specific, named findings — BPM jumps, key jumps, an \
+arc that does not match the sequence, played/denylisted/missing tracks, or risky transitions with no \
+justification. Perform a MINIMAL repair. Do NOT regenerate the concept.
+
+Rules:
+- Resolve the named findings by swapping, reordering, or dropping tracks — nothing more.
+- Draw any replacement tracks only from the candidate pool shown below.
+- Preserve the title, the thesis (name_reason), and the overall character/mood. Do not rewrite them.
+- Keep the concept coherent: the opener still opens, the closer still closes, the arc still reads.
+- Prefer the smallest change that resolves the findings. If a finding cannot be fixed without \
+breaking the concept, leave it rather than force a worse sequence.
+- Re-annotate transitions for the new order: one entry per consecutive pair, is_risky/risk_type honest.
+
+Return ONLY a single-element JSON array in this exact schema — no report field, no prose, no fences:
+[{"title": "...", "name_reason": "...", "mood": "...", "track_ids": ["id1", "id2", ...], \
+"transitions": [{"from_id": "id1", "to_id": "id2", "is_risky": false, "risk_type": ""}], "arc_type": "..."}]\
+"""
+
+
+def _concept_warnings(concept: MixConcept, warnings: list[str]) -> list[str]:
+    """Warnings prefixed ``[{concept.title}]`` — i.e. the ones scoped to this concept."""
+    prefix = f"[{concept.title}]"
+    return [w for w in warnings if w.startswith(prefix)]
+
+
+def _hard_findings_for_concept(concept: MixConcept, warnings: list[str]) -> list[str]:
+    """This concept's warnings matching any hard-finding marker (#55)."""
+    return [w for w in _concept_warnings(concept, warnings) if any(m in w for m in _HARD_FINDING_MARKERS)]
+
+
+def _finding_kinds(findings: list[str]) -> set[str]:
+    """Map a list of hard-finding warning strings to their short kind labels."""
+    kinds: set[str] = set()
+    for f in findings:
+        for marker, kind in _HARD_FINDING_KIND_LABELS:
+            if marker in f:
+                kinds.add(kind)
+    return kinds
+
+
+def _critique_triggers_revision(concept: MixConcept) -> bool:
+    """True when the concept's critique alone qualifies it for revision (#55)."""
+    crit = concept.critique
+    if crit is None:
+        return False
+    if crit.verdict == "weak":
+        return True
+    return crit.verdict == "needs_attention" and crit.suggested_substitution is not None
+
+
+def _qualifies_for_revision(concept: MixConcept, warnings: list[str]) -> bool:
+    """Revision trigger (#55): >=2 hard findings, a weak critique, or a needs_attention
+    critique carrying a suggested substitution."""
+    if len(_hard_findings_for_concept(concept, warnings)) >= 2:
+        return True
+    return _critique_triggers_revision(concept)
+
+
+def _revision_findings(concept: MixConcept, warnings: list[str]) -> list[str]:
+    """The findings shown to the revision model: hard warnings, plus critique lines
+    when the concept was (also) triggered by its critique."""
+    findings = list(_hard_findings_for_concept(concept, warnings))
+    crit = concept.critique
+    if _critique_triggers_revision(concept) and crit is not None:
+        if crit.single_weakest_moment:
+            findings.append(f"critique (weakest moment): {crit.single_weakest_moment}")
+        for issue in crit.structural_issues:
+            findings.append(f"critique (structural issue): {issue}")
+        if crit.suggested_substitution:
+            findings.append(f"critique (suggested substitution): {crit.suggested_substitution}")
+    return findings
+
+
+async def _call_stage2_revision_single(
+    concept: MixConcept,
+    canvas: MixCanvas,
+    findings: list[str],
+    tracks_by_id: dict[str, Track],
+    stage2_key: str,
+) -> MixConcept | None:
+    """Run one minimal-repair pass for a single concept. Returns the revised concept,
+    or None when the call fails or parsing yields nothing (caller keeps the original)."""
+    track_lines: list[str] = []
+    for i, tid in enumerate(concept.track_ids, 1):
+        t = tracks_by_id.get(tid)
+        if t is None:
+            continue
+        energy = f"energy:{t.energy}/8" if t.energy is not None else "energy:?"
+        track_lines.append(f"{i}. ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {energy}")
+
+    transition_lines: list[str] = []
+    for tr in concept.transitions:
+        flag = "RISKY" if tr.is_risky else "ok"
+        rtype = tr.risk_type or "—"
+        transition_lines.append(f"  {tr.from_id} → {tr.to_id} [{flag}, risk_type={rtype}]")
+
+    canvas_section = _format_canvas_section(canvas, tracks_by_id)
+    prompt = (
+        f"Concept: {concept.title}\n"
+        f"Thesis (name_reason): {concept.name_reason or '(none)'}\n"
+        f"Mood: {concept.mood}\n"
+        f"arc_type: {concept.arc_type or '(none)'}\n\n"
+        "Track order:\n" + "\n".join(track_lines) + "\n\n"
+        "Transitions:\n" + ("\n".join(transition_lines) if transition_lines else "  (none declared)") + "\n\n"
+        "Findings to resolve:\n" + "\n".join(f"- {f}" for f in findings) + "\n\n" + canvas_section
+    )
+
+    try:
+        raw = await _call_anthropic_http(
+            stage2_key, _stage2_model(), _STAGE2_REVISION_SYSTEM, prompt, max_tokens=4096, timeout=180, temperature=0.3
+        )
+    except Exception as exc:  # noqa: BLE001 — a failed repair never aborts the run
+        print(f"Revision: {concept.title} — call failed ({type(exc).__name__}: {exc})", file=sys.stderr)
+        return None
+
+    valid_ids = (
+        set(canvas.core_track_ids) | set(canvas.bridge_track_ids) | set(canvas.wildcard_track_ids)
+    ) & tracks_by_id.keys()
+    try:
+        curated, _ = _parse_curated_concepts(raw, valid_ids)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return curated[0] if curated else None
+
+
+async def revise_concepts(
+    concepts: list[MixConcept],
+    report: str,
+    warnings: list[str],
+    canvases: list[MixCanvas],
+    tracks_by_id: dict[str, Track],
+    *,
+    played_ids: set[str],
+    allow_played: bool,
+    genre: str,
+) -> tuple[list[MixConcept], str, list[str]]:
+    """One bounded self-revision pass (#55). Returns (possibly-updated concepts,
+    possibly-updated report, final warnings).
+
+    For each qualifying concept (see ``_qualifies_for_revision``) it runs a single
+    minimal-repair call in parallel, accepts the result only when it strictly reduces
+    the concept's hard-finding count, appends a ``**Revised**`` annotation to the report
+    for accepted repairs, and recomputes the warning list over the final concept set.
+    Never a second round — hard cap of one call per concept per run.
+    """
+    stage2_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not stage2_key:
+        print("Revision skipped — ANTHROPIC_API_KEY is not set.", file=sys.stderr)
+        return concepts, report, warnings
+
+    # (index into concepts, concept, matched canvas, findings, hard findings)
+    plans: list[tuple[int, MixConcept, MixCanvas, list[str], list[str]]] = []
+    for idx, concept in enumerate(concepts):
+        if not _qualifies_for_revision(concept, warnings):
+            continue
+        canvas = _match_canvas_for_concept(concept, canvases)
+        if canvas is None:
+            # No pool to draw substitutions from — skip revision for this concept.
+            continue
+        plans.append(
+            (
+                idx,
+                concept,
+                canvas,
+                _revision_findings(concept, warnings),
+                _hard_findings_for_concept(concept, warnings),
+            )
+        )
+
+    if not plans:
+        return concepts, report, warnings
+
+    for _idx, concept, _canvas, _findings, hard in plans:
+        print(
+            f"Revision: {concept.title} — {len(hard)} hard finding(s), requesting minimal repair...",
+            file=sys.stderr,
+        )
+
+    revised_results = await asyncio.gather(
+        *[
+            _call_stage2_revision_single(concept, canvas, findings, tracks_by_id, stage2_key)
+            for _idx, concept, canvas, findings, _hard in plans
+        ]
+    )
+
+    revised_concepts = list(concepts)
+    annotations: list[str] = []
+    for (idx, original, canvas, _findings, hard), revised in zip(plans, revised_results, strict=True):
+        if revised is None:
+            print(f"Revision: {original.title} — no usable repair returned, keeping original", file=sys.stderr)
+            continue
+        # Preserve identity: the repair swaps/reorders tracks, it does not re-theme.
+        revised.title = original.title
+        revised.name_reason = original.name_reason
+        revised.mood = original.mood
+
+        revised_warnings = validate_stage2_output(
+            [revised],
+            [canvas],
+            tracks_by_id,
+            played_ids=played_ids,
+            denylist_ids=set(),
+            allow_played=allow_played,
+            genre=genre,
+        )
+        n_before = len(hard)
+        n_after = len(_hard_findings_for_concept(revised, revised_warnings))
+        if n_after >= n_before:
+            print(f"Revision: {original.title} — revision did not improve — keeping original", file=sys.stderr)
+            continue
+
+        # ACCEPT: swap in the revised tracklist and note it in the report.
+        revised_concepts[idx] = revised
+        before_kinds = _finding_kinds(hard)
+        after_kinds = _finding_kinds(_hard_findings_for_concept(revised, revised_warnings))
+        resolved_kinds = sorted(before_kinds - after_kinds) or sorted(before_kinds)
+        annotations.append(
+            f"**Revised**: {original.title} — resolved {n_before - n_after} of {n_before} findings "
+            f"({', '.join(resolved_kinds)}); track list updated. "
+            f"(prose above reflects the pre-revision sequence; exported playlist uses the revised order)"
+        )
+        print(
+            f"Revision: {original.title} — accepted ({n_before - n_after}/{n_before} finding(s) resolved)",
+            file=sys.stderr,
+        )
+
+    if annotations:
+        report = report.rstrip() + "\n\n" + "\n\n".join(annotations)
+
+    final_warnings = validate_stage2_output(
+        revised_concepts,
+        canvases,
+        tracks_by_id,
+        played_ids=played_ids,
+        denylist_ids=set(),
+        allow_played=allow_played,
+        genre=genre,
+    )
+    return revised_concepts, report, final_warnings
+
+
 def _kw_search(kw: str, text: str, pos: int = 0) -> re.Match[str] | None:
     """Return the first word-boundary match of kw in text at or after pos, or None.
 

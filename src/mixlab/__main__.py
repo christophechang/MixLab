@@ -35,7 +35,9 @@ from mixlab.discord_client import send_report
 from mixlab.history import ConceptHistory, ConceptRecord, HistoryEntry, append_run, load_history, save_history
 from mixlab.llm import (
     _parse_user_intent,  # noqa: PLC2701 — reused here for playlist-mode risk override (#54)
+    _qualifies_for_revision,  # noqa: PLC2701 — reused for the revision-gate decision (#55)
     make_cascade_state,
+    revise_concepts,
     stage0_intent_brief,
     stage2_curate_and_report,
     validate_stage2_output,
@@ -594,6 +596,7 @@ async def run(
     stage1_seed: int | None = None,
     mix_length: int | None = None,
     directions: str = "mixed",
+    no_revise: bool = False,
 ) -> None:
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
@@ -851,6 +854,24 @@ async def run(
         allow_played=mode in ("all", "played"),
         genre=genre or "_default",
     )
+
+    # Bounded self-revision pass (#55). Runs when revision is enabled and there is
+    # something to act on — validation findings, or a concept whose critique qualifies
+    # it on its own (weak, or needs_attention with a suggested substitution).
+    if not no_revise and (
+        validation_warnings or any(_qualifies_for_revision(c, validation_warnings) for c in all_concepts)
+    ):
+        all_concepts, report, validation_warnings = await revise_concepts(
+            all_concepts,
+            report,
+            validation_warnings,
+            selected_canvases,
+            tracks_by_id,
+            played_ids=played_track_ids,
+            allow_played=mode in ("all", "played"),
+            genre=genre or "_default",
+        )
+
     if validation_warnings:
         print("\n⚠ Validation Notes:")
         for w in validation_warnings:
@@ -1018,6 +1039,7 @@ examples:
   mixlab --genre drum_and_bass --min-year 2020       tracks from 2020 onwards only
   mixlab --genre house --intent "warmup, melodic, outdoor afternoon"  creative direction
   mixlab --genre house --deep          opt-in critique pass per concept (2x Stage 2 cost)
+  mixlab --genre house --no-revise     skip the bounded self-revision pass (#55)
   mixlab --playlist "Monday Night" --mix-length 60   target ~15 tracks for a 1-hour set
   mixlab --playlist "Monday Night" --mix-length 90   target ~22 tracks for a 90-minute set
   mixlab --playlist "Monday Night" --locked          trim seed playlist only, no library additions
@@ -1149,6 +1171,15 @@ examples:
             "Run a Stage 2 self-critique pass between selection and report (opt-in, "
             "doubles Stage 2 cost). Each concept gets a peer-DJ review surfaced inline "
             "as a CRITIQUE block. Genre mode only — ignored for --playlist runs."
+        ),
+    )
+    parser.add_argument(
+        "--no-revise",
+        action="store_true",
+        dest="no_revise",
+        help=(
+            "Skip the bounded self-revision pass (#55). By default MixLab attempts one minimal "
+            "repair per flagged concept after validation; this disables that pass."
         ),
     )
     parser.add_argument(
@@ -1287,6 +1318,7 @@ examples:
             stage1_seed=args.stage1_seed,
             mix_length=args.mix_length,
             directions=args.directions,
+            no_revise=args.no_revise,
         )
     )
 
