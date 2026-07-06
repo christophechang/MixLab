@@ -853,3 +853,54 @@ def test_main_feedback_flag_records_verdict_via_cli(
     reloaded = load_history(history_path)
     assert reloaded.runs[0].concepts[0].feedback == "played"
     assert reloaded.runs[0].concepts[0].feedback_notes == "great"
+
+
+# ---------------------------------------------------------------------------
+# main() — --directions flag parsing (#53)
+# ---------------------------------------------------------------------------
+
+
+def test_main_directions_defaults_to_mixed_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["directions"] == "mixed"
+
+
+def test_main_directions_off_accepted_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--directions", "off"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["directions"] == "off"
+
+
+def test_main_directions_only_accepted_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--directions", "only"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["directions"] == "only"
+
+
+def test_main_directions_ignored_in_playlist_mode_with_note(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--playlist", "Monday", "--directions", "only"])
+    playlist_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run_playlist_mode", playlist_mock):
+        main()
+    err = capsys.readouterr().err
+    assert "--directions ignored in playlist mode" in err
+    assert playlist_mock.await_args is not None

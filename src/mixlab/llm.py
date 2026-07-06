@@ -601,8 +601,10 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
 
     r = canvas.roles
     c = canvas.contrast
+    min_count, max_count = TRACK_COUNT_TARGETS.get(canvas.genre, TRACK_COUNT_TARGETS["_default"])
     lines = [
         f"[Canvas {canvas.canvas_id} | novelty:{canvas.score.novelty:.2f}]",
+        f"Target: {min_count}-{max_count} tracks",
         f"Core: {ids_block(canvas.core_track_ids)}",
     ]
     bridge_str = ids_block(canvas.bridge_track_ids)
@@ -697,6 +699,8 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
         )
 
     header = "\n".join(lines)
+    if canvas.brief:
+        header = f"DIRECTION BRIEF ({canvas.direction_type}):\n{canvas.brief}\n" + header
     candidates = "Candidates:\n" + "\n".join(track_lines) if track_lines else ""
     return f"{header}\n{candidates}"
 
@@ -714,7 +718,8 @@ _STAGE2_CANVAS_RULES = """\
 - Harmonic and BPM compatibility are helpers, not constraints.\n\
 - For transitions involving bridge or wildcard tracks, state the specific mechanism that makes it survivable.\n\
 - Anchor candidates shown on the canvas header (Anchors:) are tracks the system has identified as distinctive or identity-defining based on provenance, library rarity, and pool centrality. Prefer including one anchor in each concept's tracklist — the concept will feel more rooted. This is preference, not requirement; a concept built entirely from non-anchor tracks is acceptable if the narrative is stronger without anchor inclusion.\n\
-- Concept anchor candidates (Concept anchors: line) are bridge/wildcard tracks flagged as structurally interesting exceptions, tagged [peak], [identity], or [structural-exception]. If you use one in a structural role (opener, closer, pivot, reset, peak), name the specific role and why this track earns it. If you use a bridge/wildcard track that is not in this list, the bar for justification is higher — explain explicitly what concept-defining function it serves.\
+- Concept anchor candidates (Concept anchors: line) are bridge/wildcard tracks flagged as structurally interesting exceptions, tagged [peak], [identity], or [structural-exception]. If you use one in a structural role (opener, closer, pivot, reset, peak), name the specific role and why this track earns it. If you use a bridge/wildcard track that is not in this list, the bar for justification is higher — explain explicitly what concept-defining function it serves.\n\
+- When a canvas carries a DIRECTION BRIEF, the brief is that canvas's thesis. Honour it: the concept you build from that canvas must serve the stated direction, and the report's thesis line should echo it.\
 """
 
 
@@ -922,9 +927,16 @@ def validate_stage2_output(
             warnings.append(f"{label} {n} tracks — maximum is {max_count} for this genre")
 
         seq = [tracks_by_id[tid] for tid in concept.track_ids if tid in tracks_by_id]
+        # Artist-thread canvases (#53) name a spine artist whose repetition is the whole
+        # point — suppress the repeat warning for that artist at up to 3 tracks (the
+        # thread cap). Every other artist, and a thread artist appearing 4+ times, warns.
+        thread_canvas = _match_canvas_for_concept(concept, canvases)
+        thread_artist = thread_canvas.thread_artist if thread_canvas is not None else ""
         artist_counts = Counter(t.artist for t in seq)
         for artist, count in artist_counts.items():
             if count >= 3:
+                if thread_artist and artist == thread_artist and count <= 3:
+                    continue
                 warnings.append(f"{label} artist '{artist}' appears {count} times")
 
         # Suppress BPM/Camelot jump warnings when the corresponding transition is annotated
@@ -1003,7 +1015,8 @@ shortlists of tracks that have been pre-screened for technical compatibility. Yo
 narrate — select the best tracks from each shortlist, decide the play order, and write the full mix report.
 
 For each shortlist or sub-pool you carve from it:
-- SELECT the best 8–12 tracks from the pool for a coherent DJ set. Exclude tracks that weaken the journey. \
+- SELECT the best tracks from the pool — each canvas header names its target track-count range; treat it as \
+the default and deviate only when arc quality demands — for a coherent DJ set. Exclude tracks that weaken the journey. \
 Weakness is practical: a track whose intro gives no workable mix point, a vocal that starts on bar one with \
 no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment \
 used so early it makes everything after feel like a comedown.
@@ -1155,7 +1168,8 @@ Respond ONLY with the JSON array.\
 # if either drifts from _STAGE2_SYSTEM, the assert fires at import time instead of
 # silently producing a prompt with the old text.
 _STAGE2_SELECT_STANDARD = """For each shortlist or sub-pool you carve from it:
-- SELECT the best 8–12 tracks from the pool for a coherent DJ set. Exclude tracks that weaken the journey. \
+- SELECT the best tracks from the pool — each canvas header names its target track-count range; treat it as \
+the default and deviate only when arc quality demands — for a coherent DJ set. Exclude tracks that weaken the journey. \
 Weakness is practical: a track whose intro gives no workable mix point, a vocal that starts on bar one with \
 no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment \
 used so early it makes everything after feel like a comedown."""

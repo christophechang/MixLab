@@ -3938,3 +3938,133 @@ def test_compute_practicality_clean_halftime_smoothness_matches_tight_straight()
 
     assert halftime_score.bpm_smoothness > 0.9
     assert abs(halftime_score.bpm_smoothness - straight_score.bpm_smoothness) < 0.05
+
+
+# ---------------------------------------------------------------------------
+# Concept directions (#53) — DIRECTION BRIEF + Target line + B8 fix + suppression
+# ---------------------------------------------------------------------------
+
+
+def _direction_canvas(
+    track_ids: list[str],
+    *,
+    genre: str = "Drum & Bass",
+    brief: str = "",
+    direction_type: str = "",
+    thread_artist: str = "",
+) -> MixCanvas:
+    concept = MixConcept(title="Mood journey: dark -> euphoric", mood="dark to euphoric", track_ids=track_ids)
+    return MixCanvas(
+        canvas_id="dir_172.0_8A",
+        genre=genre,
+        bpm_range=(170.0, 174.0),
+        dominant_bpm=172.0,
+        dominant_camelot="8A",
+        core_track_ids=track_ids,
+        bridge_track_ids=[],
+        wildcard_track_ids=[],
+        roles=CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[]),
+        contrast=ContrastAssets(
+            vocal_moments=[], texture_changes=[], darker_turns=[], brighter_lifts=[], lower_pressure_resets=[]
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=concept,
+        brief=brief,
+        direction_type=direction_type,
+        thread_artist=thread_artist,
+    )
+
+
+def test_format_canvas_section_renders_direction_brief_block() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {"1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="Drum & Bass")}
+    canvas = _direction_canvas(["1"], brief="Open dark, land euphoric.", direction_type="mood_journey")
+    section = _format_canvas_section(canvas, tracks_by_id)
+    assert "DIRECTION BRIEF (mood_journey):" in section
+    assert "Open dark, land euphoric." in section
+    # The brief precedes the canvas header line.
+    assert section.index("DIRECTION BRIEF") < section.index("[Canvas ")
+
+
+def test_format_canvas_section_renders_target_track_count_from_genre() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {"1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="Drum & Bass")}
+    canvas = _direction_canvas(["1"], genre="Drum & Bass")
+    section = _format_canvas_section(canvas, tracks_by_id)
+    assert "Target: 10-14 tracks" in section
+
+
+def test_format_canvas_section_target_falls_back_to_default_for_unknown_genre() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {"1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="Mystery")}
+    canvas = _direction_canvas(["1"], genre="Mystery")
+    section = _format_canvas_section(canvas, tracks_by_id)
+    assert "Target: 8-12 tracks" in section
+
+
+def test_format_canvas_section_classic_canvas_has_no_direction_brief() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {"1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="Drum & Bass")}
+    canvas = _direction_canvas(["1"])  # brief defaults to ""
+    section = _format_canvas_section(canvas, tracks_by_id)
+    assert "DIRECTION BRIEF" not in section
+
+
+def test_stage2_system_no_longer_hardcodes_eight_to_twelve_tracks() -> None:
+    from mixlab.llm import _STAGE2_SYSTEM
+
+    assert "8–12 tracks" not in _STAGE2_SYSTEM
+    assert "target track-count range" in _STAGE2_SYSTEM
+
+
+def test_stage2_canvas_rules_mention_direction_brief() -> None:
+    from mixlab.llm import _STAGE2_CANVAS_RULES
+
+    assert "DIRECTION BRIEF" in _STAGE2_CANVAS_RULES
+
+
+def test_validate_stage2_output_suppresses_thread_artist_repeat() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        str(i): Track(track_id=str(i), artist="SpineGuy", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 4)
+    }
+    ids = [str(i) for i in range(1, 4)]
+    concept = MixConcept(title="Artist thread: SpineGuy", mood="spine", track_ids=ids)
+    canvas = _direction_canvas(ids, direction_type="artist_thread", thread_artist="SpineGuy")
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert not any("SpineGuy" in w and "appears" in w for w in warnings)
+
+
+def test_validate_stage2_output_still_warns_non_thread_artist_repeat() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        str(i): Track(track_id=str(i), artist="Other Artist", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 4)
+    }
+    ids = [str(i) for i in range(1, 4)]
+    concept = MixConcept(title="Artist thread: SpineGuy", mood="spine", track_ids=ids)
+    canvas = _direction_canvas(ids, direction_type="artist_thread", thread_artist="SpineGuy")
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("Other Artist" in w and "appears 3 times" in w for w in warnings)
+
+
+def test_validate_stage2_output_thread_artist_four_plus_still_warns() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        str(i): Track(track_id=str(i), artist="SpineGuy", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+    ids = [str(i) for i in range(1, 5)]
+    concept = MixConcept(title="Artist thread: SpineGuy", mood="spine", track_ids=ids)
+    canvas = _direction_canvas(ids, direction_type="artist_thread", thread_artist="SpineGuy")
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("SpineGuy" in w and "appears 4 times" in w for w in warnings)

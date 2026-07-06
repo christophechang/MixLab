@@ -36,7 +36,7 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY + at least one Stage 1 key
 1. Parses your exported Rekordbox XML collection
 2. If `CATALOG_API_URL` is set, fetches your play history and applies `--mode` filtering (`unplayed` by default, or `played` to restrict to battle-tested tracks); without the catalog API the full collection is used
 3. Prints a crate availability table (no LLM cost)
-4. If `--genre` is specified, scopes the collection to that genre (or custom cross-genre pool), runs Stage 1 shortlisting, wraps each shortlist into a Mix Canvas (BPM tiers, role candidates, contrast assets, anchors, era/label coherence, risk notes), then writes a full Stage 2 mix planning report — optionally steered with `--intent "..."`
+4. If `--genre` is specified, scopes the collection to that genre (or custom cross-genre pool), runs Stage 1 shortlisting, wraps each shortlist into a Mix Canvas (BPM tiers, role candidates, contrast assets, anchors, era/label coherence, risk notes), optionally blends in cross-strata concept directions (`--directions`), then writes a full Stage 2 mix planning report — optionally steered with `--intent "..."`
 5. If `--playlist` is specified, uses that Rekordbox playlist as the seed, infers the set's intent, builds natural BPM-zone shortlists around the seed tracks, generates three completion variants, then writes the best playlist-completion report
 6. Optionally exports a Rekordbox-compatible merged XML file
 7. Sends the report and any XML attachment to a Discord channel
@@ -237,6 +237,27 @@ For standard and custom genre runs, a Rekordbox-compatible merged XML file can b
 `--intent` accepts a free-text creative direction that is injected verbatim into the Stage 2 prompt for genre mode. There is no parsing or LLM extraction — the model reads it as guidance and fills in everything you did not specify. If the intent conflicts with the candidate pool, Stage 2 picks the closest viable interpretation and notes the gap.
 
 `--intent` is ignored in playlist mode (`--playlist`), which already runs its own Stage 0 intent-extraction pass over the seed playlist.
+
+### Concept directions (`--directions`)
+
+Classic Stage 1 slices a genre pool into BPM strata, so tempo is the only axis a concept can be built around. Concept directions add a second, cross-strata axis: deterministic creative briefs that deliberately span BPM tiers. Six direction types are enumerated over the whole genre-scoped pool, and only the ones the material actually supports are proposed:
+
+- **mood_journey** — travels between contrasting mood-tag poles (e.g. dark → euphoric), bridged by neutral tracks
+- **era_dialogue** — old-vs-new conversation across a year gap, eras alternated deliberately
+- **label_spotlight** — one label's scene DNA, optionally braced by a few harmonically-adjacent outsiders
+- **artist_thread** — one artist/remixer (2–3 tracks) as the structural spine; their tracks are chapter markers
+- **energy_shape_first** — the pool is balanced across energy bands to realise a declared arc (wave, double-peak, dark-to-light)
+- **fresh_crate** — a debut showcase of the newest additions, grounded by a couple of anchor tracks
+
+Each proposed direction is feasibility-scored (pool fill, BPM-path viability, and a type-specific signal strength). Every direction requires a BPM-feasible path, so briefs that cannot actually be mixed are dropped. Feasible directions are then seed-rotated: the same seed reproduces the same picks, but different days (the seed defaults to the date, reproducible via `--stage1-seed`) surface different angles while the strongest directions still appear often. Each surviving direction becomes a Mix Canvas carrying a DIRECTION BRIEF that Stage 2 must honour as the concept's thesis.
+
+```sh
+./mixlab --genre house                    # mixed (default): directions blended with classic canvases
+./mixlab --genre house --directions off   # classic BPM-stratum canvases only
+./mixlab --genre house --directions only  # directions only (falls back to classic if none are feasible)
+```
+
+`--directions` is genre mode only and is ignored (with a stderr note) in playlist mode.
 
 ### Complete a mix from an existing Rekordbox playlist
 

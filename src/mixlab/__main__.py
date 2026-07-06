@@ -29,6 +29,7 @@ from mixlab.clustering import (
     sort_by_camelot,
 )
 from mixlab.config import CUSTOM_GENRES, GENRE_MAP, IGNORED_GENRES
+from mixlab.directions import generate_directions
 from mixlab.discord_client import send_report
 from mixlab.history import ConceptHistory, ConceptRecord, HistoryEntry, append_run, load_history, save_history
 from mixlab.llm import (
@@ -577,6 +578,7 @@ async def run(
     debug: bool = False,
     stage1_seed: int | None = None,
     mix_length: int | None = None,
+    directions: str = "mixed",
 ) -> None:
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
@@ -764,7 +766,29 @@ async def run(
     # Build Mix Canvases and select top candidates for Stage 2 (diversity-aware, deterministic).
     history = load_history(_HISTORY_PATH)
     all_canvases: list[MixCanvas] = [build_mix_canvas(c, tracks_by_id) for c in all_shortlists]
-    selected_canvases = select_canvases(all_canvases, history, mode=mode, debug=debug)
+
+    # Direction source pool (#53): the full genre-scoped pool before BPM-pool partitioning.
+    # For custom genres this is the merged cross-genre pool (genre_unplayed_track_ids_source
+    # == pool, with no outliers); for standard genres it is the flattened genre scope plus
+    # same-genre outliers. Directions are cross-strata by construction, so they draw from
+    # this whole pool rather than any single BPM stratum.
+    direction_pool = genre_unplayed_track_ids_source + genre_outliers
+
+    if directions == "off":
+        selected_canvases = select_canvases(all_canvases, history, mode=mode, debug=debug)
+    elif directions == "only":
+        selected_canvases = generate_directions(direction_pool, tracks_by_id, seed=effective_seed, max_directions=6)
+        if not selected_canvases:
+            print(
+                "--directions only: no feasible directions for this pool — falling back to classic canvas selection.",
+                file=sys.stderr,
+            )
+            selected_canvases = select_canvases(all_canvases, history, mode=mode, debug=debug)
+    else:  # "mixed"
+        direction_canvases = generate_directions(direction_pool, tracks_by_id, seed=effective_seed, max_directions=3)
+        classic_n = max(3, 6 - len(direction_canvases))
+        classic_selected = select_canvases(all_canvases, history, n=classic_n, mode=mode, debug=debug)
+        selected_canvases = classic_selected + direction_canvases
     if not selected_canvases:
         print("No canvases could be built — collection may be out of sync.", file=sys.stderr)
         sys.exit(1)
@@ -1127,6 +1151,18 @@ examples:
         ),
     )
     parser.add_argument(
+        "--directions",
+        choices=["mixed", "off", "only"],
+        default="mixed",
+        help=(
+            "Concept directions (#53), genre mode only. "
+            "mixed (default) — blend cross-strata creative directions (mood journeys, era "
+            "dialogues, label spotlights, artist threads, energy shapes, fresh crates) with "
+            "classic BPM-stratum canvases; off — classic canvases only; only — directions only "
+            "(falls back to classic when none are feasible). Ignored in playlist mode."
+        ),
+    )
+    parser.add_argument(
         "--feedback",
         action="store_true",
         help=(
@@ -1194,6 +1230,11 @@ examples:
                 "--deep ignored in playlist mode — critique pass not yet supported on the variant-scoring path.",
                 file=sys.stderr,
             )
+        if args.directions != "mixed":
+            print(
+                "--directions ignored in playlist mode — concept directions apply to genre runs only.",
+                file=sys.stderr,
+            )
         asyncio.run(
             run_playlist_mode(
                 args.playlist,
@@ -1233,6 +1274,7 @@ examples:
             debug=debug,
             stage1_seed=args.stage1_seed,
             mix_length=args.mix_length,
+            directions=args.directions,
         )
     )
 
