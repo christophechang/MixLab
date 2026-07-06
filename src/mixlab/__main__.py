@@ -31,11 +31,8 @@ from mixlab.config import CUSTOM_GENRES, GENRE_MAP, IGNORED_GENRES
 from mixlab.discord_client import send_report
 from mixlab.history import HistoryEntry, append_run, load_history
 from mixlab.llm import (
-    MAX_STAGE1_POOL_CUSTOM,
     make_cascade_state,
-    select_stage1_window,
     stage0_intent_brief,
-    stage1_concepts,
     stage2_curate_and_report,
     validate_stage2_output,
 )
@@ -600,7 +597,6 @@ async def run(
     # 5. Cluster and scope to the requested genre.
     is_custom = genre in CUSTOM_GENRES
     t_start = time.monotonic()
-    cascade_state = make_cascade_state()
     all_shortlists: list[MixConcept] = []
     custom_genre_sub_genres: list[str] | None = None
     genre_unplayed_track_ids_source: list[Track] = []
@@ -627,16 +623,9 @@ async def run(
         bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # precondition filter
         cfg = CUSTOM_GENRES[genre]
         custom_genre_sub_genres = cfg["genres"]
-        if os.environ.get("MIXLAB_STAGE1_LLM"):
-            stage1_pool = select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CUSTOM)
-            if len(stage1_pool) < len(bpm_sorted_pool):
-                print(f"  Selected {len(stage1_pool)}-track window from pool for Stage 1 (randomised per run).")
-            shortlists = await stage1_concepts(stage1_pool, genre, cascade_state, custom=True)
-            stage1_pool_size = len(stage1_pool)
-        else:
-            shortlists, stage1_stats = partition_pool_with_stats(bpm_sorted_pool, seed=effective_seed)
-            total_stage1_overflow += _report_stage1_window(stage1_stats.overflow_counts)
-            stage1_pool_size = len(bpm_sorted_pool)
+        shortlists, stage1_stats = partition_pool_with_stats(bpm_sorted_pool, seed=effective_seed)
+        total_stage1_overflow += _report_stage1_window(stage1_stats.overflow_counts)
+        stage1_pool_size = len(bpm_sorted_pool)
         if not shortlists:
             print(f"Stage 1: pool too small to partition — skipping {genre} (custom).", file=sys.stderr)
         all_shortlists.extend(shortlists)
@@ -655,17 +644,14 @@ async def run(
             print(f"No tracks found for genre '{genre}'.", file=sys.stderr)
             sys.exit(1)
 
-        # 6a. Stage 1 — deterministic path (or LLM path when MIXLAB_STAGE1_LLM=1).
+        # 6a. Stage 1 — deterministic partitioning.
         for genre_label, cluster_tracks in clusters.items():
             pools = partition_bpm_pools(cluster_tracks)
             sorted_tracks = sort_by_camelot(pools.core)
             sorted_tracks = [t for t in sorted_tracks if t.bpm > 0]  # precondition filter
             bpm_filtered_counts[genre_label] = len(sorted_tracks)
-            if os.environ.get("MIXLAB_STAGE1_LLM"):
-                shortlists = await stage1_concepts(sorted_tracks, genre_label, cascade_state)
-            else:
-                shortlists, stage1_stats = partition_pool_with_stats(sorted_tracks, seed=effective_seed)
-                total_stage1_overflow += _report_stage1_window(stage1_stats.overflow_counts)
+            shortlists, stage1_stats = partition_pool_with_stats(sorted_tracks, seed=effective_seed)
+            total_stage1_overflow += _report_stage1_window(stage1_stats.overflow_counts)
             if not shortlists:
                 print(f"Stage 1: pool too small to partition — skipping {genre_label}.", file=sys.stderr)
                 continue
@@ -674,17 +660,12 @@ async def run(
         # Outliers within this genre scope — shortlist as Misc.
         genre_outliers = [t for t in outliers if t.genre.lower() == genre.lower()]
         same_genre_outlier_count = len(genre_outliers)
-        if os.environ.get("MIXLAB_STAGE1_LLM"):
-            # LLM path: preserve original threshold exactly
-            if len(genre_outliers) >= 4:
-                all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc", cascade_state))
-        else:
-            # Deterministic path: filter bpm<=0, use ABSOLUTE_MIN threshold.
-            # Use a local variable — do NOT reassign genre_outliers (used later for XML export).
-            bpm_filtered_outliers = [t for t in genre_outliers if t.bpm > 0]
-            if len(bpm_filtered_outliers) >= ABSOLUTE_MIN:
-                shortlists = partition_pool(bpm_filtered_outliers, seed=effective_seed)
-                all_shortlists.extend(shortlists)
+        # Deterministic path: filter bpm<=0, use ABSOLUTE_MIN threshold.
+        # Use a local variable — do NOT reassign genre_outliers (used later for XML export).
+        bpm_filtered_outliers = [t for t in genre_outliers if t.bpm > 0]
+        if len(bpm_filtered_outliers) >= ABSOLUTE_MIN:
+            shortlists = partition_pool(bpm_filtered_outliers, seed=effective_seed)
+            all_shortlists.extend(shortlists)
 
         genre_unplayed_track_ids_source = [t for cluster_tracks in clusters.values() for t in cluster_tracks]
 

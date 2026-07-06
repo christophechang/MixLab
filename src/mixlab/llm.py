@@ -59,10 +59,6 @@ from mixlab.models import (
 
 _ARC_TYPE_VALUES: frozenset[str] = frozenset(get_args(ArcType))
 
-_MAX_TRACKS_PER_CALL = 40
-_MAX_TRACKS_PER_CALL_CUSTOM = 60  # larger chunks for custom multi-genre pools
-MAX_STAGE1_POOL_CUSTOM = 120  # random window size for custom pools (2 chunks × 60 = 2 API calls)
-MIN_SHORTLIST_TRACKS = 8  # Stage 1: minimum candidates per pool
 _MIN_CONCEPT_TRACKS = 4  # Stage 2: minimum tracks in a final curated set
 _STAGE2_CAP = 6  # max shortlists sent to Stage 2
 _STAGE2_CANDIDATE_POOL = 12  # top N by size to sample from (ensures variety across runs)
@@ -81,11 +77,11 @@ def _strip_thinking(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Stage 1 — candidate shortlisting (provider cascade)
+# Stage 1 — candidate shortlisting (provider cascade for Stage 0 only)
 # ---------------------------------------------------------------------------
 
-# DEPRECATED (issue #17): _STAGE1_SYSTEM*, stage1_concepts, and select_stage1_window
-# are kept for the 30-day soak period behind MIXLAB_STAGE1_LLM=1. Remove after soak.
+# _STAGE1_SYSTEM is used as default system prompt for cascade providers, which are invoked
+# by Stage 0 intent extraction (playlist mode) and previously by deprecated Stage 1 path.
 _STAGE1_SYSTEM = """\
 You are a music data analyst pre-screening a DJ's track collection to build candidate shortlists for mix concepts.
 
@@ -107,53 +103,6 @@ Give each shortlist a rough descriptive title (e.g. "Deep 122 BPM / 4A–7A Pool
 Some tracks include supplementary metadata: `energy:N/8` is a Mixed in Key automated score (0=lowest, 8=highest) and can help signal intensity. Treat it as a useful hint when present — not all tracks will have it, and its absence says nothing about the track's quality or suitability. When Year is present, you may form era-coherent groupings (e.g. a 1994–1997 pool alongside a 2018–present pool) as an alternative dimension to BPM-centre variation — but only when the material clearly separates into eras.
 
 Respond ONLY with a JSON array matching this schema:
-[{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]\
-"""
-
-# Custom genre variant: larger shortlists (20-25) to give Stage 2 more material to discard.
-_STAGE1_SYSTEM_CUSTOM = """\
-You are a music data analyst pre-screening a DJ's track collection to build candidate shortlists for mix concepts.
-
-Your task is purely technical pre-screening — not creative curation.
-
-This pool spans multiple related sub-genres. Tracks from different sub-genres may appear together.
-
-For each shortlist you create:
-- Group tracks that are plausibly technically compatible: similar BPM (±6 BPM within the pool) and harmonically \
-related keys (adjacent or nearby Camelot positions).
-- Each shortlist should contain 20–25 candidate tracks that a DJ could plausibly draw from for one mix concept.
-- Generate 3–5 distinct shortlists with different BPM centres or key characters so they serve different mood directions. \
-If the material only supports 1 or 2 distinct shortlists, produce what the material supports — do not pad. \
-If no coherent shortlist of 8+ tracks can be formed, return an empty array [].
-- Do NOT make final ordering decisions. Do NOT decide openers or closers. Simply group technically compatible tracks.
-- Exclude obvious outliers: tracks more than 8 BPM from the group median, or in keys with no harmonic relationship \
-to the rest of the pool.
-
-Give each shortlist a rough descriptive title (e.g. "Deep 122 BPM / 4A–7A Pool") and a one-line sonic mood.
-
-Some tracks include supplementary metadata: `energy:N/8` is a Mixed in Key automated score (0=lowest, 8=highest) and can help signal intensity. Treat it as a useful hint when present — not all tracks will have it, and its absence says nothing about the track's quality or suitability. When Year is present, you may form era-coherent groupings as an alternative dimension to BPM-centre variation — but only when the material clearly separates into eras.
-
-Respond ONLY with a JSON array matching this schema:
-[{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]\
-"""
-
-
-_STAGE1_SYSTEM_PLAYLIST = """\
-You are a music data analyst pre-screening a DJ's track collection to build candidate shortlists for a playlist completion concept.
-
-Tracks marked [seed] come from an existing playlist and represent the intended musical direction. Treat them as strong candidates — but group by BPM and harmonic compatibility above all else. A seed track that is an outlier (more than 8 BPM from the group median, or in a harmonically unrelated key) should still be excluded from any group where it does not fit.
-
-For each shortlist:
-- Group tracks that are plausibly technically compatible: similar BPM (±6 BPM within the pool) and harmonically related keys (adjacent or nearby Camelot positions).
-- Each shortlist should contain 15–25 candidate tracks.
-- Generate 1–3 distinct shortlists. If the material only supports one coherent group, produce one.
-- Do NOT make final ordering decisions. Simply group technically compatible tracks.
-
-Give each shortlist a rough descriptive title and a one-line sonic mood.
-
-Some tracks include supplementary metadata: `energy:N/8` is a Mixed in Key score. [seed] marks tracks from the source playlist.
-
-Respond ONLY with a JSON array:
 [{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]\
 """
 
@@ -621,112 +570,6 @@ class CascadeState:
 
 def make_cascade_state() -> CascadeState:
     return CascadeState()
-
-
-def _print_stage1_provider_summary(
-    provider_name: str,
-    genre: str,
-    input_track_count: int,
-    parsed: list[MixConcept],
-    cleaned: list[MixConcept],
-    kept: list[MixConcept],
-) -> None:
-    print(
-        f"Stage 1 provider: {provider_name} | genre={genre} | input={input_track_count} tracks | "
-        f"parsed={len(parsed)} | cleaned={len(cleaned)} | kept={len(kept)}"
-    )
-    for raw_concept, cleaned_concept in zip(parsed, cleaned, strict=False):
-        status = "kept" if len(cleaned_concept.track_ids) >= MIN_SHORTLIST_TRACKS else "dropped (<8)"
-        print(
-            f"  - {cleaned_concept.title} | raw={len(raw_concept.track_ids)} | "
-            f"kept={len(cleaned_concept.track_ids)} | {status}"
-        )
-    if not cleaned:
-        print("  - no concepts returned")
-
-
-def _print_stage1_provider_attempt(provider_name: str, genre: str, input_track_count: int) -> None:
-    print(f"Stage 1 trying provider: {provider_name} | genre={genre} | input={input_track_count} tracks")
-
-
-async def _call_stage1_once(
-    tracks: list[Track],
-    genre: str,
-    state: CascadeState,
-    custom: bool = False,
-    seed_ids: frozenset[str] | None = None,
-) -> list[MixConcept]:
-    alias_to_id, id_to_alias = _make_alias_map(tracks)
-    prompt = f"Genre: {genre}\n\nTracks:\n{_tracks_to_text(tracks, seed_ids=seed_ids, id_to_alias=id_to_alias)}"
-    system = _STAGE1_SYSTEM_PLAYLIST if seed_ids is not None else _STAGE1_SYSTEM_CUSTOM if custom else _STAGE1_SYSTEM
-
-    for _ in range(len(_CASCADE)):
-        provider = _CASCADE[state.index]
-        try:
-            _print_stage1_provider_attempt(provider.__name__, genre, len(tracks))
-            result = await provider(prompt, system=system)
-            if result is None:  # provider not configured — skip silently, no failure counted
-                state.index = (state.index + 1) % len(_CASCADE)
-                continue
-            if not result.strip():  # provider returned empty content — treat as a failure
-                raise ValueError(f"Provider {provider.__name__} returned empty content.")
-            concepts = _parse_concepts(result)
-            # Map aliases back to real IDs. Aliases not in the map are hallucinated — drop them.
-            cleaned = [
-                MixConcept(
-                    title=c.title,
-                    mood=c.mood,
-                    track_ids=[alias_to_id[a] for a in c.track_ids if a in alias_to_id],
-                )
-                for c in concepts
-            ]
-            kept = [c for c in cleaned if len(c.track_ids) >= MIN_SHORTLIST_TRACKS]
-            _print_stage1_provider_summary(provider.__name__, genre, len(tracks), concepts, cleaned, kept)
-            state.consecutive_failures = 0
-            return kept
-        except Exception as exc:  # noqa: BLE001 — cascade
-            print(f"Provider {provider.__name__} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-            state.consecutive_failures += 1
-            if state.consecutive_failures >= len(_CASCADE):
-                raise RuntimeError(
-                    f"All Stage 1 providers failed — {state.consecutive_failures} consecutive failures "
-                    f"with no successful call."
-                ) from exc
-            state.index = (state.index + 1) % len(_CASCADE)
-
-    raise RuntimeError(f"All Stage 1 providers exhausted for genre '{genre}'.")
-
-
-async def stage1_concepts(  # DEPRECATED (issue #17) — remove after 30-day soak
-    cluster: list[Track],
-    genre: str,
-    state: CascadeState,
-    custom: bool = False,
-    seed_ids: frozenset[str] | None = None,
-) -> list[MixConcept]:
-    chunk_size = _MAX_TRACKS_PER_CALL_CUSTOM if custom else _MAX_TRACKS_PER_CALL
-    if len(cluster) <= chunk_size:
-        return await _call_stage1_once(cluster, genre, state, custom=custom, seed_ids=seed_ids)
-
-    concepts: list[MixConcept] = []
-    for i in range(0, len(cluster), chunk_size):
-        concepts.extend(
-            await _call_stage1_once(cluster[i : i + chunk_size], genre, state, custom=custom, seed_ids=seed_ids)
-        )
-    return concepts
-
-
-def select_stage1_window(tracks: list[Track], max_count: int) -> list[Track]:  # DEPRECATED (issue #17)
-    """Pick a random contiguous window of up to max_count tracks from a Camelot-sorted pool.
-
-    Each run starts at a different position in the sorted list, giving variety across runs
-    while keeping Stage 1 input small enough to avoid LLM rate limits.
-    The window is a coherent BPM/key slice because the input is Camelot-sorted.
-    """
-    if len(tracks) <= max_count:
-        return tracks
-    start = random.randint(0, len(tracks) - max_count)
-    return tracks[start : start + max_count]
 
 
 def _format_duration(secs: int) -> str:
