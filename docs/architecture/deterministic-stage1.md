@@ -1331,3 +1331,56 @@ Document `MIXLAB_STAGE1_LLM` in `.env.example`.
    `partition_pool()` will use BPM + Camelot only for clustering. If sub-genre
    coherence matters more than BPM proximity for a given custom genre, a future
    extension can add a `sub_genre_weight` parameter. Out of scope for v1.
+
+---
+
+## Post-v1.2 amendment: seeded windowing (issue #48)
+
+The v1 implementation had two escape hatches that let shortlists exceed
+`MAX_SHORTLIST`: the `n_groups=1` fallback returned up to 29 tracks intact, and
+the pool-level merge (`_resize_shortlists` tail) re-joined shortlists with no size
+cap — on an ~800-track pool that produced 5 shortlists of ~160 tracks each. The
+`seed` parameter was also inert (`_ = seed  # reserved`), so every run of a pool
+was byte-identical with no run-to-run exploration. Issue #48 closes both.
+
+**Final windowing step.** After Step 4 sizing enforcement (and equally on the
+`n_groups=1` and `< MIN_SHORTLIST` early-exit paths), every emitted shortlist whose
+length exceeds `MAX_SHORTLIST` is windowed down to exactly `MAX_SHORTLIST` tracks:
+
+- **Spine (deterministic).** The `MIN_SHORTLIST` (15) most-central tracks are kept
+  unconditionally. Centrality is the same measure Step 4 Attempt 3 uses
+  (`bpm_norm + camelot_norm`, tie-broken by `track_id`), now factored into the
+  module-level helper `_centrality_rank(tracks) -> list[Track]` that both callers
+  share.
+- **Sampled fill.** The remaining `MAX_SHORTLIST - MIN_SHORTLIST` (10) slots are
+  filled by sampling without replacement from the non-spine remainder using a
+  per-shortlist derived stream `random.Random(seed_used * 1000003 + shortlist_index)`
+  (so shortlists don't share a sequence). The final window is returned in BPM-sorted
+  order by `(bpm, track_id)`.
+- **Overflow.** The unsampled remainder is that shortlist's overflow — reported, not
+  attached anywhere.
+
+**`PartitionStats` and the new entry point.** `partition_pool_with_stats(tracks, *,
+seed=None) -> tuple[list[MixConcept], PartitionStats]` holds the full logic;
+`partition_pool` is now a thin wrapper returning just the concepts (all existing call
+sites and tests are unchanged). `PartitionStats` carries `overflow_counts` (one entry
+per emitted shortlist, in output order; 0 when no windowing was applied) and
+`seed_used` (the seed that actually drove sampling).
+
+**Seed derivation.** When `seed is None`, `seed_used = int(datetime.date.today()
+.strftime("%Y%m%d"))` — resolving open question §10.1 in favour of a date-derived
+default layered under the explicit `--stage1-seed` flag. `run()` in `__main__.py`
+resolves the effective seed once and prints it at run start:
+`Stage 1 seed: {seed} (reproduce with --stage1-seed {seed})`. Same pool + same seed is
+byte-identical; different seeds generally differ for oversized pools. Per windowed
+shortlist a stderr note is emitted (`Stage 1 window: shortlist {i} capped at 25
+tracks ({overflow} overflow, rotated by seed)`), and the total overflow appears in the
+pipeline summary as `- Stage 1 overflow (tracks beyond windows): {n}`.
+
+**Contract change.** The 15–25 contract is now enforced *unconditionally*. The v1
+exceptions no longer stand: the `n_groups=1` fallback's "up to 29 tracks accepted"
+(§3 docstring, §4 uniform-spread fallback) and the "pool-level merge may exceed
+`MAX_SHORTLIST`" note (§9) are superseded — any such oversize is windowed before
+emission. Note this applies at the `partition_pool` boundary; the internal
+`_resize_shortlists` helper may still transiently produce oversize shortlists (its
+direct unit tests still document that), which the windowing step then caps.

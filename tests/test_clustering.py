@@ -12,6 +12,7 @@ from mixlab.clustering import (
     MIN_POOL_COUNT,
     MIN_SHORTLIST,
     _camelot_components,
+    _centrality_rank,
     _era_split,
     _find_bpm_peaks,
     _has_vocal_token,
@@ -26,6 +27,7 @@ from mixlab.clustering import (
     partition_bpm_pools,
     partition_outliers,
     partition_pool,
+    partition_pool_with_stats,
     score_anchors,
     score_canvas,
     select_canvases,
@@ -769,13 +771,42 @@ def test_select_canvases_novelty_penalty() -> None:
     assert s.novelty < 1.0  # penalised by history
 
 
-def test_select_canvases_returns_all_when_fewer_than_n() -> None:
+def test_select_canvases_three_candidates_returns_three() -> None:
+    # #48: the forward-everything branch is gone. With 3 candidates, n_effective =
+    # min(6, max(3, ceil(0.75*3))) = 3, so all three still survive the greedy loop —
+    # 3 is the floor below which nothing is dropped.
     from mixlab.models import MixCanvas
 
     canvases = [_rich_canvas(f"c{i}", [f"T{i}{j:02d}" for j in range(5)]) for i in range(3)]
     assert all(isinstance(c, MixCanvas) for c in canvases)
     selected = select_canvases(canvases, ConceptHistory(), n=6)  # type: ignore[arg-type]
     assert len(selected) == 3
+
+
+def test_select_canvases_four_candidates_drops_weakest_returns_three() -> None:
+    # #48: n_effective = min(6, max(3, ceil(0.75*4))) = 3 → the weakest of 4 is dropped.
+    from mixlab.models import MixCanvas
+
+    strong = [_rich_canvas(f"s{i}", [f"S{i}{j:02d}" for j in range(20)]) for i in range(3)]
+    weak = _rich_canvas("weak", ["W000"])  # 1-track core → floor multiplier + weak scores
+    canvases = [*strong, weak]
+    assert all(isinstance(c, MixCanvas) for c in canvases)
+    selected = select_canvases(canvases, ConceptHistory(), n=6)  # type: ignore[arg-type]
+    assert len(selected) == 3
+    assert "weak" not in {c.canvas_id for c in selected}
+
+
+def test_select_canvases_six_candidates_drops_weakest_returns_five() -> None:
+    # #48: n_effective = min(6, max(3, ceil(0.75*6))) = 5 → exactly one (the weakest) drops.
+    from mixlab.models import MixCanvas
+
+    strong = [_rich_canvas(f"s{i}", [f"S{i}{j:02d}" for j in range(20)]) for i in range(5)]
+    weak = _rich_canvas("weak", ["W000"])
+    canvases = [*strong, weak]
+    assert all(isinstance(c, MixCanvas) for c in canvases)
+    selected = select_canvases(canvases, ConceptHistory(), n=6)  # type: ignore[arg-type]
+    assert len(selected) == 5
+    assert "weak" not in {c.canvas_id for c in selected}
 
 
 # ---------------------------------------------------------------------------
@@ -1509,14 +1540,25 @@ def test_partition_pool_small_but_above_absolute_min_returns_single_shortlist() 
     assert len(result[0].track_ids) == ABSOLUTE_MIN + 1
 
 
-def test_partition_pool_n_groups_one_fallback_no_peaks_returns_single_shortlist_up_to_29_tracks() -> None:
-    # 15–29 tracks with BPM spread ≥ 4.0 but no peaks → n_groups = 1 → single shortlist.
+def test_partition_pool_n_groups_one_fallback_no_peaks_returns_single_shortlist() -> None:
+    # 15–25 tracks with BPM spread ≥ 4.0 but no peaks → n_groups = 1 → single shortlist.
     # Spread tracks linearly across a range that yields monotone histogram (no interior peak).
-    # 20 tracks from 165 to 184 BPM in 1-BPM steps.
+    # 20 tracks from 165 to 184 BPM in 1-BPM steps → within MAX_SHORTLIST, no windowing.
     tracks = [_pt(track_id=str(i), bpm=165.0 + i) for i in range(20)]
     result = partition_pool(tracks)
     # n_groups = min(5, 20//15) = 1 → single shortlist returned immediately.
     assert len(result) == 1
+
+
+def test_partition_pool_n_groups_one_fallback_oversized_now_windowed_to_max() -> None:
+    # #48 contract change: the n_groups=1 fallback used to return up to 29 tracks intact
+    # (4 over MAX_SHORTLIST). Seeded windowing now enforces the 15–25 ceiling here too.
+    # 28 tracks in 1-BPM steps → monotone histogram → no peaks → n_groups=min(5,28//15)=1.
+    tracks = [_pt(track_id=f"{i:02d}", bpm=165.0 + i) for i in range(28)]
+    concepts, stats = partition_pool_with_stats(tracks, seed=7)
+    assert len(concepts) == 1
+    assert len(concepts[0].track_ids) == MAX_SHORTLIST
+    assert stats.overflow_counts == [28 - MAX_SHORTLIST]
 
 
 def test_partition_pool_n_groups_one_fallback_bypasses_step4_peaks_path_same_size_does_not() -> None:
@@ -2308,3 +2350,97 @@ def test_partition_pool_custom_genre_pool_respects_sub_genre_coherence() -> None
     all_ids = {tid for c in result for tid in c.track_ids}
     expected = {f"G1_{i}" for i in range(25)} | {f"G2_{i}" for i in range(25)}
     assert all_ids == expected
+
+
+# ---------------------------------------------------------------------------
+# Seeded final windowing — partition_pool_with_stats (issue #48)
+# ---------------------------------------------------------------------------
+
+
+def _gaussian_pool(n: int = 800, *, rng_seed: int = 42) -> list[Track]:
+    """Build an n-track pool with a Gaussian BPM mixture (deterministic local RNG).
+
+    Mirrors the real-world oversubscribed-pool case that produced 5×160-track
+    shortlists before #48: a large single-genre pool whose Camelot/BPM structure
+    collapses to a few very large clusters.
+    """
+    import random as _random
+
+    local = _random.Random(rng_seed)
+    keys = [f"{num}{mode}" for num in range(1, 13) for mode in "AB"]
+    pool = [
+        _pt(
+            track_id=f"{i:04d}",
+            bpm=round(local.gauss(125, 8) if i % 3 else local.gauss(132, 5), 1),
+            camelot_key=local.choice(keys),
+            year=local.choice([None, *range(1992, 2026)]),
+        )
+        for i in range(n)
+    ]
+    return [t for t in pool if t.bpm > 60]
+
+
+def test_partition_pool_large_pool_all_shortlists_within_max_and_overflow_accounts_for_all() -> None:
+    # #48: an 800-track pool must emit 3–5 shortlists, ALL <= MAX_SHORTLIST, and the
+    # reported overflow must account for every track dropped by windowing.
+    pool = _gaussian_pool(800)
+    concepts, stats = partition_pool_with_stats(sorted(pool, key=lambda t: t.bpm), seed=1)
+    assert MIN_POOL_COUNT <= len(concepts) <= MAX_POOL_COUNT
+    assert all(len(c.track_ids) <= MAX_SHORTLIST for c in concepts)
+    assert len(stats.overflow_counts) == len(concepts)
+    emitted = sum(len(c.track_ids) for c in concepts)
+    assert sum(stats.overflow_counts) == len(pool) - emitted
+
+
+def test_partition_pool_same_seed_identical_two_seeds_differ_on_oversized_pool() -> None:
+    # #48: reproducibility (same seed → identical) plus run-to-run exploration
+    # (different seeds → at least one shortlist differs) on an oversized pool.
+    pool = sorted(_gaussian_pool(800), key=lambda t: t.bpm)
+    a1, _ = partition_pool_with_stats(pool, seed=1)
+    a2, _ = partition_pool_with_stats(pool, seed=1)
+    b, _ = partition_pool_with_stats(pool, seed=2)
+    assert [c.track_ids for c in a1] == [c.track_ids for c in a2]
+    assert [c.track_ids for c in a1] != [c.track_ids for c in b]
+
+
+def test_partition_pool_small_pool_no_windowing_overflow_zero_and_output_matches_legacy() -> None:
+    # #48: a pool with no oversized shortlists must have overflow_counts all zero and
+    # produce output identical to the plain partition_pool wrapper (pre-change behaviour
+    # preserved for the common case). Exercised on two typical scenarios.
+    for tracks in (_typical_pool(80), _typical_pool(60, base_bpm=120.0)):
+        concepts, stats = partition_pool_with_stats(tracks, seed=99)
+        assert all(oc == 0 for oc in stats.overflow_counts)
+        assert all(len(c.track_ids) <= MAX_SHORTLIST for c in concepts)
+        legacy = partition_pool(tracks, seed=99)
+        assert [c.track_ids for c in concepts] == [c.track_ids for c in legacy]
+
+
+def test_window_shortlist_spine_present_for_any_seed() -> None:
+    # #48 spine property: the MIN_SHORTLIST most-central tracks of an oversized shortlist
+    # appear in the emitted window regardless of seed (only the sampled fill varies).
+    import random as _random
+
+    from mixlab.clustering import _window_shortlist
+
+    oversized = [_pt(track_id=f"{i:03d}", bpm=170.0 + (i % 25) * 0.4, camelot_key="8A") for i in range(40)]
+    spine_ids = {t.track_id for t in _centrality_rank(oversized)[:MIN_SHORTLIST]}
+    for seed in (1, 2, 3):
+        window, overflow = _window_shortlist(oversized, _random.Random(seed))
+        window_ids = {t.track_id for t in window}
+        assert len(window) == MAX_SHORTLIST
+        assert spine_ids <= window_ids
+        assert len(overflow) == 40 - MAX_SHORTLIST
+        # window is BPM-sorted by (bpm, track_id)
+        assert [(t.bpm, t.track_id) for t in window] == sorted((t.bpm, t.track_id) for t in window)
+
+
+def test_window_shortlist_different_seeds_vary_the_fill() -> None:
+    # #48: the sampled (non-spine) fill differs across seeds so runs explore the pool.
+    import random as _random
+
+    from mixlab.clustering import _window_shortlist
+
+    oversized = [_pt(track_id=f"{i:03d}", bpm=170.0 + (i % 25) * 0.4, camelot_key="8A") for i in range(40)]
+    w1, _ = _window_shortlist(oversized, _random.Random(1))
+    w2, _ = _window_shortlist(oversized, _random.Random(2))
+    assert {t.track_id for t in w1} != {t.track_id for t in w2}

@@ -14,6 +14,7 @@ from mixlab.__main__ import (
     _format_report_context,
     _print_availability,
     _print_pipeline_summary,
+    _report_stage1_window,
     _validate_range_args,
     _warn_intent,
     run,
@@ -336,6 +337,39 @@ def test_print_pipeline_summary_outputs_compact_block(capsys: pytest.CaptureFixt
         "- Stage 1 shortlists: 2\n"
         "- Stage 2 shortlists sent: 2\n\n"
     )
+
+
+def test_print_pipeline_summary_includes_overflow_line_when_nonzero(capsys: pytest.CaptureFixture[str]) -> None:
+    # #48: the overflow line appears only when windowing dropped tracks (default 0 omits it,
+    # keeping the compact-block test above unchanged).
+    _print_pipeline_summary(
+        collection_count=2328,
+        unplayed_count=101,
+        used_catalog_api=True,
+        genre_cluster_counts={"House": 800},
+        bpm_filtered_counts={"House": 800},
+        same_genre_outlier_count=0,
+        stage1_shortlist_count=5,
+        stage2_shortlist_count=5,
+        stage1_overflow=675,
+    )
+    out = capsys.readouterr().out
+    assert "- Stage 1 overflow (tracks beyond windows): 675\n" in out
+    # Ordered between the shortlist count and the stage-2 line.
+    assert out.index("Stage 1 shortlists") < out.index("Stage 1 overflow") < out.index("Stage 2 shortlists sent")
+
+
+def test_report_stage1_window_notes_only_capped_shortlists_and_totals(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # #48: one stderr note per windowed shortlist; zero-overflow shortlists are silent.
+    total = _report_stage1_window([0, 12, 0, 3])
+    assert total == 15
+    err = capsys.readouterr().err
+    assert "shortlist 1 capped at 25 tracks (12 overflow, rotated by seed)" in err
+    assert "shortlist 3 capped at 25 tracks (3 overflow, rotated by seed)" in err
+    assert "shortlist 0" not in err
+    assert "shortlist 2" not in err
 
 
 # ---------------------------------------------------------------------------

@@ -19,11 +19,14 @@ provenance, and pipeline overview.
 
 from __future__ import annotations
 
+import datetime
 import math
+import random
 import re
 import statistics
 import sys
 from collections import Counter, deque
+from dataclasses import dataclass
 
 from mixlab.config import CustomGenre
 from mixlab.history import ConceptHistory, similarity_breakdown_to_history, similarity_to_history
@@ -1014,20 +1017,29 @@ def select_canvases(
     mode: TrackMode | None = None,
     debug: bool = False,
 ) -> list[MixCanvas]:
-    """Score and pick up to n canvases using diversity-aware deterministic selection.
+    """Score and pick canvases using diversity-aware deterministic selection.
 
     ``mode`` selects the weight table from :data:`CANVAS_SCORE_WEIGHTS_BY_MODE`.
     When ``None``, falls back to :data:`DEFAULT_CANVAS_WEIGHTS` (kept stable for
     legacy callers / tests that predate the mode-aware split in #24).
+
+    The number actually selected is ``n_effective = min(n, max(3, ceil(0.75 *
+    len(canvases))))`` — so a small candidate set still gets the weakest member
+    dropped rather than all forwarded verbatim (3→3, 4→3, 5→4, 6→5, 8+→n). The
+    greedy overlap-aware loop always runs, so novelty and distinctiveness scores
+    have real consequence even when only a handful of candidates exist (#48).
     """
     if not canvases:
         return []
 
     weights = CANVAS_SCORE_WEIGHTS_BY_MODE[mode] if mode is not None else DEFAULT_CANVAS_WEIGHTS
 
+    n_effective = min(n, max(3, math.ceil(0.75 * len(canvases))))
+
     if debug:
         print(
-            f"\n[DEBUG select_canvases] {len(canvases)} candidates → selecting up to {n}  mode={mode or 'default'}",
+            f"\n[DEBUG select_canvases] {len(canvases)} candidates → selecting up to "
+            f"{n_effective} (cap n={n})  mode={mode or 'default'}",
             file=sys.stderr,
         )
         for c in canvases:
@@ -1038,22 +1050,11 @@ def select_canvases(
                 file=sys.stderr,
             )
 
-    if len(canvases) <= n:
-        for canvas in canvases:
-            canvas.score = score_canvas(canvas, history, frozenset(), weights=weights)
-        canvases.sort(key=lambda c: c.score.overall, reverse=True)
-        if debug:
-            print("\n[DEBUG final selection order (all candidates fit)]", file=sys.stderr)
-            for i, c in enumerate(canvases, 1):
-                print(f"\n[DEBUG pick #{i}] {c.canvas_id}  overall={c.score.overall:.3f}", file=sys.stderr)
-                _emit_canvas_score_debug(c, c.score, history, frozenset())
-        return canvases
-
     picked: list[MixCanvas] = []
     remaining = list(canvases)
     picked_core_ids: frozenset[str] = frozenset()
 
-    while remaining and len(picked) < n:
+    while remaining and len(picked) < n_effective:
         # Score all remaining with current overlap context
         for canvas in remaining:
             canvas.score = score_canvas(canvas, history, picked_core_ids, weights=weights)
@@ -1357,6 +1358,36 @@ def _era_split(
     return era_old, era_new
 
 
+def _centrality_rank(tracks: list[Track]) -> list[Track]:
+    """Rank tracks by ascending centrality, tie-broken by track_id (lexicographic).
+
+    Centrality = ``bpm_norm + camelot_norm`` where ``bpm_norm`` is the track's absolute
+    BPM deviation from the shortlist median divided by the shortlist's BPM range, and
+    ``camelot_norm`` is the Camelot-wheel distance to the shortlist's dominant key
+    (normalised by 7.0; 1.0 for unparseable keys or when no dominant key exists). Lower
+    is more central. Used by Step 4 Attempt 3 (oversize trim) and the seeded final
+    windowing spine (#48) — the ranking is identical for both callers.
+    """
+    parsed_keys = [t.camelot_key.upper() for t in tracks if t.camelot_key and _CAMELOT_RE.match(t.camelot_key)]
+    dominant_key: str | None = min(parsed_keys, key=lambda k: (-Counter(parsed_keys)[k], k)) if parsed_keys else None
+    bpm_vals = [t.bpm for t in tracks]
+    bpm_range = max(bpm_vals) - min(bpm_vals)
+    if bpm_range < 1e-6:
+        bpm_range = 1.0
+    med = _median_bpm(tracks)
+
+    def _centrality(t: Track) -> tuple[float, str]:
+        bpm_norm = abs(t.bpm - med) / bpm_range
+        if dominant_key is None:
+            camelot_norm = 1.0
+        else:
+            d = camelot_distance(t.camelot_key.upper(), dominant_key)
+            camelot_norm = 1.0 if d >= 999 else d / 7.0
+        return (bpm_norm + camelot_norm, t.track_id)
+
+    return sorted(tracks, key=_centrality)
+
+
 def _resize_shortlists(shortlists: list[list[Track]]) -> list[list[Track]]:
     """Step 4: sizing enforcement — 3 iterations of oversized+undersized passes,
     then pool-level MIN/MAX_POOL_COUNT adjustments.
@@ -1410,32 +1441,7 @@ def _resize_shortlists(shortlists: list[list[Track]]) -> list[list[Track]]:
                 continue
 
             # Attempt 4: centrality trim + attach remainder
-            parsed_keys = [t.camelot_key.upper() for t in snap_sl if t.camelot_key and _CAMELOT_RE.match(t.camelot_key)]
-            dominant_key: str | None = (
-                min(parsed_keys, key=lambda k: (-Counter(parsed_keys)[k], k)) if parsed_keys else None
-            )
-            bpm_vals = [t.bpm for t in snap_sl]
-            bpm_range = max(bpm_vals) - min(bpm_vals)
-            if bpm_range < 1e-6:
-                bpm_range = 1.0
-            med = _median_bpm(snap_sl)
-
-            def _centrality(
-                t: Track,
-                *,
-                _med: float = med,
-                _bpm_range: float = bpm_range,
-                _dominant_key: str | None = dominant_key,
-            ) -> tuple[float, str]:
-                bpm_norm = abs(t.bpm - _med) / _bpm_range
-                if _dominant_key is None:
-                    camelot_norm = 1.0
-                else:
-                    d = camelot_distance(t.camelot_key.upper(), _dominant_key)
-                    camelot_norm = 1.0 if d >= 999 else d / 7.0
-                return (bpm_norm + camelot_norm, t.track_id)
-
-            ranked = sorted(snap_sl, key=_centrality)
+            ranked = _centrality_rank(snap_sl)
             trimmed = ranked[:MAX_SHORTLIST]
             remainder = ranked[MAX_SHORTLIST:]
             idx = live.index(snap_sl)
@@ -1591,29 +1597,83 @@ def _resize_shortlists(shortlists: list[list[Track]]) -> list[list[Track]]:
     return live
 
 
-def partition_pool(
+@dataclass
+class PartitionStats:
+    """Diagnostics for a :func:`partition_pool_with_stats` run.
+
+    ``overflow_counts`` has one entry per emitted shortlist (in output order): the number
+    of tracks dropped by the final windowing step, or 0 when no windowing was applied
+    (shortlist already within MAX_SHORTLIST). ``seed_used`` is the seed that actually
+    drove the sampling — the caller-supplied value, or the date-derived default.
+    """
+
+    overflow_counts: list[int]
+    seed_used: int
+
+
+def _window_shortlist(shortlist: list[Track], rng: random.Random) -> tuple[list[Track], list[Track]]:
+    """Window an oversized shortlist down to MAX_SHORTLIST tracks (#48).
+
+    The MIN_SHORTLIST most-central tracks (by :func:`_centrality_rank`) form a
+    deterministic spine. The remaining ``MAX_SHORTLIST - MIN_SHORTLIST`` slots are
+    filled by sampling without replacement from the rest using ``rng``. Returns
+    ``(window, overflow)`` where ``window`` is BPM-sorted (by ``(bpm, track_id)``) and
+    ``overflow`` is the unsampled remainder. Callers only invoke this when
+    ``len(shortlist) > MAX_SHORTLIST``.
+    """
+    ranked = _centrality_rank(shortlist)
+    spine = ranked[:MIN_SHORTLIST]
+    rest = ranked[MIN_SHORTLIST:]
+    fill_count = MAX_SHORTLIST - MIN_SHORTLIST
+    sampled = rng.sample(rest, fill_count) if len(rest) > fill_count else list(rest)
+    sampled_ids = {t.track_id for t in sampled}
+    overflow = [t for t in rest if t.track_id not in sampled_ids]
+    window = sorted(spine + sampled, key=lambda t: (t.bpm, t.track_id))
+    return window, overflow
+
+
+def partition_pool_with_stats(
     tracks: list[Track],
     *,
     seed: int | None = None,
-) -> list[MixConcept]:
-    """Partition a genre-scoped track pool into shortlists for Stage 2.
+) -> tuple[list[MixConcept], PartitionStats]:
+    """Partition a genre-scoped track pool into shortlists, with windowing diagnostics.
 
-    Returns 3–5 MixConcepts of 15–25 tracks each (see spec for edge-case exceptions).
-    Same pool + same seed → identical output. seed is reserved for future use (v1: no effect).
+    Same behaviour as :func:`partition_pool` but also returns a :class:`PartitionStats`
+    describing the seeded final windowing step (#48). Returns 3–5 MixConcepts of 15–25
+    tracks each; the 15–25 contract is now enforced unconditionally — any shortlist
+    exceeding MAX_SHORTLIST (including the n_groups=1 fallback's up-to-29 result and the
+    pool-level merge output) is windowed via :func:`_window_shortlist`.
+
+    Determinism: same pool + same seed → byte-identical output. When ``seed is None`` the
+    seed defaults to today's date as ``YYYYMMDD`` (an int), so a given day's runs
+    reproduce while different seeds explore different fills of the oversized shortlists.
+    Each shortlist samples from its own derived stream ``Random(seed * 1000003 + index)``.
     """
-    _ = seed  # reserved
+    seed_used = seed if seed is not None else int(datetime.date.today().strftime("%Y%m%d"))
+
+    def _finalise(final_shortlists: list[list[Track]]) -> tuple[list[MixConcept], PartitionStats]:
+        concepts: list[MixConcept] = []
+        overflow_counts: list[int] = []
+        for idx, sl in enumerate(final_shortlists):
+            if len(sl) > MAX_SHORTLIST:
+                window, overflow = _window_shortlist(sl, random.Random(seed_used * 1000003 + idx))
+                overflow_counts.append(len(overflow))
+                emitted = window
+            else:
+                overflow_counts.append(0)
+                emitted = sl
+            title, mood = _infer_shortlist_mood(emitted)
+            concepts.append(MixConcept(title=title, mood=mood, track_ids=[t.track_id for t in emitted]))
+        return concepts, PartitionStats(overflow_counts=overflow_counts, seed_used=seed_used)
 
     if len(tracks) < ABSOLUTE_MIN:
-        return []
+        return [], PartitionStats(overflow_counts=[], seed_used=seed_used)
 
     bpm_sorted = sorted(tracks, key=lambda t: (t.bpm, t.track_id))
 
-    def _make_concept(sl: list[Track]) -> MixConcept:
-        title, mood = _infer_shortlist_mood(sl)
-        return MixConcept(title=title, mood=mood, track_ids=[t.track_id for t in sl])
-
     if len(bpm_sorted) < MIN_SHORTLIST:
-        return [_make_concept(bpm_sorted)]
+        return _finalise([bpm_sorted])
 
     clusters: list[list[Track]]
     if bpm_sorted[-1].bpm - bpm_sorted[0].bpm < 4:
@@ -1623,7 +1683,7 @@ def partition_pool(
         if _peaks is None or len(_peaks) == 1:
             n_groups = min(MAX_POOL_COUNT, len(bpm_sorted) // MIN_SHORTLIST)
             if n_groups < 2:
-                return [_make_concept(bpm_sorted)]
+                return _finalise([bpm_sorted])
             size, rem = divmod(len(bpm_sorted), n_groups)
             clusters = []
             i = 0
@@ -1651,5 +1711,20 @@ def partition_pool(
     # Step 4: sizing enforcement
     final = _resize_shortlists(expanded)
 
-    # Steps 5–6: mood/title + MixConcept assembly
-    return [_make_concept(sl) for sl in final]
+    # Steps 5–6: seeded windowing + mood/title + MixConcept assembly
+    return _finalise(final)
+
+
+def partition_pool(
+    tracks: list[Track],
+    *,
+    seed: int | None = None,
+) -> list[MixConcept]:
+    """Partition a genre-scoped track pool into shortlists for Stage 2.
+
+    Returns 3–5 MixConcepts of 15–25 tracks each. Same pool + same seed → identical
+    output; a ``None`` seed defaults to today's date (see :func:`partition_pool_with_stats`,
+    which this wraps and which exposes the windowing diagnostics).
+    """
+    concepts, _stats = partition_pool_with_stats(tracks, seed=seed)
+    return concepts

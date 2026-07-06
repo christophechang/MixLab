@@ -14,6 +14,7 @@ from mixlab.cache import load_genre_cache, save_genre_cache
 from mixlab.client import fetch_mix_names, fetch_played_tracks
 from mixlab.clustering import (
     ABSOLUTE_MIN,
+    MAX_SHORTLIST,
     build_custom_genre_pool,
     build_mix_canvas,
     count_available_by_genre,
@@ -21,6 +22,7 @@ from mixlab.clustering import (
     partition_bpm_pools,
     partition_outliers,
     partition_pool,
+    partition_pool_with_stats,
     resolve_genre_clusters,
     select_canvases,
     sort_by_camelot,
@@ -183,6 +185,24 @@ def _format_pipeline_counts(counts: dict[str, int]) -> str:
     return ", ".join(f"{label}={count}" for label, count in counts.items()) if counts else "none"
 
 
+def _report_stage1_window(overflow_counts: list[int]) -> int:
+    """Print a per-shortlist stderr note for each windowed (capped) Stage 1 shortlist.
+
+    Returns the total number of overflow tracks (beyond the windows) across all
+    shortlists so the caller can surface it in the pipeline summary (#48).
+    """
+    total = 0
+    for i, overflow in enumerate(overflow_counts):
+        if overflow > 0:
+            print(
+                f"Stage 1 window: shortlist {i} capped at {MAX_SHORTLIST} tracks "
+                f"({overflow} overflow, rotated by seed)",
+                file=sys.stderr,
+            )
+            total += overflow
+    return total
+
+
 def _print_pipeline_summary(
     *,
     collection_count: int,
@@ -194,6 +214,7 @@ def _print_pipeline_summary(
     same_genre_outlier_count: int,
     stage1_shortlist_count: int,
     stage2_shortlist_count: int,
+    stage1_overflow: int = 0,
 ) -> None:
     print("Pipeline summary:")
     filter_label = pool_label if used_catalog_api else "eligible"
@@ -202,6 +223,8 @@ def _print_pipeline_summary(
     print(f"- Genre scope after BPM filter: {_format_pipeline_counts(bpm_filtered_counts)}")
     print(f"- Same-genre outliers considered: {same_genre_outlier_count}")
     print(f"- Stage 1 shortlists: {stage1_shortlist_count}")
+    if stage1_overflow:
+        print(f"- Stage 1 overflow (tracks beyond windows): {stage1_overflow}")
     print(f"- Stage 2 shortlists sent: {stage2_shortlist_count}")
     print()
 
@@ -583,6 +606,13 @@ async def run(
     genre_cluster_counts: dict[str, int] = {}
     bpm_filtered_counts: dict[str, int] = {}
     same_genre_outlier_count = 0
+    total_stage1_overflow = 0
+
+    # Resolve the effective Stage 1 seed once so every partition_pool call this run
+    # shares it (and the user can reproduce the exact partition). Defaults to today's
+    # date as YYYYMMDD when --stage1-seed is not supplied (#48).
+    effective_seed = stage1_seed if stage1_seed is not None else int(datetime.date.today().strftime("%Y%m%d"))
+    print(f"Stage 1 seed: {effective_seed} (reproduce with --stage1-seed {effective_seed})")
 
     if is_custom:
         pool = build_custom_genre_pool(genre, unplayed, CUSTOM_GENRES, GENRE_MAP)
@@ -603,7 +633,8 @@ async def run(
             shortlists = await stage1_concepts(stage1_pool, genre, cascade_state, custom=True)
             stage1_pool_size = len(stage1_pool)
         else:
-            shortlists = partition_pool(bpm_sorted_pool, seed=stage1_seed)
+            shortlists, stage1_stats = partition_pool_with_stats(bpm_sorted_pool, seed=effective_seed)
+            total_stage1_overflow += _report_stage1_window(stage1_stats.overflow_counts)
             stage1_pool_size = len(bpm_sorted_pool)
         if not shortlists:
             print(f"Stage 1: pool too small to partition — skipping {genre} (custom).", file=sys.stderr)
@@ -632,7 +663,8 @@ async def run(
             if os.environ.get("MIXLAB_STAGE1_LLM"):
                 shortlists = await stage1_concepts(sorted_tracks, genre_label, cascade_state)
             else:
-                shortlists = partition_pool(sorted_tracks, seed=stage1_seed)
+                shortlists, stage1_stats = partition_pool_with_stats(sorted_tracks, seed=effective_seed)
+                total_stage1_overflow += _report_stage1_window(stage1_stats.overflow_counts)
             if not shortlists:
                 print(f"Stage 1: pool too small to partition — skipping {genre_label}.", file=sys.stderr)
                 continue
@@ -650,7 +682,7 @@ async def run(
             # Use a local variable — do NOT reassign genre_outliers (used later for XML export).
             bpm_filtered_outliers = [t for t in genre_outliers if t.bpm > 0]
             if len(bpm_filtered_outliers) >= ABSOLUTE_MIN:
-                shortlists = partition_pool(bpm_filtered_outliers, seed=stage1_seed)
+                shortlists = partition_pool(bpm_filtered_outliers, seed=effective_seed)
                 all_shortlists.extend(shortlists)
 
         genre_unplayed_track_ids_source = [t for cluster_tracks in clusters.values() for t in cluster_tracks]
@@ -669,6 +701,7 @@ async def run(
             same_genre_outlier_count=same_genre_outlier_count,
             stage1_shortlist_count=0,
             stage2_shortlist_count=0,
+            stage1_overflow=total_stage1_overflow,
         )
         print("No shortlists generated — all tracks may have been excluded.", file=sys.stderr)
         sys.exit(1)
@@ -695,6 +728,7 @@ async def run(
         same_genre_outlier_count=same_genre_outlier_count,
         stage1_shortlist_count=stage1_shortlist_count,
         stage2_shortlist_count=len(selected_canvases),
+        stage1_overflow=total_stage1_overflow,
     )
 
     # 7. LLM Stage 2 — creative curation + full report (single Anthropic call).
@@ -1031,7 +1065,10 @@ examples:
         type=int,
         default=None,
         dest="stage1_seed",
-        help="Seed for deterministic Stage 1 tie-breaking. Default: None (stable sort).",
+        help=(
+            "Seed for the Stage 1 windowing of oversized pools. Same seed reproduces a prior run "
+            "(the effective seed is printed at run start). Default: derived from today's date."
+        ),
     )
     args = parser.parse_args()
     _validate_range_args(
