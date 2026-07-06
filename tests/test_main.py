@@ -904,3 +904,27 @@ def test_main_directions_ignored_in_playlist_mode_with_note(
     err = capsys.readouterr().err
     assert "--directions ignored in playlist mode" in err
     assert playlist_mock.await_args is not None
+
+
+# ---------------------------------------------------------------------------
+# main() — --intent works in playlist mode too (#54)
+# ---------------------------------------------------------------------------
+
+
+def test_main_playlist_mode_intent_no_longer_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--playlist combined with --intent must no longer print an 'ignored' warning,
+    and the intent text must be threaded through to run_playlist_mode."""
+    monkeypatch.setattr(
+        "sys.argv",
+        ["mixlab", "--playlist", "Monday", "--intent", "dark hypnotic late night warmup"],
+    )
+    playlist_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run_playlist_mode", playlist_mock):
+        main()
+    err = capsys.readouterr().err
+    assert "--intent ignored in playlist mode" not in err
+    assert playlist_mock.await_args is not None
+    assert playlist_mock.await_args.kwargs["intent"] == "dark hypnotic late night warmup"

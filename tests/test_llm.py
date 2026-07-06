@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import cast, get_args
+from typing import Literal, cast, get_args
 
 import httpx
 import pytest
@@ -17,6 +17,7 @@ from mixlab.models import (
     MixCanvas,
     MixConcept,
     Track,
+    Transition,
 )
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -958,9 +959,11 @@ async def test_stage2_genre_intent_block_absent_when_not_supplied(monkeypatch: p
 
 
 @respx.mock
-async def test_stage2_genre_intent_ignored_in_playlist_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Playlist mode runs Stage 0; --intent must be ignored even when threaded through."""
+async def test_stage2_genre_intent_present_in_playlist_mode_overrides_brief(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Playlist mode now honours --intent (#54): USER INTENT block appears after the DJ
+    INTENT BRIEF and states it overrides that brief on conflict."""
     from mixlab.llm import stage2_curate_and_report
+    from mixlab.models import IntentBrief
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     route = respx.post(_ANTHROPIC_URL).mock(
@@ -975,6 +978,16 @@ async def test_stage2_genre_intent_ignored_in_playlist_mode(monkeypatch: pytest.
         str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
         for i in range(1, 5)
     }
+    intent_brief = IntentBrief(
+        overall_vibe="A relentless rollers set.",
+        energy_shape="unclear",
+        risk_tolerance="medium",
+        is_coherent_set=True,
+        seed_analyses=[],
+        missing_roles=[],
+        strong_adjacencies=[],
+        bpm_range=(170.0, 178.0),
+    )
 
     await stage2_curate_and_report(
         shortlists,
@@ -982,13 +995,17 @@ async def test_stage2_genre_intent_ignored_in_playlist_mode(monkeypatch: pytest.
         playlist_name="Monday Night",
         seed_ids=frozenset({"1"}),
         seed_track_ids=["1"],
-        genre_intent="should not appear in playlist mode prompt",
+        intent_brief=intent_brief,
+        genre_intent="surprise me with something bold",
     )
 
     body = json.loads(route.calls[0].request.content)
     user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
-    assert "USER INTENT" not in user_prompt
-    assert "should not appear in playlist mode prompt" not in user_prompt
+    assert "USER INTENT" in user_prompt
+    assert "surprise me with something bold" in user_prompt
+    assert "OVERRIDES the inferred DJ INTENT BRIEF" in user_prompt
+    # USER INTENT must follow the Stage 0 DJ INTENT BRIEF, not precede it.
+    assert user_prompt.index("DJ INTENT BRIEF") < user_prompt.index("USER INTENT")
 
 
 @respx.mock
@@ -1417,10 +1434,11 @@ async def test_stage2_intent_parsed_signals_include_precedence_caveat(
 
 
 @respx.mock
-async def test_stage2_genre_intent_suppressed_in_playlist_mode(
+async def test_stage2_genre_intent_present_in_playlist_mode_without_brief(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When playlist_name is set, genre_intent must be ignored — USER INTENT block absent."""
+    """Playlist mode without an IntentBrief still surfaces --intent (#54): the USER INTENT
+    block appears (with no preceding DJ INTENT BRIEF to override)."""
     from mixlab.llm import stage2_curate_and_report
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
@@ -1442,7 +1460,11 @@ async def test_stage2_genre_intent_suppressed_in_playlist_mode(
 
     body = json.loads(route.calls[0].request.content)
     user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
-    assert "USER INTENT" not in user_prompt
+    assert "USER INTENT" in user_prompt
+    assert "dark and hypnotic" in user_prompt
+    # No IntentBrief was supplied, so the Stage 0 brief section itself (identified by its
+    # "Vibe:" field) must be absent — only the override sentence mentions "DJ INTENT BRIEF".
+    assert "Vibe:" not in user_prompt
 
 
 def test_parse_user_intent_negation_does_not_suppress_signal() -> None:
@@ -1457,6 +1479,46 @@ def test_parse_user_intent_negation_does_not_suppress_signal() -> None:
     mood = signals.get("mood", "")
     assert "dark" in mood
     assert "hypnotic" in mood
+
+
+# ---------------------------------------------------------------------------
+# _parse_user_intent — risk signal (#54)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_user_intent_safe_and_cautious_detected_as_low_risk() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("keep it safe and cautious, smooth transitions only")
+    assert signals.get("risk") == "low"
+
+
+def test_parse_user_intent_no_risks_phrase_detected_as_low_risk() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("no risks please, low risk only")
+    assert signals.get("risk") == "low"
+
+
+def test_parse_user_intent_bold_and_adventurous_detected_as_high_risk() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("go bold, be adventurous, take risky moves")
+    assert signals.get("risk") == "high"
+
+
+def test_parse_user_intent_surprise_me_phrase_detected_as_high_risk() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("surprise me with something weird")
+    assert signals.get("risk") == "high"
+
+
+def test_parse_user_intent_no_risk_keyword_leaves_risk_signal_absent() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("late-night radio showcase, dark and hypnotic")
+    assert "risk" not in signals
 
 
 @respx.mock
@@ -2336,6 +2398,146 @@ async def test_stage2_playlist_mode_returns_winner_first_with_labeled_titles(
         "adventurous (practicality: 0.60, anchor retention: 100%) — not selected."
     ) in report
     assert "Alternative strategies considered: practical" not in report
+    assert "Selection tolerance: low." in report
+
+
+# ---------------------------------------------------------------------------
+# _adventure_dividend (#54) — reward density for justified risky transitions
+# ---------------------------------------------------------------------------
+
+
+def _transition(risky: bool, risk_type: str) -> Transition:
+    return Transition(from_id="a", to_id="b", is_risky=risky, risk_type=risk_type)
+
+
+def test_adventure_dividend_no_risky_transitions_returns_zero() -> None:
+    from mixlab.llm import _adventure_dividend  # noqa: PLC2701
+
+    concept = MixConcept(title="T", mood="adventurous", track_ids=["1", "2"], transitions=[])
+    assert _adventure_dividend(concept) == 0.0
+
+
+def test_adventure_dividend_two_justified_returns_half() -> None:
+    from mixlab.llm import _adventure_dividend  # noqa: PLC2701
+
+    concept = MixConcept(
+        title="T",
+        mood="adventurous",
+        track_ids=["1", "2", "3"],
+        transitions=[
+            _transition(True, "chapter_pivot"),
+            _transition(True, "peak_impact"),
+        ],
+    )
+    assert _adventure_dividend(concept) == pytest.approx(0.5)
+
+
+def test_adventure_dividend_four_justified_caps_at_one() -> None:
+    from mixlab.llm import _adventure_dividend  # noqa: PLC2701
+
+    concept = MixConcept(
+        title="T",
+        mood="adventurous",
+        track_ids=["1", "2", "3", "4", "5"],
+        transitions=[
+            _transition(True, "chapter_pivot"),
+            _transition(True, "peak_impact"),
+            _transition(True, "deliberate_reset"),
+            _transition(True, "closer_move"),
+        ],
+    )
+    assert _adventure_dividend(concept) == pytest.approx(1.0)
+
+
+def test_adventure_dividend_two_justified_plus_cut_only_returns_quarter() -> None:
+    from mixlab.llm import _adventure_dividend  # noqa: PLC2701
+
+    concept = MixConcept(
+        title="T",
+        mood="adventurous",
+        track_ids=["1", "2", "3", "4"],
+        transitions=[
+            _transition(True, "chapter_pivot"),
+            _transition(True, "peak_impact"),
+            _transition(True, "cut_only"),
+        ],
+    )
+    assert _adventure_dividend(concept) == pytest.approx(0.25)
+
+
+# ---------------------------------------------------------------------------
+# _select_best_variant (#54) — tolerance-aware winner selection
+# ---------------------------------------------------------------------------
+
+
+def _variant_with(strategy: str, practicality: float, dividend_transitions: list[Transition]) -> CompletionVariant:
+    concept = MixConcept(
+        title=strategy.title(),
+        mood=strategy,
+        track_ids=["1", "2", "3", "4"],
+        transitions=dividend_transitions,
+    )
+    return CompletionVariant(
+        strategy=cast("Literal['practical', 'balanced', 'adventurous']", strategy),
+        concept=concept,
+        anchor_retention_rate=1.0,
+        practicality_score=DJPracticalityScore(practicality, practicality, practicality, practicality),
+    )
+
+
+def test_select_best_variant_low_tolerance_prefers_practicality_over_risk() -> None:
+    from mixlab.llm import _select_best_variant  # noqa: PLC2701
+
+    practical = _variant_with("practical", 0.90, [])
+    adventurous = _variant_with(
+        "adventurous",
+        0.70,
+        [_transition(True, "chapter_pivot"), _transition(True, "peak_impact"), _transition(True, "deliberate_reset")],
+    )
+    winner = _select_best_variant([practical, adventurous], "low")
+    assert winner.strategy == "practical"
+
+
+def test_select_best_variant_medium_tolerance_still_prefers_practicality() -> None:
+    from mixlab.llm import _select_best_variant  # noqa: PLC2701
+
+    practical = _variant_with("practical", 0.90, [])
+    adventurous = _variant_with(
+        "adventurous",
+        0.70,
+        [_transition(True, "chapter_pivot"), _transition(True, "peak_impact"), _transition(True, "deliberate_reset")],
+    )
+    winner = _select_best_variant([practical, adventurous], "medium")
+    assert winner.strategy == "practical"
+
+
+def test_select_best_variant_high_tolerance_rewards_justified_risk() -> None:
+    from mixlab.llm import _select_best_variant  # noqa: PLC2701
+
+    practical = _variant_with("practical", 0.90, [])
+    adventurous = _variant_with(
+        "adventurous",
+        0.70,
+        [_transition(True, "chapter_pivot"), _transition(True, "peak_impact"), _transition(True, "deliberate_reset")],
+    )
+    winner = _select_best_variant([practical, adventurous], "high")
+    assert winner.strategy == "adventurous"
+
+
+def test_select_best_variant_default_argument_matches_pre_54_behaviour() -> None:
+    """No tolerance passed must behave exactly like the pre-#54 practicality-only ranking,
+    including the practical > balanced > adventurous tie-break."""
+    from mixlab.llm import _select_best_variant  # noqa: PLC2701
+
+    practical = _variant_with("practical", 0.5, [])
+    balanced = _variant_with("balanced", 0.5, [])
+    adventurous = _variant_with(
+        "adventurous",
+        0.5,
+        [_transition(True, "chapter_pivot"), _transition(True, "peak_impact")],
+    )
+    winner = _select_best_variant([adventurous, balanced, practical])
+    assert winner.strategy == "practical"
 
 
 # ---------------------------------------------------------------------------

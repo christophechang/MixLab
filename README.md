@@ -234,9 +234,9 @@ For standard and custom genre runs, a Rekordbox-compatible merged XML file can b
 ./mixlab --genre techno --mode played --intent "tools-only set, no melody, sustained pressure"
 ```
 
-`--intent` accepts a free-text creative direction that is injected verbatim into the Stage 2 prompt for genre mode. There is no parsing or LLM extraction — the model reads it as guidance and fills in everything you did not specify. If the intent conflicts with the candidate pool, Stage 2 picks the closest viable interpretation and notes the gap.
+`--intent` accepts a free-text creative direction that is injected verbatim into the Stage 2 prompt. There is no parsing or LLM extraction beyond a light heuristic signal pass — the model reads it as guidance and fills in everything you did not specify. If the intent conflicts with the candidate pool, Stage 2 picks the closest viable interpretation and notes the gap.
 
-`--intent` is ignored in playlist mode (`--playlist`), which already runs its own Stage 0 intent-extraction pass over the seed playlist.
+`--intent` also works in playlist mode (`--playlist`), which already runs its own Stage 0 intent-extraction pass over the seed playlist. There, `--intent` is layered on top of the inferred DJ intent brief and overrides it wherever the two conflict — the report's Assumptions section names any such conflict. If the intent text contains a risk-tolerance cue (e.g. "safe and cautious" or "surprise me, go bold"), it also overrides the Stage 0-inferred `risk_tolerance` used for winner selection (see below), and MixLab prints a note on stderr when this happens.
 
 ### Concept directions (`--directions`)
 
@@ -289,6 +289,8 @@ Important playlist-mode rules:
 - Playlist names are matched case-insensitively
 - If the same playlist name exists in multiple folders, pass the full path such as `Sets/Monday Night`
 - Playlist mode requires at least 4 valid seed tracks with BPM and Camelot key after parsing
+
+Winner selection is tolerance-aware: each variant's `fit` score blends its DJ Practicality Score with an "adventure dividend" that rewards a high density of justified risky transitions (a real mechanism named, not a bare cut), weighted by the run's `risk_tolerance` (`low` → 100% practicality / 0% adventure, `medium` → 80/20, `high` → 60/40). At `low` tolerance this reduces to plain practicality — the same ranking as before. At `high` tolerance the tie-break order also inverts (`adventurous` > `balanced` > `practical`), so a DJ who explicitly asked for adventure gets it when variants are otherwise close. The report's rejected-alternatives line records which tolerance was used for the run, e.g. `Selection tolerance: medium.`
 
 Playlist runs use the same report context header as genre runs, for example:
 
@@ -455,7 +457,7 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 - Assigns each track a role from a focused 10-role vocabulary: opener, groove, hook, pivot, lift, vocal-moment, texture-change, peak, resolution, closer (a track may carry more than one)
 - Each report includes: named energy path, structured `arc_type` field, section breakdown with track numbers, per-track role and transition risk, dedicated opener and closer rationale, excluded tracks with reasons, a `Bold moves:` summary of bridge/wildcard usage with the mechanism that justified each pick, and a one-line `Practicality:` score (bpm_smoothness, harmonic_ratio, risk_justified, overall) for triage
 - If the catalog API returns existing mix names, Stage 2 is instructed to avoid reusing any words, tropes, or phrasing from them; each concept also includes a `name_reason` tying the name to the set's thesis
-- Playlist mode generates three variants (`practical`, `balanced`, `adventurous`) and auto-selects the strongest; seed retention is enforced with a floor of 75% of anchor tracks and 40% of supporting tracks
+- Playlist mode generates three variants (`practical`, `balanced`, `adventurous`) and auto-selects the strongest by a tolerance-aware `fit` score (practicality blended with an adventure dividend for justified risk-taking, weighted by `risk_tolerance` — see "Complete a mix from an existing Rekordbox playlist" below); seed retention is enforced with a floor of 75% of anchor tracks and 40% of supporting tracks
 - Appends shortfall warnings for concepts significantly below the recommended track count for their genre
 - Appends the active report context and elapsed generation time to the final output
 - After each successful run, concept history is written to `.mixlab/concept-history.json`. On subsequent runs, canvases are penalised on a combined novelty score: 65% track-overlap Jaccard plus 35% concept-shape similarity (BPM band, dominant Camelot zone, role pattern, `arc_type`). Both components decay at 0.8^age across a 10-run recency window. Catches "different tracks, same shape" repetition the old track-only signal missed. Stage 2 also sees a `RECENT CONCEPTS` block listing recent titles/arcs/moods so it can deliberately diverge.

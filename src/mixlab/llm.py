@@ -1800,13 +1800,53 @@ def _score_variant(
 
 
 _STRATEGY_PRIORITY: dict[str, int] = {"practical": 0, "balanced": 1, "adventurous": 2}
+_STRATEGY_PRIORITY_HIGH_RISK: dict[str, int] = {"adventurous": 0, "balanced": 1, "practical": 2}
+
+# Practicality/adventure-dividend weights per risk tolerance (#54). "low" reduces to
+# today's practicality-only ranking (w_a=0.0) so the default call site is unchanged.
+_RISK_TOLERANCE_WEIGHTS: dict[RiskTolerance, tuple[float, float]] = {
+    "low": (1.0, 0.0),
+    "medium": (0.8, 0.2),
+    "high": (0.6, 0.4),
+}
 
 
-def _select_best_variant(variants: list[CompletionVariant]) -> CompletionVariant:
-    """Return highest-scoring variant; ties broken by practical > balanced > adventurous."""
+def _adventure_dividend(concept: MixConcept) -> float:
+    """Reward justified risk-taking: density of risky transitions carrying a real
+    (non-cut_only) mechanism, scaled: 0 risky -> 0.0; each justified risky transition
+    adds 0.25 up to 1.0; any cut_only/empty-typed risky transition subtracts 0.25
+    (floor 0.0)."""
+    dividend = 0.0
+    for transition in concept.transitions:
+        if not transition.is_risky:
+            continue
+        if transition.risk_type in ("cut_only", ""):
+            dividend -= 0.25
+        else:
+            dividend += 0.25
+    return max(0.0, min(1.0, dividend))
+
+
+def _select_best_variant(variants: list[CompletionVariant], risk_tolerance: RiskTolerance = "low") -> CompletionVariant:
+    """Return the best-fit variant for the given risk tolerance.
+
+    fit = practicality_overall * w_p + _adventure_dividend(concept) * w_a, with weights
+    keyed by risk_tolerance: low (1.0, 0.0) reduces to plain practicality — identical to
+    the pre-#54 behaviour and the default when no tolerance is supplied; medium (0.8, 0.2)
+    and high (0.6, 0.4) increasingly reward justified risk-taking. Ties are broken
+    practical > balanced > adventurous, except at "high" tolerance where the order
+    inverts to adventurous > balanced > practical — a DJ who asked for adventure should
+    get it when variants are otherwise equally fit.
+    """
+    w_practicality, w_adventure = _RISK_TOLERANCE_WEIGHTS[risk_tolerance]
+    tie_break = _STRATEGY_PRIORITY_HIGH_RISK if risk_tolerance == "high" else _STRATEGY_PRIORITY
+
+    def fit(variant: CompletionVariant) -> float:
+        return variant.practicality_score.overall * w_practicality + _adventure_dividend(variant.concept) * w_adventure
+
     return max(
         variants,
-        key=lambda v: (v.score, -_STRATEGY_PRIORITY.get(v.strategy, 99)),
+        key=lambda v: (fit(v), -tie_break.get(v.strategy, 99)),
     )
 
 
@@ -2287,6 +2327,24 @@ _AUDIENCE_MAP: dict[str, str] = {
     "club": "experienced",
 }
 
+# Risk-tolerance signal (#54): lets --intent override the Stage 0 IntentBrief's
+# risk_tolerance in playlist mode. Keys ordered most-specific first — multi-word
+# phrases before the single words they contain, so "no risks"/"take risks" win
+# over a bare "risk"-adjacent word when both would otherwise match.
+_RISK_MAP: dict[str, str] = {
+    "no risks": "low",
+    "low risk": "low",
+    "take risks": "high",
+    "surprise me": "high",
+    "safe": "low",
+    "cautious": "low",
+    "smooth": "low",
+    "bold": "high",
+    "adventurous": "high",
+    "risky": "high",
+    "weird": "high",
+}
+
 # Max mood keywords to extract into the signal; text-position sorting ensures the
 # user's lead mood ranks first, so the top-N faithfully reflects intent emphasis.
 _MAX_MOOD_SIGNALS: int = 3
@@ -2362,6 +2420,9 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
 
     if (v := _first_match(_AUDIENCE_MAP, text)) is not None:
         signals["audience"] = v
+
+    if (v := _first_match(_RISK_MAP, text)) is not None:
+        signals["risk"] = v
 
     return signals
 
@@ -2464,10 +2525,13 @@ async def stage2_curate_and_report(
         if block:
             recent_concepts_block = block + "\n\n"
 
-    # Genre-mode user intent block (#16). Pure free-text passthrough — no parsing.
-    # Ignored in playlist mode, which has its own Stage 0 intent brief.
+    # User intent block (#16, #54). Pure free-text passthrough — no parsing beyond the
+    # heuristic signal extraction below. Built whenever genre_intent is non-empty, in
+    # BOTH genre mode and playlist mode. In playlist mode it is placed after the Stage 0
+    # DJ INTENT BRIEF and carries an extra sentence establishing it overrides that brief
+    # on conflict — --intent is an explicit user statement, the brief is inferred.
     genre_intent_block = ""
-    if genre_intent is not None and playlist_name is None:
+    if genre_intent is not None:
         intent_text = " ".join(genre_intent.split())  # normalize whitespace including newlines
         if intent_text:
             parsed = _parse_user_intent(intent_text)
@@ -2480,6 +2544,12 @@ async def stage2_curate_and_report(
                     "the quoted intent takes precedence.)\n\n"
                 )
                 if parsed
+                else ""
+            )
+            override_sentence = (
+                "This user intent OVERRIDES the inferred DJ INTENT BRIEF above wherever they conflict; "
+                "note any such conflict in the report's Assumptions.\n\n"
+                if playlist_name is not None
                 else ""
             )
             genre_intent_block = (
@@ -2495,6 +2565,7 @@ async def stage2_curate_and_report(
                 "with your own curatorial judgement. If the pool cannot support what the intent asks for, name "
                 "the specific conflict in the Assumptions section (e.g. 'intent asks for warmth and restraint, "
                 "but the pool is heavily peak-energy — closest viable interpretation chosen').\n\n"
+                f"{override_sentence}"
                 "---\n\n"
             )
 
@@ -2537,6 +2608,7 @@ async def stage2_curate_and_report(
         prompt = (
             f"{recent_concepts_block}"
             f"{intent_section}"
+            f"{genre_intent_block}"
             f"Curate three completion variants from the following {n} BPM zone shortlists. "
             f'This is a playlist completion run seeded from the Rekordbox playlist "{playlist_name}".\n\n'
             "Each shortlist below represents one natural BPM zone from the source playlist. "
@@ -2678,7 +2750,8 @@ async def stage2_curate_and_report(
         passing = [v for v in variants if _passes_floor(v, intent_brief, playlist_seed_track_ids, minimum_seed_tracks)]
         candidates = passing if passing else variants
 
-        best = _select_best_variant(candidates)
+        risk_tolerance: RiskTolerance = intent_brief.risk_tolerance if intent_brief is not None else "low"
+        best = _select_best_variant(candidates, risk_tolerance)
         concept = best.concept
 
         # Retry only if no variant passed the floor
@@ -2720,6 +2793,7 @@ async def stage2_curate_and_report(
                     for v in rejected
                 ]
                 rejected_summary = "\nAlternative strategies considered: " + "; ".join(parts) + "."
+                rejected_summary += f" Selection tolerance: {risk_tolerance}."
 
             reports = await _call_stage2_reports(
                 [v.concept for v in ordered_variants],

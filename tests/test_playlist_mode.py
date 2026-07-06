@@ -243,6 +243,7 @@ def test_run_playlist_mode_happy_path(
         used_mix_names: list[str] | None = None,
         canvases: object = None,
         concept_history: object = None,
+        genre_intent: str | None = None,
         debug: bool = False,
         mix_length: int | None = None,
     ) -> tuple[list[MixConcept], str]:
@@ -264,6 +265,63 @@ def test_run_playlist_mode_happy_path(
     asyncio.run(main_mod.run_playlist_mode("Monday Night", None, None, "unplayed"))
     captured = capsys.readouterr()
     assert "Playlist report" in captured.out
+
+
+def test_run_playlist_mode_intent_risk_signal_overrides_stage0_brief(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--intent "surprise me" (#54) must override the deterministic Stage 0
+    risk_tolerance ("low" for this tight-BPM seed set) to "high", noting the
+    override on stderr, and the intent text must reach stage2_curate_and_report."""
+    import mixlab.__main__ as main_mod
+
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_PLAYLIST_XML)
+    monkeypatch.setattr(main_mod, "_XML_PATH", xml_path)
+
+    received_genre_intent: list[str | None] = []
+    received_risk_tolerance: list[str] = []
+
+    async def fake_stage2(
+        shortlists: list[MixConcept],
+        tracks_by_id: dict[str, Track],
+        custom_genre_label: str | None = None,
+        custom_genre_sub_genres: list[str] | None = None,
+        playlist_name: str | None = None,
+        seed_ids: frozenset[str] | None = None,
+        seed_track_ids: list[str] | None = None,
+        unplayed_ids: set[str] | None = None,
+        intent_brief: IntentBrief | None = None,
+        used_mix_names: list[str] | None = None,
+        canvases: object = None,
+        concept_history: object = None,
+        genre_intent: str | None = None,
+        debug: bool = False,
+        mix_length: int | None = None,
+    ) -> tuple[list[MixConcept], str]:
+        del shortlists, tracks_by_id, custom_genre_label, custom_genre_sub_genres
+        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, used_mix_names, canvases, debug, mix_length
+        received_genre_intent.append(genre_intent)
+        assert intent_brief is not None
+        received_risk_tolerance.append(intent_brief.risk_tolerance)
+        return ([MixConcept(title="Completed Set", mood="warm", track_ids=["1", "2", "3", "4"])], "Playlist report")
+
+    async def fake_send_report(*args: object, **kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(main_mod, "stage2_curate_and_report", fake_stage2)
+    monkeypatch.setattr(main_mod, "send_report", fake_send_report)
+
+    asyncio.run(
+        main_mod.run_playlist_mode("Monday Night", None, None, "unplayed", intent="surprise me with something bold")
+    )
+
+    captured = capsys.readouterr()
+    assert "--intent risk signal 'high' overrides Stage 0 risk_tolerance 'low'." in captured.err
+    assert received_genre_intent == ["surprise me with something bold"]
+    assert received_risk_tolerance == ["high"]
 
 
 _PLAYLIST_XML_WITH_EXTRA = textwrap.dedent("""\
@@ -334,6 +392,7 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
         used_mix_names: list[str] | None = None,
         canvases: object = None,
         concept_history: object = None,
+        genre_intent: str | None = None,
         debug: bool = False,
         mix_length: int | None = None,
     ) -> tuple[list[MixConcept], str]:
@@ -375,6 +434,7 @@ def test_run_playlist_mode_exports_all_ranked_variants(monkeypatch: pytest.Monke
         used_mix_names: list[str] | None = None,
         canvases: object = None,
         concept_history: object = None,
+        genre_intent: str | None = None,
         debug: bool = False,
         mix_length: int | None = None,
     ) -> tuple[list[MixConcept], str]:

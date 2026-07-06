@@ -8,6 +8,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import cast
 
 from dotenv import load_dotenv
 
@@ -33,13 +34,14 @@ from mixlab.directions import generate_directions
 from mixlab.discord_client import send_report
 from mixlab.history import ConceptHistory, ConceptRecord, HistoryEntry, append_run, load_history, save_history
 from mixlab.llm import (
+    _parse_user_intent,  # noqa: PLC2701 — reused here for playlist-mode risk override (#54)
     make_cascade_state,
     stage0_intent_brief,
     stage2_curate_and_report,
     validate_stage2_output,
 )
 from mixlab.matcher import filter_played, filter_unplayed
-from mixlab.models import MixCanvas, MixConcept, Track, TrackMode
+from mixlab.models import MixCanvas, MixConcept, RiskTolerance, Track, TrackMode
 from mixlab.playlist_exporter import (
     export_merged_xml,
     generate_merged_xml_bytes,
@@ -361,6 +363,7 @@ async def run_playlist_mode(
     max_bpm: float | None = None,
     min_year: int | None = None,
     max_year: int | None = None,
+    intent: str | None = None,
     debug: bool = False,
     mix_length: int | None = None,
     locked: bool = False,
@@ -424,6 +427,16 @@ async def run_playlist_mode(
         f"missing roles: {', '.join(str(r) for r in intent_brief.missing_roles) or 'none'}"
     )
 
+    if intent:
+        parsed_risk = _parse_user_intent(intent).get("risk")
+        if parsed_risk is not None:
+            print(
+                f"--intent risk signal '{parsed_risk}' overrides Stage 0 risk_tolerance "
+                f"'{intent_brief.risk_tolerance}'.",
+                file=sys.stderr,
+            )
+            intent_brief.risk_tolerance = cast("RiskTolerance", parsed_risk)
+
     library_source = tracks
     if genre is not None:
         try:
@@ -472,6 +485,7 @@ async def run_playlist_mode(
         intent_brief=intent_brief,
         used_mix_names=mix_names or None,
         concept_history=history,
+        genre_intent=intent,
         debug=debug,
         mix_length=mix_length,
     )
@@ -487,6 +501,7 @@ async def run_playlist_mode(
         playlist_name=playlist_name,
         mode=mode,
         export_dir=export_dir,
+        intent=intent,
         mix_length=mix_length,
         locked=locked,
     )
@@ -1100,7 +1115,8 @@ examples:
             "Example: 'Late-night radio showcase — UKG, UK bass, and breaks played with full conviction. "
             "The journey matters: chapters, not a playlist.' "
             "Aim for 10–50 words. Use positive framing ('dark and driven' not 'not melodic'). "
-            "Ignored in playlist mode, which runs its own Stage 0 intent extraction."
+            "Also works in playlist mode: overrides the inferred DJ intent brief (from Stage 0) "
+            "wherever the two conflict."
         ),
     )
     parser.add_argument(
@@ -1219,12 +1235,9 @@ examples:
     elif args.export_playlists:
         export_dir = Path("output/playlists")
 
+    _warn_intent(args.intent)
+
     if args.playlist:
-        if args.intent is not None:
-            print(
-                "--intent ignored in playlist mode — playlist runs use Stage 0 intent extraction from the seed.",
-                file=sys.stderr,
-            )
         if args.deep:
             print(
                 "--deep ignored in playlist mode — critique pass not yet supported on the variant-scoring path.",
@@ -1245,6 +1258,7 @@ examples:
                 max_bpm=args.max_bpm,
                 min_year=args.min_year,
                 max_year=args.max_year,
+                intent=args.intent,
                 debug=debug,
                 mix_length=args.mix_length,
                 locked=args.locked,
@@ -1257,8 +1271,6 @@ examples:
             "--locked is only used in playlist mode (--playlist). Ignored for genre runs.",
             file=sys.stderr,
         )
-
-    _warn_intent(args.intent)
 
     asyncio.run(
         run(
