@@ -22,6 +22,7 @@ for the validation philosophy.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import os
@@ -442,6 +443,24 @@ async def _call_openai_compat(
         return _strip_thinking(str(resp.json()["choices"][0]["message"]["content"]))
 
 
+_ANTHROPIC_MAX_ATTEMPTS = 3
+_ANTHROPIC_BACKOFFS_SECS = (1.0, 2.0)
+
+
+def _stage2_model() -> str:
+    """Anthropic model id for Stage 2 (selection, report, critique) — overridable for eval/rollback."""
+    return os.environ.get("MIXLAB_STAGE2_MODEL", "claude-sonnet-4-6")
+
+
+def _stage2_temperature() -> float:
+    """Stage 2 selection-pass temperature — overridable for eval/rollback. Falls back to 0.5 on unset or invalid input."""
+    raw = os.environ.get("MIXLAB_STAGE2_TEMPERATURE", "")
+    try:
+        return float(raw) if raw else 0.5
+    except ValueError:
+        return 0.5
+
+
 async def _call_anthropic_http(
     api_key: str,
     model: str,
@@ -465,9 +484,48 @@ async def _call_anthropic_http(
         "messages": [{"role": "user", "content": prompt}],
     }
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
-        resp.raise_for_status()
-        return str(resp.json()["content"][0]["text"])
+        for attempt in range(1, _ANTHROPIC_MAX_ATTEMPTS + 1):
+            is_final_attempt = attempt == _ANTHROPIC_MAX_ATTEMPTS
+            try:
+                resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if is_final_attempt:
+                    raise
+                delay = _ANTHROPIC_BACKOFFS_SECS[attempt - 1]
+                print(
+                    f"Anthropic retry {attempt}/{_ANTHROPIC_MAX_ATTEMPTS} after "
+                    f"{type(exc).__name__} (waiting {delay:.1f}s)",
+                    file=sys.stderr,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if is_final_attempt:
+                    resp.raise_for_status()
+                delay = _ANTHROPIC_BACKOFFS_SECS[attempt - 1]
+                retry_after_header = resp.headers.get("retry-after")
+                if retry_after_header is not None:
+                    with contextlib.suppress(ValueError):
+                        delay = max(delay, float(retry_after_header))
+                print(
+                    f"Anthropic retry {attempt}/{_ANTHROPIC_MAX_ATTEMPTS} after "
+                    f"{resp.status_code} (waiting {delay:.1f}s)",
+                    file=sys.stderr,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            resp.raise_for_status()  # non-retryable 4xx raises immediately
+            data = resp.json()
+            if data.get("stop_reason") == "max_tokens":
+                print(
+                    f"WARNING: Anthropic response truncated at max_tokens={max_tokens} — output may be incomplete.",
+                    file=sys.stderr,
+                )
+            return str(data["content"][0]["text"])
+
+    raise RuntimeError("Anthropic request failed — retry loop exited without a response.")
 
 
 async def _try_groq(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
@@ -505,7 +563,7 @@ async def _try_anthropic(prompt: str, system: str = _STAGE1_SYSTEM) -> str | Non
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         return None
-    return await _call_anthropic_http(key, "claude-sonnet-4-6", system, prompt)
+    return await _call_anthropic_http(key, _stage2_model(), system, prompt)
 
 
 _OPENROUTER_BASE = "https://openrouter.ai/api"
@@ -1516,9 +1574,21 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
 
     for item in data:
         raw_ids = item.get("track_ids")
-        track_ids = [
-            nid for tid in (raw_ids if isinstance(raw_ids, list) else []) if (nid := _normalise_id(tid)) in valid_ids
-        ]
+        raw_id_list = raw_ids if isinstance(raw_ids, list) else []
+        track_ids: list[str] = []
+        dropped_count = 0
+        for tid in raw_id_list:
+            nid = _normalise_id(tid)
+            if nid in valid_ids:
+                track_ids.append(nid)
+            else:
+                dropped_count += 1
+        if dropped_count:
+            title_for_warning = str(item.get("title", ""))
+            print(
+                f"[{title_for_warning}] dropped {dropped_count} track ID(s) outside the offered pool",
+                file=sys.stderr,
+            )
         if len(track_ids) < _MIN_CONCEPT_TRACKS:
             continue
         raw_transitions = item.get("transitions", [])
@@ -1946,12 +2016,12 @@ async def _call_stage2_raw(
     try:
         return await _call_anthropic_http(
             stage2_key,
-            "claude-sonnet-4-6",
+            _stage2_model(),
             stage2_system,
             prompt,
             max_tokens=max_tokens,
             timeout=600,
-            temperature=0.3,
+            temperature=_stage2_temperature(),
         )
     except Exception as exc:
         raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc
@@ -2019,7 +2089,12 @@ async def _call_stage2_report_single(
 
     try:
         return await _call_anthropic_http(
-            stage2_key, "claude-sonnet-4-6", _STAGE2_REPORT_SYSTEM, prompt, max_tokens=2048, timeout=120
+            stage2_key,
+            _stage2_model(),
+            _STAGE2_REPORT_SYSTEM,
+            prompt,
+            max_tokens=max(2048, 120 * len(concept.track_ids)),
+            timeout=120,
         )
     except Exception as exc:
         raise RuntimeError(f"Stage 2 report generation failed: {exc}") from exc
@@ -2118,7 +2193,7 @@ async def _call_stage2_critique_single(
 
     try:
         raw = await _call_anthropic_http(
-            stage2_key, "claude-sonnet-4-6", _STAGE2_CRITIQUE_SYSTEM, prompt, max_tokens=1024, timeout=120
+            stage2_key, _stage2_model(), _STAGE2_CRITIQUE_SYSTEM, prompt, max_tokens=1024, timeout=120
         )
     except Exception as exc:
         # Critique failure never aborts a --deep run; surface the issue as a critique note.
@@ -2427,7 +2502,7 @@ async def stage2_curate_and_report(
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
     if not stage2_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set — Stage 2 curation requires Anthropic.")
-    stage2_model_display = "Claude Sonnet 4.6"
+    stage2_model_display = _stage2_model()
 
     sections: list[str] = []
     if canvases is not None:
@@ -2479,6 +2554,20 @@ async def stage2_curate_and_report(
     n = len(sections)
     if n == 0:
         raise RuntimeError("Stage 2 received no shortlists with resolvable tracks — nothing to curate.")
+
+    # The full set of track ids actually offered to the model this run — used both to
+    # size the mix_length target and to validate Stage 2's selection output (#50).
+    # Previously valid_ids was the whole library, which let Stage 2 select IDs from
+    # outside the shown pool and have them silently accepted.
+    if canvases is not None:
+        offered_ids: set[str] = {
+            tid
+            for canvas in canvases
+            for tid in (*canvas.source_concept.track_ids, *canvas.bridge_track_ids, *canvas.wildcard_track_ids)
+        }
+    else:
+        offered_ids = {tid for shortlist in shortlists for tid in shortlist.track_ids}
+    offered_ids &= tracks_by_id.keys()
 
     # Recent-concepts block — shown to Stage 2 so it can deliberately diverge from
     # prior runs. Skipped on first-ever run (empty history) or when caller did not
@@ -2595,11 +2684,7 @@ async def stage2_curate_and_report(
             )
 
     if mix_length is not None:
-        if canvases is not None:
-            offered_ids = {tid for canvas in canvases for tid in canvas.source_concept.track_ids}
-        else:
-            offered_ids = {tid for shortlist in shortlists for tid in shortlist.track_ids}
-        offered_tracks = [tracks_by_id[tid] for tid in offered_ids if tid in tracks_by_id]
+        offered_tracks = [tracks_by_id[tid] for tid in offered_ids]
         target_tracks = _duration_target_tracks(mix_length, offered_tracks)
         prompt += (
             f"\n\nSet length target: {mix_length} minutes (~{target_tracks} tracks). "
@@ -2644,8 +2729,7 @@ async def stage2_curate_and_report(
     if os.environ.get("MIXLAB_DEBUG_STAGE2"):
         print(f"[DEBUG] Stage 2 raw response (first 2000 chars):\n{raw[:2000]}", file=sys.stderr)
 
-    valid_ids = set(tracks_by_id.keys())
-    curated, _ = _parse_curated_concepts(raw, valid_ids)
+    curated, _ = _parse_curated_concepts(raw, offered_ids)
     print(
         f"Stage 2 selection pass: {len(curated)} concept(s) returned (moods: {[c.mood for c in curated]})",
         file=sys.stderr,
@@ -2722,7 +2806,7 @@ async def stage2_curate_and_report(
                 "Retry with one concept only. Include as many dropped seeds as possible.\n\n"
             ) + prompt
             raw = await _call_stage2_raw(retry_prompt, stage2_system, stage2_key, max_tokens=32768)
-            curated, _ = _parse_curated_concepts(raw, valid_ids)
+            curated, _ = _parse_curated_concepts(raw, offered_ids)
             if curated:
                 concept = curated[0]
                 retained_ids, _, _ = _playlist_retention_stats(concept, playlist_seed_track_ids)

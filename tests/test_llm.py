@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import cast, get_args
 
+import httpx
 import pytest
 import respx
 from httpx import Response
@@ -215,6 +216,170 @@ async def test_stage1_parses_response_with_trailing_prose(monkeypatch: pytest.Mo
 
 
 # ---------------------------------------------------------------------------
+# _call_anthropic_http — retry/backoff, truncation, env config (#50)
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_call_anthropic_http_retries_after_429_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("mixlab.llm.asyncio.sleep", fake_sleep)
+
+    route = respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(429, json={"error": "rate_limited"}),
+            Response(200, json=_anthropic_response("hello")),
+        ]
+    )
+
+    text = await _call_anthropic_http("key", "model", "system", "prompt")
+
+    assert text == "hello"
+    assert route.call_count == 2
+    assert sleeps == [1.0]
+
+
+@respx.mock
+async def test_call_anthropic_http_retry_honours_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("mixlab.llm.asyncio.sleep", fake_sleep)
+
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(429, headers={"retry-after": "5"}, json={"error": "rate_limited"}),
+            Response(200, json=_anthropic_response("hello")),
+        ]
+    )
+
+    await _call_anthropic_http("key", "model", "system", "prompt")
+
+    assert sleeps == [5.0]
+
+
+@respx.mock
+async def test_call_anthropic_http_raises_after_exhausting_529_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("mixlab.llm.asyncio.sleep", fake_sleep)
+
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(529, json={"error": "overloaded"}))
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _call_anthropic_http("key", "model", "system", "prompt")
+
+    assert route.call_count == 3
+
+
+@respx.mock
+async def test_call_anthropic_http_raises_immediately_on_non_retryable_status() -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(400, json={"error": "bad_request"}))
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _call_anthropic_http("key", "model", "system", "prompt")
+
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_call_anthropic_http_warns_on_truncated_response(capsys: pytest.CaptureFixture[str]) -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    respx.post(_ANTHROPIC_URL).mock(
+        return_value=Response(200, json={"content": [{"text": "partial"}], "stop_reason": "max_tokens"})
+    )
+
+    text = await _call_anthropic_http("key", "model", "system", "prompt", max_tokens=256)
+
+    assert text == "partial"
+    captured = capsys.readouterr()
+    assert "WARNING: Anthropic response truncated at max_tokens=256" in captured.err
+
+
+def test_stage2_model_env_override_returns_env_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _stage2_model
+
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-opus-9")
+    assert _stage2_model() == "claude-opus-9"
+
+
+def test_stage2_model_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _stage2_model
+
+    monkeypatch.delenv("MIXLAB_STAGE2_MODEL", raising=False)
+    assert _stage2_model() == "claude-sonnet-4-6"
+
+
+def test_stage2_temperature_env_override_returns_env_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _stage2_temperature
+
+    monkeypatch.setenv("MIXLAB_STAGE2_TEMPERATURE", "0.9")
+    assert _stage2_temperature() == 0.9
+
+
+def test_stage2_temperature_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _stage2_temperature
+
+    monkeypatch.delenv("MIXLAB_STAGE2_TEMPERATURE", raising=False)
+    assert _stage2_temperature() == 0.5
+
+
+def test_stage2_temperature_invalid_falls_back_to_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _stage2_temperature
+
+    monkeypatch.setenv("MIXLAB_STAGE2_TEMPERATURE", "not-a-float")
+    assert _stage2_temperature() == 0.5
+
+
+@respx.mock
+async def test_stage2_raw_request_carries_env_override_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Stage 2 selection request payload reflects MIXLAB_STAGE2_MODEL/TEMPERATURE overrides."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-opus-9")
+    monkeypatch.setenv("MIXLAB_STAGE2_TEMPERATURE", "0.9")
+
+    route = respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(
+            track_id=str(i), artist=f"Artist {i}", title=f"Title {i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass"
+        )
+        for i in range(1, 5)
+    }
+
+    _, report = await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    selection_body = json.loads(route.calls[0].request.content)
+    assert selection_body["model"] == "claude-opus-9"
+    assert selection_body["temperature"] == 0.9
+    assert "claude-opus-9" in report
+
+
+# ---------------------------------------------------------------------------
 # Stage 2
 # ---------------------------------------------------------------------------
 
@@ -245,7 +410,7 @@ async def test_stage2_returns_curated_concepts_and_report(monkeypatch: pytest.Mo
     assert concepts[0].title == "Dark Rollers"
     assert concepts[0].track_ids == ["1", "2", "3", "4"]
     assert "CONCEPT: Dark Rollers" in report
-    assert "Claude Sonnet 4.6" in report
+    assert "claude-sonnet-4-6" in report
     # Practicality line surfaces in genre-mode reports (#21).
     assert "Practicality" in report
     assert "bpm_smoothness" in report
@@ -333,6 +498,54 @@ async def test_stage2_strips_hallucinated_ids(monkeypatch: pytest.MonkeyPatch) -
 
 
 @respx.mock
+async def test_stage2_pool_scoping_drops_id_valid_in_library_but_not_offered(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only IDs actually offered to the model this run are accepted (#50).
+
+    Track "999" is a real track in ``tracks_by_id`` (the whole library) but was never
+    included in any shortlist offered to Stage 2 — it must be dropped even though the
+    old whole-library ``valid_ids`` check would have accepted it.
+    """
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    payload = json.dumps(
+        [
+            {
+                "title": "Dark Rollers",
+                "name_reason": "n/a",
+                "mood": "m",
+                "track_ids": ["1", "2", "3", "4", "999"],
+                "transitions": [],
+            }
+        ]
+    )
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(payload)),
+            Response(200, json=_anthropic_response("CONCEPT: Dark Rollers\n\nBrief.")),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool", mood="m", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist="A", title="T", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+    # "999" is a real, resolvable library track — but not part of any offered shortlist.
+    tracks_by_id["999"] = Track(
+        track_id="999", artist="Other", title="Other Track", bpm=174.0, camelot_key="8A", genre="Drum & Bass"
+    )
+
+    concepts, _ = await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    assert concepts[0].track_ids == ["1", "2", "3", "4"]
+    captured = capsys.readouterr()
+    assert "dropped 1 track ID(s) outside the offered pool" in captured.err
+
+
+@respx.mock
 async def test_stage2_raises_loudly_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     from mixlab.llm import stage2_curate_and_report
 
@@ -383,6 +596,17 @@ def test_parse_curated_concepts_strips_hallucinated_ids() -> None:
     raw = json.dumps([{"title": "T", "mood": "m", "track_ids": ["1", "999", "2", "3", "4"], "report": "x"}])
     concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
     assert "999" not in concepts[0].track_ids
+
+
+def test_parse_curated_concepts_prints_dropped_count_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    from mixlab.llm import _parse_curated_concepts
+
+    raw = json.dumps([{"title": "Set A", "mood": "dark", "track_ids": ["1", "2", "3", "4", "999"], "report": "x"}])
+    concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
+
+    assert concepts[0].track_ids == ["1", "2", "3", "4"]
+    captured = capsys.readouterr()
+    assert "[Set A] dropped 1 track ID(s) outside the offered pool" in captured.err
 
 
 def test_parse_curated_concepts_drops_below_minimum() -> None:

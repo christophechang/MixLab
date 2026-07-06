@@ -86,8 +86,10 @@ cp .env.example .env
 | `DISCORD_GUILD_ID` | No | Discord server ID |
 | `MIXLAB_DISCORD_CHANNEL_ID` | No | Target channel ID (preferred over name) |
 | `MIXLAB_DISCORD_CHANNEL` | No | Target channel name (default: `mix-lab`) |
+| `MIXLAB_STAGE2_MODEL` | No | Override the Stage 2 Anthropic model id (default: `claude-sonnet-4-6`) |
+| `MIXLAB_STAGE2_TEMPERATURE` | No | Override the Stage 2 selection-pass temperature (default: `0.5`) |
 
-`ANTHROPIC_API_KEY` is required for Stage 2 report generation. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only.
+`ANTHROPIC_API_KEY` is required for Stage 2 report generation. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only. `MIXLAB_STAGE2_MODEL` and `MIXLAB_STAGE2_TEMPERATURE` let you point Stage 2 at a different Anthropic model or tune selection-pass creativity without editing code — both fall back to the current defaults when unset or invalid.
 
 #### Catalog API (optional)
 
