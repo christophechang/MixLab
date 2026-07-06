@@ -84,6 +84,8 @@ def parse_collection(xml_path: Path) -> list[Track]:
         year_raw = element.get("Year", "")
         mix_raw = element.get("Mix", "")
         colour_raw = element.get("Colour", "").lower()
+        total_time_raw = element.get("TotalTime", "")
+        rating_raw = element.get("Rating", "")
         tracks.append(
             Track(
                 track_id=track_id,
@@ -101,6 +103,9 @@ def parse_collection(xml_path: Path) -> list[Track]:
                 remixer=element.get("Remixer", ""),
                 mix=[s.strip() for s in mix_raw.split(",") if s.strip()],
                 enrichment_confidence=_COLOUR_TO_CONFIDENCE.get(colour_raw, ""),
+                duration_secs=int(total_time_raw) if total_time_raw.isdigit() else None,
+                date_added=element.get("DateAdded", ""),
+                rating=int(rating_raw) if rating_raw.isdigit() else None,
             )
         )
 

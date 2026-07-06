@@ -24,6 +24,9 @@ class Track(BaseModel):
     remixer: str = ""
     mix: list[str] = Field(default_factory=list)
     enrichment_confidence: Literal["high", "medium", "low", ""] = ""
+    duration_secs: int | None = None
+    date_added: str = ""
+    rating: int | None = None
 
 
 class PlayedTrack(BaseModel):

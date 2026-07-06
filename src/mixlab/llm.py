@@ -671,6 +671,26 @@ def select_stage1_window(tracks: list[Track], max_count: int) -> list[Track]:  #
     return tracks[start : start + max_count]
 
 
+def _format_duration(secs: int) -> str:
+    """Format a duration in seconds as ``m:ss`` (minutes not zero-padded)."""
+    minutes, seconds = divmod(secs, 60)
+    return f"{minutes}:{seconds:02d}"
+
+
+def _duration_target_tracks(mix_length: int, tracks: list[Track]) -> int:
+    """Derive a target track count for a set length from real track durations.
+
+    Uses the mean duration across ``tracks`` that carry a known ``duration_secs``.
+    Falls back to the crude minutes/4 heuristic when none of the offered tracks
+    have duration data.
+    """
+    known_durations = [t.duration_secs for t in tracks if t.duration_secs is not None]
+    if not known_durations:
+        return max(10, round(mix_length / 4.0))
+    mean_secs = statistics.fmean(known_durations)
+    return max(6, round(mix_length * 60 / mean_secs))
+
+
 def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) -> str:
     """Build the compact canvas header block for the Stage 2 prompt."""
 
@@ -747,6 +767,8 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
         elif tid in canvas.wildcard_track_ids:
             pool_label = " [wildcard]"
         extras: list[str] = []
+        if t.duration_secs is not None:
+            extras.append(_format_duration(t.duration_secs))
         if t.year is not None:
             extras.append(str(t.year))
         if t.label:
@@ -1676,6 +1698,28 @@ def _append_practicality_to_report(
     return f"{report.rstrip()}\n\n{_format_practicality_line(score)}"
 
 
+def _append_runtime_to_report(
+    report: str,
+    concept: MixConcept,
+    tracks_by_id: dict[str, Track],
+) -> str:
+    """Append a cumulative runtime annotation to a concept report when duration data exists.
+
+    Sums known ``duration_secs`` across the concept's tracks. Returns the report unchanged
+    when none of the concept's tracks carry duration data.
+    """
+    total = len(concept.track_ids)
+    known_secs: list[int] = []
+    for tid in concept.track_ids:
+        t = tracks_by_id.get(tid)
+        if t is not None and t.duration_secs is not None:
+            known_secs.append(t.duration_secs)
+    if not known_secs:
+        return report
+    total_minutes = round(sum(known_secs) / 60)
+    return f"{report.rstrip()}\n\n**Runtime**: ~{total_minutes}m ({len(known_secs)}/{total} tracks with durations)"
+
+
 def _playlist_retention_stats(
     concept: MixConcept,
     seed_track_ids: list[str],
@@ -1927,6 +1971,8 @@ async def _call_stage2_report_single(
         if t is None:
             continue
         extras: list[str] = []
+        if t.duration_secs is not None:
+            extras.append(_format_duration(t.duration_secs))
         if t.year is not None:
             extras.append(str(t.year))
         if t.label:
@@ -2398,6 +2444,8 @@ async def stage2_curate_and_report(
                 if t is None:
                     continue
                 extras: list[str] = []
+                if t.duration_secs is not None:
+                    extras.append(_format_duration(t.duration_secs))
                 if t.year is not None:
                     extras.append(str(t.year))
                 if t.label:
@@ -2546,10 +2594,15 @@ async def stage2_curate_and_report(
                 + "\n\n".join(sections)
             )
 
-    if mix_length is not None and playlist_name is not None:
-        target_tracks = max(10, round(mix_length / 4.0))
+    if mix_length is not None:
+        if canvases is not None:
+            offered_ids = {tid for canvas in canvases for tid in canvas.source_concept.track_ids}
+        else:
+            offered_ids = {tid for shortlist in shortlists for tid in shortlist.track_ids}
+        offered_tracks = [tracks_by_id[tid] for tid in offered_ids if tid in tracks_by_id]
+        target_tracks = _duration_target_tracks(mix_length, offered_tracks)
         prompt += (
-            f"\n\nSet length target: {mix_length} minutes (~{target_tracks} tracks at ~4 min average). "
+            f"\n\nSet length target: {mix_length} minutes (~{target_tracks} tracks). "
             f"Aim for approximately {target_tracks} tracks per concept. "
             f"Maintain arc quality — cut any track that weakens the set rather than padding to hit the number."
         )
@@ -2616,7 +2669,11 @@ async def stage2_curate_and_report(
         annotated_reports = [
             _append_critique_to_report(
                 _append_practicality_to_report(
-                    _append_bold_moves_to_report(r, c, canvases, tracks_by_id),
+                    _append_runtime_to_report(
+                        _append_bold_moves_to_report(r, c, canvases, tracks_by_id),
+                        c,
+                        tracks_by_id,
+                    ),
                     c,
                     tracks_by_id,
                 ),
@@ -2715,6 +2772,7 @@ async def stage2_curate_and_report(
                         tracks_by_id,
                         rejected_summary,
                     )
+                base_report = _append_runtime_to_report(base_report, variant.concept, tracks_by_id)
                 ordered_reports.append(
                     _label_playlist_report_section(base_report, variant.strategy, is_winner=is_winner)
                 )
@@ -2727,10 +2785,12 @@ async def stage2_curate_and_report(
             rejected_summary = ""
             retry_reports = await _call_stage2_reports([concept], tracks_by_id, seed_ids, unplayed_ids, stage2_key)
             base_report = retry_reports[0] if retry_reports else ""
+            base_report = _rewrite_playlist_report(
+                base_report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id, rejected_summary
+            )
+            base_report = _append_runtime_to_report(base_report, concept, tracks_by_id)
             report = _label_playlist_report_section(
-                _rewrite_playlist_report(
-                    base_report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id, rejected_summary
-                ),
+                base_report,
                 concept.mood.lower(),
                 is_winner=True,
             )

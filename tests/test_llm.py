@@ -3696,8 +3696,8 @@ async def test_stage2_mix_length_absent_from_playlist_prompt_when_not_set(monkey
 
 
 @respx.mock
-async def test_stage2_mix_length_ignored_in_genre_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """mix_length has no effect in standard (genre) mode — no target injected."""
+async def test_stage2_mix_length_applies_in_genre_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mix_length also injects a set-length target in standard (genre) mode (issue #49)."""
     from mixlab.llm import stage2_curate_and_report
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
@@ -3713,4 +3713,152 @@ async def test_stage2_mix_length_ignored_in_genre_mode(monkeypatch: pytest.Monke
 
     body = json.loads(route.calls[0].request.content)
     user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
-    assert "Set length target" not in user_prompt
+    assert "Set length target" in user_prompt
+    assert "60 minutes" in user_prompt
+    assert "per concept" in user_prompt
+
+
+# ---------------------------------------------------------------------------
+# _format_duration (issue #49)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("secs", "expected"),
+    [
+        (65, "1:05"),
+        (272, "4:32"),
+        (3600, "60:00"),
+    ],
+)
+def test_format_duration_formats_mss(secs: int, expected: str) -> None:
+    from mixlab.llm import _format_duration
+
+    assert _format_duration(secs) == expected
+
+
+# ---------------------------------------------------------------------------
+# _duration_target_tracks (issue #49)
+# ---------------------------------------------------------------------------
+
+
+def test_duration_target_tracks_uses_mean_real_duration_when_available() -> None:
+    from mixlab.llm import _duration_target_tracks
+
+    tracks = [
+        Track(track_id=str(i), artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB", duration_secs=240)
+        for i in range(4)
+    ]
+    # mean duration 240s (4 min) -> 60 min set / 4 min per track = 15 tracks
+    assert _duration_target_tracks(60, tracks) == 15
+
+
+def test_duration_target_tracks_falls_back_to_heuristic_without_duration_data() -> None:
+    from mixlab.llm import _duration_target_tracks
+
+    tracks = [Track(track_id=str(i), artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB") for i in range(4)]
+    assert _duration_target_tracks(60, tracks) == max(10, round(60 / 4.0))
+
+
+def test_duration_target_tracks_enforces_floor_of_six() -> None:
+    from mixlab.llm import _duration_target_tracks
+
+    # Very long tracks (20 min each) over a short 20-minute set would compute to 1 track —
+    # the floor of 6 must still apply.
+    tracks = [
+        Track(track_id=str(i), artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB", duration_secs=1200)
+        for i in range(3)
+    ]
+    assert _duration_target_tracks(20, tracks) == 6
+
+
+def test_duration_target_tracks_ignores_tracks_without_duration_in_mean() -> None:
+    from mixlab.llm import _duration_target_tracks
+
+    tracks = [
+        Track(track_id="1", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB", duration_secs=240),
+        Track(track_id="2", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB", duration_secs=240),
+        Track(track_id="3", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB"),
+    ]
+    # Only tracks 1 and 2 (240s each) count towards the mean — track 3 is excluded.
+    assert _duration_target_tracks(60, tracks) == 15
+
+
+# ---------------------------------------------------------------------------
+# Duration token in Stage 2 prompt track lines (issue #49)
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_stage2_prompt_includes_duration_token_in_canvas_section(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Duration token appears as the first extras element on canvas candidate lines."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    ids = ["1", "2", "3", "4"]
+    concept = MixConcept(title="Pool", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    tracks_by_id = _lib(ids)
+    tracks_by_id["1"] = tracks_by_id["1"].model_copy(update={"duration_secs": 272, "year": 2020})
+
+    await stage2_curate_and_report(shortlists=[concept], tracks_by_id=tracks_by_id, canvases=[canvas])
+
+    body = route.calls[0].request.content.decode()
+    assert "4:32" in body
+    # duration token must precede the year token on that track's candidate line
+    line = next(text_line for text_line in body.splitlines() if "Artist_1 —" in text_line)
+    assert line.index("4:32") < line.index("2020")
+
+
+@respx.mock
+async def test_stage2_prompt_omits_duration_token_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    ids = ["1", "2", "3", "4"]
+    concept = MixConcept(title="Pool", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    tracks_by_id = _lib(ids)  # no track carries duration_secs
+
+    await stage2_curate_and_report(shortlists=[concept], tracks_by_id=tracks_by_id, canvases=[canvas])
+    # No assertion error means no exception raised formatting extras with missing durations —
+    # combined with the presence test above, this establishes the token is conditional.
+
+
+# ---------------------------------------------------------------------------
+# _append_runtime_to_report (issue #49)
+# ---------------------------------------------------------------------------
+
+
+def test_append_runtime_to_report_appends_footer_when_durations_known() -> None:
+    from mixlab.llm import _append_runtime_to_report
+
+    ids = ["1", "2", "3"]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    tracks_by_id = _lib(ids)
+    tracks_by_id["1"] = tracks_by_id["1"].model_copy(update={"duration_secs": 240})
+    tracks_by_id["2"] = tracks_by_id["2"].model_copy(update={"duration_secs": 300})
+    # track "3" has no duration_secs
+
+    original = "CONCEPT: T\n\nSome report body."
+    result = _append_runtime_to_report(original, concept, tracks_by_id)
+
+    assert result.startswith(original)
+    assert "**Runtime**: ~9m (2/3 tracks with durations)" in result
+
+
+def test_append_runtime_to_report_unchanged_when_no_durations_known() -> None:
+    from mixlab.llm import _append_runtime_to_report
+
+    ids = ["1", "2", "3"]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    tracks_by_id = _lib(ids)  # no track carries duration_secs
+
+    original = "CONCEPT: T\n\nSome report body."
+    result = _append_runtime_to_report(original, concept, tracks_by_id)
+
+    assert result == original

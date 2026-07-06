@@ -511,6 +511,7 @@ async def run(
     deep: bool = False,
     debug: bool = False,
     stage1_seed: int | None = None,
+    mix_length: int | None = None,
 ) -> None:
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
@@ -746,6 +747,7 @@ async def run(
         mode=mode,
         deep=deep,
         debug=debug,
+        mix_length=mix_length,
     )
     if not all_concepts:
         print(report, file=sys.stderr)
@@ -787,6 +789,7 @@ async def run(
         mode=mode,
         export_dir=export_dir,
         intent=intent,
+        mix_length=mix_length,
     )
     report += f"\n⏱ Generated in {elapsed_str}"
 
@@ -1032,9 +1035,11 @@ examples:
         metavar="MINUTES",
         dest="mix_length",
         help=(
-            "Target set length in minutes (playlist mode only). "
+            "Target set length in minutes (works in both --genre and --playlist mode). "
             "Scales the number of tracks Stage 2 selects — e.g. 60 targets ~15 tracks, 90 targets ~22. "
-            "Without this flag, playlist mode defaults to 10–14 tracks as before."
+            "When the offered tracks carry real duration data, the target is derived from their "
+            "actual mean length rather than the ~4 min/track estimate. "
+            "Without this flag, runs default to 10–14 tracks as before."
         ),
     )
     parser.add_argument(
@@ -1120,11 +1125,6 @@ examples:
         )
         return
 
-    if args.mix_length is not None:
-        print(
-            "--mix-length is only used in playlist mode (--playlist). Ignored for genre runs.",
-            file=sys.stderr,
-        )
     if args.locked:
         print(
             "--locked is only used in playlist mode (--playlist). Ignored for genre runs.",
@@ -1146,6 +1146,7 @@ examples:
             deep=args.deep,
             debug=debug,
             stage1_seed=args.stage1_seed,
+            mix_length=args.mix_length,
         )
     )
 

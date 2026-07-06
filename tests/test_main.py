@@ -17,6 +17,7 @@ from mixlab.__main__ import (
     _report_stage1_window,
     _validate_range_args,
     _warn_intent,
+    main,
     run,
     run_export_unplayed,
 )
@@ -627,3 +628,43 @@ def test_warn_intent_51_words_warns(capsys: pytest.CaptureFixture[str]) -> None:
     err = capsys.readouterr().err
     assert "WARNING" in err
     assert "51" in err
+
+
+# ---------------------------------------------------------------------------
+# _format_report_context — mix_length in genre mode (issue #49)
+# ---------------------------------------------------------------------------
+
+
+def test_format_report_context_genre_mode_shows_mix_length() -> None:
+    result = _format_report_context(
+        genre="house",
+        playlist_name=None,
+        mode="unplayed",
+        export_dir=None,
+        mix_length=60,
+    )
+    assert result == "Report context: House (unplayed tracks, 60min set)"
+
+
+# ---------------------------------------------------------------------------
+# main() — --mix-length accepted in genre mode (issue #49)
+# ---------------------------------------------------------------------------
+
+
+def test_main_accepts_mix_length_in_genre_mode_without_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--mix-length used to warn and be ignored outside --playlist; it now applies in genre mode too."""
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--mix-length", "60"])
+    run_mock = AsyncMock(return_value=None)
+
+    # Real load_dotenv() would pollute os.environ (e.g. CATALOG_API_URL) for the rest of
+    # the test session, so stub it out — irrelevant to what this test verifies.
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+
+    err = capsys.readouterr().err
+    assert "--mix-length is only used in playlist mode" not in err
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["mix_length"] == 60
