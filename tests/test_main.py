@@ -20,7 +20,9 @@ from mixlab.__main__ import (
     main,
     run,
     run_export_unplayed,
+    run_feedback,
 )
+from mixlab.history import ConceptHistory, ConceptRecord, HistoryEntry, append_run, load_history
 from mixlab.models import PlayedTrack, Track
 from mixlab.playlist_exporter import build_merged_xml, parse_raw_tracks
 from mixlab.reader import parse_collection
@@ -668,3 +670,186 @@ def test_main_accepts_mix_length_in_genre_mode_without_warning(
     assert "--mix-length is only used in playlist mode" not in err
     assert run_mock.await_args is not None
     assert run_mock.await_args.kwargs["mix_length"] == 60
+
+
+# ---------------------------------------------------------------------------
+# run_feedback / mixlab --feedback (#52)
+# ---------------------------------------------------------------------------
+
+
+def _minimal_entry(run_id: str, genre: str = "house") -> HistoryEntry:
+    return HistoryEntry(
+        run_id=run_id,
+        created_at="2026-01-01T00:00:00+00:00",
+        mode="standard",
+        genre=genre,
+        selected_canvas_ids=[],
+        dominant_bpm_clusters=[],
+        dominant_camelot_keys=[],
+        core_track_ids=[],
+        anchor_track_ids=[],
+        opener_candidates=[],
+        closer_candidates=[],
+        concept_title="",
+        concept_track_ids=[],
+        energy_path="",
+        mood="",
+    )
+
+
+def test_run_feedback_no_flags_lists_most_recent_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    history_path = tmp_path / "history.json"
+    entry = _minimal_entry("r1")
+    entry.concepts = [
+        ConceptRecord(concept_id="c1", title="First", mood="dark", track_ids=["T001"], arc_type=""),
+        ConceptRecord(
+            concept_id="c2", title="Second", mood="light", track_ids=["T002"], arc_type="", feedback="played"
+        ),
+    ]
+    append_run(ConceptHistory(), entry, history_path)
+
+    exit_code = run_feedback(None, None, "", history_path)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "First" in out
+    assert "(none)" in out
+    assert "Second" in out
+    assert "played" in out
+
+
+def test_run_feedback_no_history_file_lists_nothing_and_exits_zero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = run_feedback(None, None, "", tmp_path / "no-such-file.json")
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "No concept history found" in out
+
+
+def test_run_feedback_records_verdict_and_persists_to_file(tmp_path: Path) -> None:
+    history_path = tmp_path / "history.json"
+    entry = _minimal_entry("r1")
+    entry.concepts = [
+        ConceptRecord(concept_id="c1", title="Midnight Run", mood="dark", track_ids=["T001"], arc_type="")
+    ]
+    append_run(ConceptHistory(), entry, history_path)
+
+    exit_code = run_feedback("midnight run", "played", "great opener", history_path)
+
+    assert exit_code == 0
+    reloaded = load_history(history_path)
+    record = reloaded.runs[0].concepts[0]
+    assert record.feedback == "played"
+    assert record.feedback_notes == "great opener"
+    assert record.feedback_recorded_at != ""
+
+
+def test_run_feedback_matches_concept_id_prefix(tmp_path: Path) -> None:
+    history_path = tmp_path / "history.json"
+    entry = _minimal_entry("r1")
+    entry.concepts = [
+        ConceptRecord(concept_id="abcdef12-3456", title="Midnight Run", mood="dark", track_ids=["T001"], arc_type="")
+    ]
+    append_run(ConceptHistory(), entry, history_path)
+
+    exit_code = run_feedback("abcdef12", "rejected", "", history_path)
+
+    assert exit_code == 0
+    reloaded = load_history(history_path)
+    assert reloaded.runs[0].concepts[0].feedback == "rejected"
+
+
+def test_run_feedback_uses_most_recent_run_when_title_repeats(tmp_path: Path) -> None:
+    """Same title generated in two runs — the most recent run's concept is updated."""
+    from mixlab.history import save_history
+
+    history_path = tmp_path / "history.json"
+    older = _minimal_entry("r1")
+    older.created_at = "2026-01-01T00:00:00+00:00"
+    older.concepts = [ConceptRecord(concept_id="old", title="Repeat", mood="dark", track_ids=["T001"], arc_type="")]
+    newer = _minimal_entry("r2")
+    newer.created_at = "2026-02-01T00:00:00+00:00"
+    newer.concepts = [ConceptRecord(concept_id="new", title="Repeat", mood="light", track_ids=["T002"], arc_type="")]
+    save_history(ConceptHistory(runs=[older, newer]), history_path)
+
+    exit_code = run_feedback("repeat", "played", "", history_path)
+
+    assert exit_code == 0
+    reloaded = load_history(history_path)
+    assert reloaded.runs[0].concepts[0].feedback == ""
+    assert reloaded.runs[1].concepts[0].feedback == "played"
+
+
+def test_run_feedback_unknown_title_exits_one_with_suggestions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    history_path = tmp_path / "history.json"
+    entry = _minimal_entry("r1")
+    entry.concepts = [
+        ConceptRecord(concept_id="c1", title="Midnight Run", mood="dark", track_ids=["T001"], arc_type="")
+    ]
+    append_run(ConceptHistory(), entry, history_path)
+
+    exit_code = run_feedback("Midnigth Run", "played", "", history_path)
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "No concept found" in err
+    assert "Midnight Run" in err
+
+
+def test_run_feedback_verdict_without_concept_errors(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = run_feedback(None, "played", "", tmp_path / "history.json")
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "--concept" in err
+
+
+def test_run_feedback_concept_without_verdict_errors(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = run_feedback("Some Title", None, "", tmp_path / "history.json")
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "--verdict" in err
+
+
+def test_main_feedback_flag_lists_concepts_via_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    history_path = tmp_path / "history.json"
+    entry = _minimal_entry("r1")
+    entry.concepts = [ConceptRecord(concept_id="c1", title="First", mood="dark", track_ids=["T001"], arc_type="")]
+    append_run(ConceptHistory(), entry, history_path)
+
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", history_path)
+    monkeypatch.setattr("sys.argv", ["mixlab", "--feedback"])
+    with patch("mixlab.__main__.load_dotenv"), pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 0
+    assert "First" in capsys.readouterr().out
+
+
+def test_main_feedback_flag_records_verdict_via_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history_path = tmp_path / "history.json"
+    entry = _minimal_entry("r1")
+    entry.concepts = [ConceptRecord(concept_id="c1", title="First", mood="dark", track_ids=["T001"], arc_type="")]
+    append_run(ConceptHistory(), entry, history_path)
+
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", history_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["mixlab", "--feedback", "--concept", "First", "--verdict", "played", "--notes", "great"],
+    )
+    with patch("mixlab.__main__.load_dotenv"), pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 0
+    reloaded = load_history(history_path)
+    assert reloaded.runs[0].concepts[0].feedback == "played"
+    assert reloaded.runs[0].concepts[0].feedback_notes == "great"

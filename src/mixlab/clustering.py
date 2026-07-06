@@ -778,11 +778,14 @@ def _novelty_source(canvas: MixCanvas, history: ConceptHistory) -> str:
     if breakdown.age_of_top_match < 0 or breakdown.combined == 0.0:
         return "no overlap with history"
     entry = list(reversed(history.runs[-_HIST_RECENCY:]))[breakdown.age_of_top_match]
-    return (
+    description = (
         f"run[{entry.created_at[:10]} genre={entry.genre}] "
         f"combined_decayed={breakdown.combined:.3f} "
         f"(track={breakdown.track_similarity:.3f}, shape={breakdown.shape_similarity:.3f})"
     )
+    if breakdown.feedback_multiplier != 1.0:
+        description += f" feedback×{breakdown.feedback_multiplier:g}"
+    return description
 
 
 def _emit_canvas_score_debug(

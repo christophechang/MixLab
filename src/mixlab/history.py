@@ -61,6 +61,29 @@ def _role_for_track(track_id: str, canvas: MixCanvas) -> str:
 
 
 @dataclass
+class ConceptRecord:
+    """One generated concept from a run, with its own feedback verdict (#12, #52).
+
+    A single run can produce several ``MixConcept``s; each gets its own record so
+    the RECENT CONCEPTS prompt block and shape-novelty scoring can see all of them,
+    not just ``concepts[0]``. ``feedback`` starts empty ("") and is filled in
+    retroactively via ``mixlab --feedback`` once the DJ has actually used (or
+    rejected) the concept — recording happens hours or days after the run that
+    generated it.
+    """
+
+    concept_id: str
+    title: str
+    mood: str
+    track_ids: list[str]
+    arc_type: str  # "" when unknown
+    role_pattern: list[str] = field(default_factory=list)
+    feedback: str = ""  # "" | "played" | "played_modified" | "rejected" | "unused"
+    feedback_notes: str = ""
+    feedback_recorded_at: str = ""
+
+
+@dataclass
 class HistoryEntry:
     run_id: str
     created_at: str
@@ -83,6 +106,10 @@ class HistoryEntry:
     selected_canvas_risk_notes: list[str] = field(default_factory=list)
     bpm_band: tuple[float, float] = field(default_factory=lambda: (0.0, 0.0))
     role_pattern: list[str] = field(default_factory=list)
+    # #52: full per-run concept list. concept_title/concept_track_ids/energy_path/
+    # mood/role_pattern above remain populated from concepts[0] for backward compat
+    # with every consumer written before this field existed.
+    concepts: list[ConceptRecord] = field(default_factory=list)
 
     @classmethod
     def from_run(
@@ -107,26 +134,43 @@ class HistoryEntry:
             bpm_clusters.append(canvas.dominant_bpm)
             camelot_keys.append(canvas.dominant_camelot)
 
+        # #52: build one ConceptRecord per generated concept (not just concepts[0]) so
+        # RECENT CONCEPTS and shape-novelty scoring see everything a run produced.
+        # role_pattern: classify each concept track against its matched canvas's role
+        # candidate pools. Stage 2 does not emit per-track roles structurally; this is
+        # the closest reproducible signal available without prompt changes.
+        concept_records: list[ConceptRecord] = []
+        for concept in concepts:
+            matched_canvas = _match_concept_to_canvas(concept, canvases)
+            concept_role_pattern: list[str] = []
+            if matched_canvas is not None:
+                concept_role_pattern = [_role_for_track(tid, matched_canvas) for tid in concept.track_ids]
+            concept_records.append(
+                ConceptRecord(
+                    concept_id=str(uuid.uuid4()),
+                    title=concept.title,
+                    mood=concept.mood,
+                    track_ids=list(concept.track_ids),
+                    # Fix v0.9 bug: energy_path was always written as "". Populate from
+                    # the arc_type Stage 2 emits since v0.9 (defaults to None if absent,
+                    # which we render as "" for backward compatibility with the field type).
+                    arc_type=concept.arc_type or "",
+                    role_pattern=concept_role_pattern,
+                )
+            )
+
         concept_track_ids: list[str] = []
         concept_title = ""
         mood = ""
         energy_path = ""
         role_pattern: list[str] = []
-        if concepts:
-            primary = concepts[0]
+        if concept_records:
+            primary = concept_records[0]
             concept_track_ids = list(primary.track_ids)
             concept_title = primary.title
             mood = primary.mood
-            # Fix v0.9 bug: energy_path was always written as "". Populate from the
-            # arc_type Stage 2 emits since v0.9 (defaults to None if absent, which we
-            # render as "" for backward compatibility with the field type).
-            energy_path = primary.arc_type or ""
-            # role_pattern: classify each concept track against the matched canvas's
-            # role candidate pools. Stage 2 does not emit per-track roles structurally;
-            # this is the closest reproducible signal available without prompt changes.
-            primary_canvas = _match_concept_to_canvas(primary, canvases)
-            if primary_canvas is not None:
-                role_pattern = [_role_for_track(tid, primary_canvas) for tid in primary.track_ids]
+            energy_path = primary.arc_type
+            role_pattern = list(primary.role_pattern)
 
         canvas_score_breakdown: dict[str, float] = {}
         selected_canvas_risk_notes: list[str] = []
@@ -173,6 +217,7 @@ class HistoryEntry:
             selected_canvas_risk_notes=selected_canvas_risk_notes,
             bpm_band=bpm_band,
             role_pattern=role_pattern,
+            concepts=concept_records,
         )
 
 
@@ -201,6 +246,12 @@ def load_history(path: Path) -> ConceptHistory:
             bpm_band_raw = payload.get("bpm_band")
             if isinstance(bpm_band_raw, list) and len(bpm_band_raw) == 2:
                 payload["bpm_band"] = (float(bpm_band_raw[0]), float(bpm_band_raw[1]))
+            concepts_raw = payload.get("concepts")
+            payload["concepts"] = (
+                [_coerce_concept_record(c) for c in concepts_raw if isinstance(c, dict)]
+                if isinstance(concepts_raw, list)
+                else []
+            )
             entries.append(HistoryEntry(**payload))
         return ConceptHistory(runs=entries)
     except Exception:
@@ -208,11 +259,33 @@ def load_history(path: Path) -> ConceptHistory:
         return ConceptHistory()
 
 
+def _coerce_concept_record(raw: dict[str, Any]) -> ConceptRecord:
+    """Filter a raw concept dict to known fields, defaulting anything required-but-missing.
+
+    Mirrors the ``HistoryEntry`` forward/backward-compat pattern: unknown keys are
+    dropped, missing keys get sane defaults rather than raising (``ConceptRecord``'s
+    leading fields have no dataclass default since ``from_run`` always populates them).
+    """
+    valid_fields = set(ConceptRecord.__dataclass_fields__)
+    payload: dict[str, Any] = {k: v for k, v in raw.items() if k in valid_fields}
+    payload.setdefault("concept_id", str(uuid.uuid4()))
+    payload.setdefault("title", "")
+    payload.setdefault("mood", "")
+    payload.setdefault("track_ids", [])
+    payload.setdefault("arc_type", "")
+    return ConceptRecord(**payload)
+
+
 def append_run(history: ConceptHistory, entry: HistoryEntry, path: Path) -> None:
+    history.runs.append(entry)
+    if len(history.runs) > _MAX_HISTORY:
+        history.runs = history.runs[-_MAX_HISTORY:]
+    save_history(history, path)
+
+
+def save_history(history: ConceptHistory, path: Path) -> None:
+    """Write the full history file as-is (no append/truncate). Used by ``mixlab --feedback``."""
     try:
-        history.runs.append(entry)
-        if len(history.runs) > _MAX_HISTORY:
-            history.runs = history.runs[-_MAX_HISTORY:]
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"runs": [asdict(r) for r in history.runs]}
         path.write_text(json.dumps(payload, indent=2))
@@ -220,27 +293,62 @@ def append_run(history: ConceptHistory, entry: HistoryEntry, path: Path) -> None
         logger.warning("Failed to write concept-history.json")
 
 
-_RECENT_CONCEPTS_LIMIT = 5
+_RECENT_CONCEPTS_LIMIT = 8
+
+
+def _pseudo_concept_record(entry: HistoryEntry) -> ConceptRecord:
+    """Synthesize a ConceptRecord from an entry's legacy single-concept fields.
+
+    Used for pre-#52 history entries (or any entry whose ``concepts`` list is
+    empty) so callers iterating concepts see one item, matching the old behaviour.
+    """
+    return ConceptRecord(
+        concept_id="",
+        title=entry.concept_title,
+        mood=entry.mood,
+        track_ids=list(entry.concept_track_ids),
+        arc_type=entry.energy_path,
+        role_pattern=list(entry.role_pattern),
+    )
 
 
 def format_recent_concepts(history: ConceptHistory, limit: int = _RECENT_CONCEPTS_LIMIT) -> str | None:
     """Build a compact 'recent concepts' block for Stage 2 prompt injection.
 
     Returns None when history is empty so the caller can omit the section entirely
-    (rather than rendering an empty header). The block lists the most recent N
-    concepts in reverse chronological order with title, date, genre, arc_type, and
-    mood — enough character for the model to deliberately diverge from prior runs.
+    (rather than rendering an empty header). Runs are walked newest-first; every
+    concept a run produced is a candidate line (falling back to a single
+    pseudo-record built from the legacy single-concept fields when a run's
+    ``concepts`` list is empty — pre-#52 history or any entry that had no concepts).
+    Up to ``limit`` lines are collected total, deduped by lowercased title (the most
+    recent occurrence wins since we walk newest-first). Enough character for the
+    model to deliberately diverge from prior runs.
     """
     if not history.runs:
         return None
-    recent = history.runs[-limit:]
-    lines: list[str] = ["RECENT CONCEPTS (avoid retreading these):"]
-    for entry in reversed(recent):
+    seen_titles: set[str] = set()
+    rows: list[tuple[str, str, str, str, str]] = []  # title, date, genre, arc, mood
+    for entry in reversed(history.runs):
         date_part = entry.created_at[:10] if entry.created_at else "unknown"
-        title = entry.concept_title or "(untitled)"
-        arc = entry.energy_path or "unspecified"
-        mood = entry.mood or "unspecified"
-        lines.append(f'- "{title}" ({date_part}, {entry.genre}, arc: {arc}, mood: {mood})')
+        records = entry.concepts if entry.concepts else [_pseudo_concept_record(entry)]
+        for record in records:
+            title = record.title or "(untitled)"
+            key = title.lower()
+            if key in seen_titles:
+                continue
+            seen_titles.add(key)
+            arc = record.arc_type or "unspecified"
+            mood = record.mood or "unspecified"
+            rows.append((title, date_part, entry.genre, arc, mood))
+            if len(rows) >= limit:
+                break
+        if len(rows) >= limit:
+            break
+    if not rows:
+        return None
+    lines: list[str] = ["RECENT CONCEPTS (avoid retreading these):"]
+    for title, date_part, genre, arc, mood in rows:
+        lines.append(f'- "{title}" ({date_part}, {genre}, arc: {arc}, mood: {mood})')
     lines.append("")
     lines.append(
         "These are concepts you generated previously. Diverge deliberately: pick titles, "
@@ -290,6 +398,26 @@ def concept_shape_from_entry(entry: HistoryEntry) -> ConceptShape:
     )
 
 
+def concept_shape_from_record(record: ConceptRecord, entry: HistoryEntry) -> ConceptShape:
+    """Extract the concept-shape fingerprint from one concept record within an entry.
+
+    ``bpm_band``/``camelot_zone`` still come from the entry's dominant lists (the
+    canvas-level signal is shared across every concept a run produced); ``energy_path``
+    and the ``has_*`` role flags come from this specific concept's own arc/role_pattern.
+    """
+    dominant_bpm = entry.dominant_bpm_clusters[0] if entry.dominant_bpm_clusters else 0.0
+    camelot = entry.dominant_camelot_keys[0] if entry.dominant_camelot_keys else ""
+    role_pattern = record.role_pattern
+    return ConceptShape(
+        bpm_band=_bpm_band_label(dominant_bpm),
+        camelot_zone=camelot,
+        energy_path=record.arc_type or "",
+        has_opener="opener" in role_pattern or bool(entry.opener_candidates),
+        has_closer="closer" in role_pattern or bool(entry.closer_candidates),
+        has_peak="peak" in role_pattern,
+    )
+
+
 def concept_shape_similarity(a: ConceptShape, b: ConceptShape) -> float:
     """Similarity over reliably-populated shape fields.
 
@@ -327,6 +455,39 @@ class NoveltyBreakdown:
     shape_similarity: float
     combined: float
     age_of_top_match: int  # 0 = most recent run; -1 when no comparable history
+    # #52: multiplier derived from the top-match entry's concept feedback. 1.0 = no
+    # signal (current behaviour unchanged).
+    feedback_multiplier: float = 1.0
+
+
+# Feedback multipliers (#52 / #12 discovery doc). Deliberately blunt: a concept the
+# DJ actually played (or played with modifications) should penalise novelty more —
+# it is battle-tested, not just generated. A concept the DJ rejected outright should
+# barely penalise future generation — the DJ already said no to that shape/tracks.
+_FEEDBACK_PLAYED_MULTIPLIER = 1.5
+_FEEDBACK_REJECTED_MULTIPLIER = 0.25
+
+
+def _feedback_multiplier(entry: HistoryEntry) -> float:
+    """Derive the feedback multiplier for one history entry from its concept records.
+
+    Rules (evaluated in order):
+    - Any concept marked "played" or "played_modified" -> 1.5x (battle-tested, weight
+      it more heavily so it stops looking novel).
+    - No "played"/"played_modified" signal, but every concept with a verdict is
+      "rejected" (and at least one has a verdict) -> 0.25x (DJ said no; barely
+      penalise future generation).
+    - Otherwise (no feedback recorded at all, or a mixed bag) -> 1.0x, current
+      behaviour.
+    """
+    feedbacks = [record.feedback for record in entry.concepts if record.feedback]
+    if not feedbacks:
+        return 1.0
+    if any(f in ("played", "played_modified") for f in feedbacks):
+        return _FEEDBACK_PLAYED_MULTIPLIER
+    if all(f == "rejected" for f in feedbacks):
+        return _FEEDBACK_REJECTED_MULTIPLIER
+    return 1.0
 
 
 def similarity_breakdown_to_history(
@@ -341,6 +502,13 @@ def similarity_breakdown_to_history(
     components are weighted (0.65 / 0.35) and decayed jointly per recency age before
     taking the max across the recent window. Track-overlap remains primary; the shape
     component catches "same shape, different tracks" repetition.
+
+    Shape similarity is taken as the MAX over every concept the entry recorded (#52)
+    — a run producing 5 concepts should be penalised by whichever of those 5 most
+    resembles the candidate, not just the first. Entries with no recorded concepts
+    (pre-#52 history) fall back to the single legacy shape fingerprint. A per-entry
+    feedback multiplier (#12/#52) is applied to the combined value before decay, then
+    the result is clamped to <= 1.0.
     """
     empty = NoveltyBreakdown(track_similarity=0.0, shape_similarity=0.0, combined=0.0, age_of_top_match=-1)
     if not history.runs:
@@ -353,8 +521,16 @@ def similarity_breakdown_to_history(
         hist_ids = frozenset(entry.core_track_ids)
         union = canvas_ids | hist_ids
         track_sim = len(canvas_ids & hist_ids) / len(union) if union else 0.0
-        shape_sim = concept_shape_similarity(canvas_shape, concept_shape_from_entry(entry))
+        if entry.concepts:
+            shape_sim = max(
+                concept_shape_similarity(canvas_shape, concept_shape_from_record(record, entry))
+                for record in entry.concepts
+            )
+        else:
+            shape_sim = concept_shape_similarity(canvas_shape, concept_shape_from_entry(entry))
         combined = _NOVELTY_TRACK_WEIGHT * track_sim + _NOVELTY_SHAPE_WEIGHT * shape_sim
+        multiplier = _feedback_multiplier(entry)
+        combined = min(combined * multiplier, 1.0)
         decayed = combined * (_DECAY**age)
         if decayed > best.combined:
             best = NoveltyBreakdown(
@@ -362,6 +538,7 @@ def similarity_breakdown_to_history(
                 shape_similarity=shape_sim * (_DECAY**age),
                 combined=decayed,
                 age_of_top_match=age,
+                feedback_multiplier=multiplier,
             )
     return best
 

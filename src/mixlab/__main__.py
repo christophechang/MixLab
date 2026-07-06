@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime
+import difflib
 import os
 import sys
 import time
@@ -29,7 +30,7 @@ from mixlab.clustering import (
 )
 from mixlab.config import CUSTOM_GENRES, GENRE_MAP, IGNORED_GENRES
 from mixlab.discord_client import send_report
-from mixlab.history import HistoryEntry, append_run, load_history
+from mixlab.history import ConceptHistory, ConceptRecord, HistoryEntry, append_run, load_history, save_history
 from mixlab.llm import (
     make_cascade_state,
     stage0_intent_brief,
@@ -51,7 +52,9 @@ from mixlab.playlist_mode import (
 from mixlab.reader import apply_bpm_corrections, parse_collection, parse_playlists
 
 _XML_PATH = Path("import/rekordbox.xml")
+_HISTORY_PATH = Path(".mixlab/concept-history.json")
 _DO_NOT_RECOMMEND_PLAYLIST = "DO NOT RECOMMEND"
+_FEEDBACK_VERDICTS = ("played", "played_modified", "rejected", "unused")
 
 
 def _build_tracks_by_id(tracks: list[Track]) -> dict[str, Track]:
@@ -283,6 +286,71 @@ def _show_cached_genres() -> None:
     print()
 
 
+def _print_feedback_listing(history: ConceptHistory) -> None:
+    """List the most recent run's concepts with their current feedback state (#52)."""
+    if not history.runs:
+        print("No concept history found — run mixlab first to generate concepts.")
+        return
+    latest = history.runs[-1]
+    if not latest.concepts:
+        print(f"Most recent run ({latest.created_at[:10]}, {latest.genre}) recorded no concepts.")
+        return
+    print(f"Most recent run ({latest.created_at[:10]}, {latest.genre}):")
+    for i, record in enumerate(latest.concepts):
+        feedback_label = record.feedback or "(none)"
+        print(f"  [{i}] {record.title} — feedback: {feedback_label}")
+
+
+def _find_feedback_concept(history: ConceptHistory, query: str) -> tuple[HistoryEntry, ConceptRecord] | None:
+    """Find the most recent run containing a concept matching ``query``.
+
+    Matches case-insensitively on title, or as a prefix of ``concept_id``. Runs are
+    walked newest-first so the first hit is the most recent match.
+    """
+    query_lower = query.lower()
+    for entry in reversed(history.runs):
+        for record in entry.concepts:
+            if record.title.lower() == query_lower or (record.concept_id and record.concept_id.startswith(query)):
+                return entry, record
+    return None
+
+
+def run_feedback(concept: str | None, verdict: str | None, notes: str, history_path: Path) -> int:
+    """Handle ``mixlab --feedback`` (#52). No LLM calls, no network — pure history-file edit.
+
+    Returns the process exit code: 0 for a successful listing or feedback update,
+    1 for a usage error or an unmatched concept title.
+    """
+    history = load_history(history_path)
+
+    if concept is None and verdict is None:
+        _print_feedback_listing(history)
+        return 0
+    if verdict is None:
+        print("ERROR: --verdict is required when --concept is given.", file=sys.stderr)
+        return 1
+    if concept is None:
+        print("ERROR: --concept is required when --verdict is given.", file=sys.stderr)
+        return 1
+
+    match = _find_feedback_concept(history, concept)
+    if match is None:
+        all_titles = [record.title for entry in history.runs for record in entry.concepts]
+        suggestions = difflib.get_close_matches(concept, all_titles, n=3)
+        print(f'No concept found matching "{concept}".', file=sys.stderr)
+        if suggestions:
+            print("Did you mean: " + ", ".join(suggestions), file=sys.stderr)
+        return 1
+
+    entry, record = match
+    record.feedback = verdict
+    record.feedback_notes = notes
+    record.feedback_recorded_at = datetime.datetime.now(datetime.UTC).isoformat()
+    save_history(history, history_path)
+    print(f'Recorded feedback "{verdict}" for concept "{record.title}" (run {entry.created_at[:10]}, {entry.genre}).')
+    return 0
+
+
 async def run_playlist_mode(
     playlist_name: str,
     genre: str | None,
@@ -391,7 +459,7 @@ async def run_playlist_mode(
 
     # Load concept history so Stage 2 can deliberately diverge from prior runs (#13).
     # Playlist mode does not use canvas selection so history was previously not loaded here.
-    history = load_history(Path(".mixlab/concept-history.json"))
+    history = load_history(_HISTORY_PATH)
 
     all_concepts, report = await stage2_curate_and_report(
         shortlists,
@@ -694,7 +762,7 @@ async def run(
         )
 
     # Build Mix Canvases and select top candidates for Stage 2 (diversity-aware, deterministic).
-    history = load_history(Path(".mixlab/concept-history.json"))
+    history = load_history(_HISTORY_PATH)
     all_canvases: list[MixCanvas] = [build_mix_canvas(c, tracks_by_id) for c in all_shortlists]
     selected_canvases = select_canvases(all_canvases, history, mode=mode, debug=debug)
     if not selected_canvases:
@@ -758,7 +826,7 @@ async def run(
             genre=genre or "_default",
             mode={"all": "all-tracks", "played": "played", "unplayed": "standard"}[mode],
         )
-        append_run(history, entry, Path(".mixlab/concept-history.json"))
+        append_run(history, entry, _HISTORY_PATH)
     except Exception as exc:
         print(f"Warning: could not write concept history: {exc}", file=sys.stderr)
     elapsed = time.monotonic() - t_start
@@ -916,6 +984,8 @@ examples:
   mixlab --playlist "Monday Night" --locked          trim seed playlist only, no library additions
   mixlab --genres                     show cached counts from last run (no API)
   mixlab --export-unplayed            export all unplayed tracks as Rekordbox XML + post to Discord
+  mixlab --feedback                   list most recent run's concepts + feedback state (no LLM)
+  mixlab --feedback --concept "Title" --verdict played --notes "great opener"  record concept feedback
 """,
     )
     parser.add_argument(
@@ -1056,6 +1126,38 @@ examples:
             "(the effective seed is printed at run start). Default: derived from today's date."
         ),
     )
+    parser.add_argument(
+        "--feedback",
+        action="store_true",
+        help=(
+            "Record or list feedback for previously generated concepts (#52). No LLM calls, no "
+            "network. Alone, lists the most recent run's concepts and their feedback state. "
+            "Combine with --concept and --verdict to record a verdict."
+        ),
+    )
+    parser.add_argument(
+        "--concept",
+        type=str,
+        default=None,
+        metavar="TEXT",
+        help=(
+            "With --feedback: title (case-insensitive) or concept_id prefix identifying which "
+            "concept to record feedback for. Matches the most recent run containing it."
+        ),
+    )
+    parser.add_argument(
+        "--verdict",
+        choices=list(_FEEDBACK_VERDICTS),
+        default=None,
+        help="With --feedback --concept: the feedback verdict to record.",
+    )
+    parser.add_argument(
+        "--notes",
+        type=str,
+        default="",
+        metavar="TEXT",
+        help="With --feedback --concept --verdict: optional free-text note stored alongside the verdict.",
+    )
     args = parser.parse_args()
     _validate_range_args(
         min_bpm=args.min_bpm,
@@ -1064,6 +1166,9 @@ examples:
         max_year=args.max_year,
     )
     debug = args.debug or bool(os.environ.get("MIXLAB_DEBUG_SCORE"))
+    if args.feedback:
+        sys.exit(run_feedback(args.concept, args.verdict, args.notes, _HISTORY_PATH))
+
     if args.genres:
         _show_cached_genres()
         return
