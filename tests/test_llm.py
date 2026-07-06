@@ -3786,3 +3786,155 @@ def test_append_runtime_to_report_unchanged_when_no_durations_known() -> None:
     result = _append_runtime_to_report(original, concept, tracks_by_id)
 
     assert result == original
+
+
+# ---------------------------------------------------------------------------
+# _format_canvas_section — Strong transitions line + demoted role hints (#51)
+# ---------------------------------------------------------------------------
+
+
+def _canvas_with_role_candidates(track_ids: list[str], roles: CanvasRoleCandidates) -> MixCanvas:
+    concept = MixConcept(title="T", mood="dark", track_ids=track_ids)
+    return MixCanvas(
+        canvas_id="dnb_172.0_8A",
+        genre="Drum & Bass",
+        bpm_range=(86.0, 172.0),
+        dominant_bpm=172.0,
+        dominant_camelot="8A",
+        core_track_ids=track_ids,
+        bridge_track_ids=[],
+        wildcard_track_ids=[],
+        roles=roles,
+        contrast=ContrastAssets(
+            vocal_moments=[], texture_changes=[], darker_turns=[], brighter_lifts=[], lower_pressure_resets=[]
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=concept,
+    )
+
+
+def test_format_canvas_section_renders_strong_transitions_line_with_mechanism() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="Drum & Bass"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=86.0, camelot_key="8A", genre="Drum & Bass"),
+    }
+    roles = CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[])
+    canvas = _canvas_with_role_candidates(["1", "2"], roles)
+
+    section = _format_canvas_section(canvas, tracks_by_id)
+
+    assert "Strong transitions:" in section
+    assert "halftime lock 172→86" in section
+    assert "ID:1→ID:2" in section
+
+
+def test_format_canvas_section_keeps_opener_closer_drops_other_role_hints() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist="A", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+    roles = CanvasRoleCandidates(
+        opener=["1"], groove_locker=["2"], builder=["2"], pivot=["3"], peak=["3"], closer=["4"]
+    )
+    canvas = _canvas_with_role_candidates(["1", "2", "3", "4"], roles)
+
+    section = _format_canvas_section(canvas, tracks_by_id)
+
+    assert "Opener: ID:1" in section
+    assert "Closer: ID:4" in section
+    assert "Groove-locker:" not in section
+    assert "Builder:" not in section
+    assert "Peak:" not in section
+    assert "Pivot:" not in section
+
+
+# ---------------------------------------------------------------------------
+# validate_stage2_output — tempo-relation-aware BPM jump + arc verification (#51)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_stage2_output_halftime_pair_does_not_warn_bpm_jump() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=86.0, camelot_key="8A", genre="DnB"),  # halftime lock
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert not any("BPM jump" in w for w in warnings)
+
+
+def test_validate_stage2_output_straight_20_bpm_jump_still_warns() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=194.0, camelot_key="8A", genre="DnB"),  # +20, no ratio
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=194.0, camelot_key="8A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("BPM jump" in w for w in warnings)
+
+
+def test_validate_stage2_output_arc_mismatch_warning_for_monotonic_wave() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    # Declared 'wave' but energy climbs monotonically — a factual mismatch.
+    energies = [2, 3, 4, 5, 6, 7, 8, 8]
+    lib = {
+        str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="DnB", energy=e)
+        for i, e in enumerate(energies, start=1)
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids, arc_type="wave")
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("arc mismatch" in w and "monotonic rising" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# _compute_practicality_score — residual-stretch bpm_smoothness (#51)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_practicality_clean_halftime_smoothness_matches_tight_straight() -> None:
+    from mixlab.llm import _compute_practicality_score
+
+    halftime_ids = ["1", "2", "3", "4"]
+    halftime_lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="A", title="T2", bpm=86.0, camelot_key="8A", genre="DnB"),
+        "3": Track(track_id="3", artist="A", title="T3", bpm=172.0, camelot_key="8A", genre="DnB"),
+        "4": Track(track_id="4", artist="A", title="T4", bpm=86.0, camelot_key="8A", genre="DnB"),
+    }
+    halftime_concept = MixConcept(title="H", mood="dark", track_ids=halftime_ids)
+    halftime_score = _compute_practicality_score(halftime_concept, halftime_lib, intent_brief=None)
+
+    straight_ids = ["10", "11", "12", "13"]
+    straight_lib = {
+        tid: Track(track_id=tid, artist="A", title=f"T{tid}", bpm=128.0, camelot_key="8A", genre="DnB")
+        for tid in straight_ids
+    }
+    straight_concept = MixConcept(title="S", mood="dark", track_ids=straight_ids)
+    straight_score = _compute_practicality_score(straight_concept, straight_lib, intent_brief=None)
+
+    assert halftime_score.bpm_smoothness > 0.9
+    assert abs(halftime_score.bpm_smoothness - straight_score.bpm_smoothness) < 0.05

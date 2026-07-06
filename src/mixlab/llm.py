@@ -56,6 +56,7 @@ from mixlab.models import (
     TrackMode,
     Transition,
 )
+from mixlab.transitions import relation_label, strong_edges, tempo_relation, trace_arc
 
 _ARC_TYPE_VALUES: frozenset[str] = frozenset(get_args(ArcType))
 
@@ -609,21 +610,29 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
     if canvas.bridge_track_ids or canvas.wildcard_track_ids:
         lines.append(f"Bridge: {bridge_str} | Wildcard: {wild_str}")
 
+    # Role hints demoted to Opener/Closer only (audit L4). Groove-locker/Builder/Peak/Pivot
+    # fired on nearly every energy band and added noise to the prompt surface — canvas.roles
+    # stays fully populated for scoring/history, this is a prompt-surface trim only.
     role_parts = []
     if r.opener:
         role_parts.append(f"Opener: {ids_block(r.opener)}")
-    if r.groove_locker:
-        role_parts.append(f"Groove-locker: {ids_block(r.groove_locker)}")
-    if r.builder:
-        role_parts.append(f"Builder: {ids_block(r.builder)}")
-    if r.peak:
-        role_parts.append(f"Peak: {ids_block(r.peak)}")
-    if r.pivot:
-        role_parts.append(f"Pivot: {ids_block(r.pivot)}")
     if r.closer:
         role_parts.append(f"Closer: {ids_block(r.closer)}")
     if role_parts:
         lines.append(" | ".join(role_parts))
+
+    # Strong transitions: non-obvious mixability mechanisms (halftime locks, energy
+    # lifts, 3:4 shuffles) over the canvas's resolvable tracks. Omitted when none.
+    canvas_tracks = [tracks_by_id[tid] for tid in canvas.source_concept.track_ids if tid in tracks_by_id]
+    edges = strong_edges(canvas_tracks, top_n=6)
+    if edges:
+        tracks_lookup = {t.track_id: t for t in canvas_tracks}
+        edge_parts = [
+            f"ID:{e.from_id}→ID:{e.to_id} "
+            f"({relation_label(e, tracks_lookup[e.from_id], tracks_lookup[e.to_id])}, score {e.score:.2f})"
+            for e in edges
+        ]
+        lines.append("Strong transitions: " + " | ".join(edge_parts))
 
     if canvas.core_anchor_ids:
         lines.append(f"Anchors: {ids_block(canvas.core_anchor_ids)}")
@@ -927,7 +936,12 @@ def validate_stage2_output(
             tr = transition_map.get((a.track_id, b.track_id))
             justified_risk = tr is not None and tr.is_risky and tr.risk_type != ""
             bpm_jump = abs(a.bpm - b.bpm)
-            if bpm_jump > 15 and not justified_risk:
+            # A named ratio move (halftime/double/3:4/4:3) is not a jump — it is a locked
+            # tempo relationship, so suppress the raw-BPM warning for those. Straight moves
+            # over the threshold still warn as before.
+            rel, _stretch = tempo_relation(a.bpm, b.bpm)
+            is_ratio_move = rel not in ("straight", "incompatible")
+            if bpm_jump > 15 and not justified_risk and not is_ratio_move:
                 warnings.append(
                     f"{label} BPM jump {bpm_jump:.1f} between {a.artist} — {a.title} and {b.artist} — {b.title}"
                 )
@@ -960,6 +974,12 @@ def validate_stage2_output(
         canvas_for_concept = _match_canvas_for_concept(concept, canvases)
         if canvas_for_concept is not None:
             warnings.extend(_structural_warnings(concept, canvas_for_concept, tracks_by_id, genre))
+
+        # Arc verification: the declared arc_type must match the actual per-track energy
+        # sequence. trace_arc states facts — no genre softening.
+        arc_message = trace_arc(concept, tracks_by_id)
+        if arc_message is not None:
+            warnings.append(f"{label} arc mismatch: {arc_message}")
 
         # Generic-name distinctiveness regex.
         name_warning = _generic_name_warning(concept)
@@ -1675,12 +1695,21 @@ def _compute_practicality_score(
     track_sequence = [tracks_by_id[tid] for tid in concept.track_ids if tid in tracks_by_id]
     n = len(track_sequence)
 
-    # bpm_smoothness: how even the consecutive BPM steps are
+    # bpm_smoothness: how even the consecutive BPM steps are, measured on the RESIDUAL
+    # stretch after the best tempo relation rather than raw |ΔBPM|. A clean 172→86
+    # halftime lock has ~0 residual, so it no longer reads as an 86-BPM jolt.
     if n < 3:
         bpm_smoothness = 1.0
     else:
-        bpm_deltas = [abs(track_sequence[i + 1].bpm - track_sequence[i].bpm) for i in range(n - 1)]
-        std = statistics.stdev(bpm_deltas)
+        effective_deltas: list[float] = []
+        for i in range(n - 1):
+            a, b = track_sequence[i], track_sequence[i + 1]
+            rel, stretch = tempo_relation(a.bpm, b.bpm)
+            if rel == "incompatible":
+                effective_deltas.append(abs(b.bpm - a.bpm))
+            else:
+                effective_deltas.append(stretch * 100)
+        std = statistics.stdev(effective_deltas)
         bpm_smoothness = max(0.0, 1.0 - std / 10.0)
 
     # harmonic_ratio: fraction of consecutive pairs that are Camelot-compatible (distance ≤ 1)
