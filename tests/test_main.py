@@ -929,6 +929,70 @@ def test_main_directions_ignored_in_playlist_mode_with_note(
 
 
 # ---------------------------------------------------------------------------
+# main() — --risk flag parsing (#42)
+# ---------------------------------------------------------------------------
+
+
+def test_main_risk_defaults_to_medium_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["risk"] == "medium"
+
+
+def test_main_risk_high_accepted_and_threaded_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--risk", "high"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["risk"] == "high"
+
+
+def test_main_risk_low_accepted_and_threaded_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--risk", "low"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["risk"] == "low"
+
+
+def test_main_risk_high_ignored_in_playlist_mode_with_note(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--playlist", "Monday", "--risk", "high"])
+    playlist_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run_playlist_mode", playlist_mock):
+        main()
+    err = capsys.readouterr().err
+    assert "--risk ignored in playlist mode" in err
+    assert playlist_mock.await_args is not None
+
+
+def test_main_risk_medium_no_note_in_playlist_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Default risk (medium) must not trigger the playlist-mode ignore note."""
+    monkeypatch.setattr("sys.argv", ["mixlab", "--playlist", "Monday"])
+    playlist_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run_playlist_mode", playlist_mock):
+        main()
+    err = capsys.readouterr().err
+    assert "--risk ignored in playlist mode" not in err
+
+
+# ---------------------------------------------------------------------------
 # main() — --intent works in playlist mode too (#54)
 # ---------------------------------------------------------------------------
 

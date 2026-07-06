@@ -597,6 +597,7 @@ async def run(
     mix_length: int | None = None,
     directions: str = "mixed",
     no_revise: bool = False,
+    risk: RiskTolerance = "medium",
 ) -> None:
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
@@ -793,7 +794,7 @@ async def run(
     direction_pool = genre_unplayed_track_ids_source + genre_outliers
 
     if directions == "off":
-        selected_canvases = select_canvases(all_canvases, history, mode=mode, debug=debug)
+        selected_canvases = select_canvases(all_canvases, history, mode=mode, risk=risk, debug=debug)
     elif directions == "only":
         selected_canvases = generate_directions(direction_pool, tracks_by_id, seed=effective_seed, max_directions=6)
         if not selected_canvases:
@@ -801,11 +802,11 @@ async def run(
                 "--directions only: no feasible directions for this pool — falling back to classic canvas selection.",
                 file=sys.stderr,
             )
-            selected_canvases = select_canvases(all_canvases, history, mode=mode, debug=debug)
+            selected_canvases = select_canvases(all_canvases, history, mode=mode, risk=risk, debug=debug)
     else:  # "mixed"
         direction_canvases = generate_directions(direction_pool, tracks_by_id, seed=effective_seed, max_directions=3)
         classic_n = max(3, 6 - len(direction_canvases))
-        classic_selected = select_canvases(all_canvases, history, n=classic_n, mode=mode, debug=debug)
+        classic_selected = select_canvases(all_canvases, history, n=classic_n, mode=mode, risk=risk, debug=debug)
         selected_canvases = classic_selected + direction_canvases
     if not selected_canvases:
         print("No canvases could be built — collection may be out of sync.", file=sys.stderr)
@@ -836,6 +837,7 @@ async def run(
         concept_history=history,
         genre_intent=intent,
         mode=mode,
+        risk=risk,
         deep=deep,
         debug=debug,
         mix_length=mix_length,
@@ -853,6 +855,7 @@ async def run(
         denylist_ids=set(),  # tracks filtered before Stage 1; can't appear in output
         allow_played=mode in ("all", "played"),
         genre=genre or "_default",
+        risk=risk,
     )
 
     # Bounded self-revision pass (#55). Runs when revision is enabled and there is
@@ -870,6 +873,7 @@ async def run(
             played_ids=played_track_ids,
             allow_played=mode in ("all", "played"),
             genre=genre or "_default",
+            risk=risk,
         )
 
     if validation_warnings:
@@ -1040,6 +1044,7 @@ examples:
   mixlab --genre house --intent "warmup, melodic, outdoor afternoon"  creative direction
   mixlab --genre house --deep          opt-in critique pass per concept (2x Stage 2 cost)
   mixlab --genre house --no-revise     skip the bounded self-revision pass (#55)
+  mixlab --genre house --risk high     promote wildcard/anchor picks, relax jump thresholds (#42)
   mixlab --playlist "Monday Night" --mix-length 60   target ~15 tracks for a 1-hour set
   mixlab --playlist "Monday Night" --mix-length 90   target ~22 tracks for a 90-minute set
   mixlab --playlist "Monday Night" --locked          trim seed playlist only, no library additions
@@ -1210,6 +1215,24 @@ examples:
         ),
     )
     parser.add_argument(
+        "--risk",
+        choices=["low", "medium", "high"],
+        default="medium",
+        help=(
+            "Risk knob (#42), genre mode only. Shifts canvas scoring and Stage 2 framing "
+            "toward safety or novelty: high promotes flagged wildcard/concept-anchor tracks "
+            "as featured picks and relaxes the BPM/Camelot jump validator thresholds for "
+            "transitions explicitly annotated as risky (20 BPM / 5 Camelot, vs 15/4 at "
+            "medium — unannotated jumps still use the medium thresholds); low tightens "
+            "scoring toward role coverage and anchor safety and lowers the jump thresholds "
+            "(10 BPM / 3 Camelot); medium (default) is unchanged from prior behaviour. "
+            "Composes with --directions — the risk knob affects canvas scoring and "
+            "validation regardless of which direction mode is active. Ignored in playlist "
+            "mode (playlist mode has its own risk-tolerance path from the Stage 0 intent "
+            "brief, #54)."
+        ),
+    )
+    parser.add_argument(
         "--feedback",
         action="store_true",
         help=(
@@ -1279,6 +1302,12 @@ examples:
                 "--directions ignored in playlist mode — concept directions apply to genre runs only.",
                 file=sys.stderr,
             )
+        if args.risk != "medium":
+            print(
+                "--risk ignored in playlist mode — playlist mode derives risk tolerance from the "
+                "Stage 0 intent brief (#54) instead.",
+                file=sys.stderr,
+            )
         asyncio.run(
             run_playlist_mode(
                 args.playlist,
@@ -1319,6 +1348,7 @@ examples:
             mix_length=args.mix_length,
             directions=args.directions,
             no_revise=args.no_revise,
+            risk=cast("RiskTolerance", args.risk),
         )
     )
 

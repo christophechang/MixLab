@@ -40,6 +40,7 @@ from mixlab.models import (
     ContrastAssets,
     MixCanvas,
     MixConcept,
+    RiskTolerance,
     Track,
     TrackMode,
 )
@@ -916,6 +917,36 @@ DEFAULT_CANVAS_WEIGHTS = CanvasScoreWeights(
 #    is supplied (legacy callers and tests).
 
 
+# Risk-aware canvas score weights (#42). Layered on top of the mode table: at
+# risk="medium" the mode table (or DEFAULT_CANVAS_WEIGHTS) is used unchanged —
+# None here means "no override", keeping medium byte-stable with pre-#42 runs.
+# risk="high" shifts weight toward contrast/novelty (the user asked to be
+# surprised); risk="low" shifts weight toward role coverage and anchor safety.
+CANVAS_SCORE_WEIGHTS_BY_RISK: dict[RiskTolerance, CanvasScoreWeights | None] = {
+    "medium": None,
+    "high": CanvasScoreWeights(
+        technical_viability=0.10,
+        role_coverage=0.15,
+        anchor_strength=0.05,
+        contrast_potential=0.25,
+        distinctiveness=0.15,
+        era_coherence=0.05,
+        label_coherence=0.05,
+        novelty=0.20,
+    ),
+    "low": CanvasScoreWeights(
+        technical_viability=0.15,
+        role_coverage=0.30,
+        anchor_strength=0.20,
+        contrast_potential=0.05,
+        distinctiveness=0.15,
+        era_coherence=0.05,
+        label_coherence=0.05,
+        novelty=0.05,
+    ),
+}
+
+
 def score_canvas(
     canvas: MixCanvas,
     history: ConceptHistory,
@@ -1018,6 +1049,7 @@ def select_canvases(
     n: int = 6,
     *,
     mode: TrackMode | None = None,
+    risk: RiskTolerance = "medium",
     debug: bool = False,
 ) -> list[MixCanvas]:
     """Score and pick canvases using diversity-aware deterministic selection.
@@ -1025,6 +1057,12 @@ def select_canvases(
     ``mode`` selects the weight table from :data:`CANVAS_SCORE_WEIGHTS_BY_MODE`.
     When ``None``, falls back to :data:`DEFAULT_CANVAS_WEIGHTS` (kept stable for
     legacy callers / tests that predate the mode-aware split in #24).
+
+    ``risk`` (#42) applies a second, higher-precedence override on top of the mode
+    table: at ``risk="medium"`` (default) :data:`CANVAS_SCORE_WEIGHTS_BY_RISK` maps
+    to ``None`` and the mode table is used unchanged — byte-stable with pre-#42
+    behaviour. At ``"high"`` or ``"low"`` the risk table replaces the mode table
+    entirely (it does not blend with it).
 
     The number actually selected is ``n_effective = min(n, max(3, ceil(0.75 *
     len(canvases))))`` — so a small candidate set still gets the weakest member
@@ -1036,13 +1074,16 @@ def select_canvases(
         return []
 
     weights = CANVAS_SCORE_WEIGHTS_BY_MODE[mode] if mode is not None else DEFAULT_CANVAS_WEIGHTS
+    risk_weights = CANVAS_SCORE_WEIGHTS_BY_RISK[risk]
+    if risk_weights is not None:
+        weights = risk_weights
 
     n_effective = min(n, max(3, math.ceil(0.75 * len(canvases))))
 
     if debug:
         print(
             f"\n[DEBUG select_canvases] {len(canvases)} candidates → selecting up to "
-            f"{n_effective} (cap n={n})  mode={mode or 'default'}",
+            f"{n_effective} (cap n={n})  mode={mode or 'default'}  risk={risk}",
             file=sys.stderr,
         )
         for c in canvases:

@@ -259,6 +259,21 @@ Each proposed direction is feasibility-scored (pool fill, BPM-path viability, an
 
 `--directions` is genre mode only and is ignored (with a stderr note) in playlist mode.
 
+### Risk knob (`--risk`)
+
+`--risk {low,medium,high}` (default `medium`) trades safety for novelty in genre-mode runs, on top of whatever `--directions` picks. It shifts both canvas scoring and the Stage 2 prompt framing:
+
+- `high` reweights canvas selection toward `contrast_potential` and `novelty` (away from `role_coverage`/`anchor_strength`), nudges Stage 2 to feature flagged wildcard/concept-anchor tracks rather than treat them as exceptions, and relaxes the post-Stage-2 validator's jump thresholds to 20 BPM / 5 Camelot positions — but only for transitions the model has explicitly annotated `is_risky`; an unannotated jump is still held to the medium thresholds, so a bold move still requires Stage 2 to name the mechanism that makes it survivable.
+- `low` reweights canvas selection toward `role_coverage` and `anchor_strength` (away from `contrast_potential`/`novelty`), nudges Stage 2 toward core tracks and gentle moves, and tightens the validator thresholds to 10 BPM / 3 Camelot positions.
+- `medium` (default) is unchanged from prior behaviour — same weights, same prompt, same 15 BPM / 4 Camelot thresholds.
+
+```sh
+./mixlab --genre house --risk high   # promote wildcards/anchors, relax annotated-jump thresholds
+./mixlab --genre house --risk low    # favour role-complete, low-risk canvases
+```
+
+`--risk` composes with `--directions`: it changes how canvases are scored and validated regardless of whether they came from classic BPM strata or a concept direction. It is genre mode only — playlist mode derives its own risk tolerance from the Stage 0 intent brief (see `--intent` above) and prints a stderr note if `--risk` is passed alongside `--playlist`.
+
 ### Complete a mix from an existing Rekordbox playlist
 
 ```bash

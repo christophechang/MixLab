@@ -1650,6 +1650,110 @@ async def test_stage2_mode_fragment_not_injected_in_playlist_mode(monkeypatch: p
     assert "MODE: ALL" not in system_prompt
 
 
+@respx.mock
+async def test_stage2_risk_fragment_high(monkeypatch: pytest.MonkeyPatch) -> None:
+    """risk='high' must append the RISK: HIGH framing to the genre-mode system prompt."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, risk="high")
+
+    body = json.loads(route.calls[0].request.content)
+    system_prompt: str = body["system"]
+    assert "RISK: HIGH" in system_prompt
+    assert "asked to be surprised" in system_prompt
+    assert "RISK: LOW" not in system_prompt
+
+
+@respx.mock
+async def test_stage2_risk_fragment_low(monkeypatch: pytest.MonkeyPatch) -> None:
+    """risk='low' must append the RISK: LOW framing to the genre-mode system prompt."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, risk="low")
+
+    body = json.loads(route.calls[0].request.content)
+    system_prompt: str = body["system"]
+    assert "RISK: LOW" in system_prompt
+    assert "Restraint is the brief" in system_prompt
+    assert "RISK: HIGH" not in system_prompt
+
+
+@respx.mock
+async def test_stage2_risk_fragment_absent_at_medium(monkeypatch: pytest.MonkeyPatch) -> None:
+    """risk='medium' (explicit or default) must leave the system prompt without any
+    RISK: fragment — byte-stable default (#42).
+    """
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, risk="medium")
+
+    body = json.loads(route.calls[0].request.content)
+    system_prompt: str = body["system"]
+    assert "RISK: HIGH" not in system_prompt
+    assert "RISK: LOW" not in system_prompt
+
+
+@respx.mock
+async def test_stage2_risk_fragment_not_injected_in_playlist_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Playlist mode ignores the risk knob — it has its own Stage 0 risk-tolerance path (#54)."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset({"1"}),
+        seed_track_ids=["1"],
+        risk="high",
+    )
+
+    body = json.loads(route.calls[0].request.content)
+    system_prompt: str = body["system"]
+    assert "RISK: HIGH" not in system_prompt
+    assert "RISK: LOW" not in system_prompt
+
+
 def _critique_payload(verdict: str = "needs_attention") -> str:
     return json.dumps(
         {
@@ -3293,6 +3397,91 @@ def test_validate_stage2_output_camelot_jump_still_warns_when_is_risky_but_risk_
     canvas = _make_canvas(ids)
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
     assert any("Camelot jump" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# validate_stage2_output — risk knob (#42): risk-aware BPM/Camelot jump thresholds
+# ---------------------------------------------------------------------------
+
+
+def test_validate_stage2_output_18bpm_annotated_risky_warns_at_medium_silent_at_high() -> None:
+    """An 18 BPM jump on a transition flagged is_risky=True (but not fully justified —
+    empty risk_type) exceeds the medium threshold (15) but not the relaxed high
+    threshold (20), since high relaxation applies to any annotated-risky transition.
+    """
+    from mixlab.llm import validate_stage2_output
+    from mixlab.models import Transition
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=192.0, camelot_key="8A", genre="DnB"),  # jump=18
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=192.0, camelot_key="8A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(
+        title="T",
+        mood="dark",
+        track_ids=ids,
+        transitions=[Transition(from_id="1", to_id="2", is_risky=True, risk_type="")],
+    )
+    canvas = _make_canvas(ids)
+
+    warnings_medium = validate_stage2_output([concept], [canvas], lib, set(), set(), risk="medium")
+    assert any("BPM jump" in w for w in warnings_medium)
+
+    warnings_high = validate_stage2_output([concept], [canvas], lib, set(), set(), risk="high")
+    assert not any("BPM jump" in w for w in warnings_high)
+
+
+def test_validate_stage2_output_18bpm_unannotated_warns_at_both_medium_and_high() -> None:
+    """An 18 BPM jump with NO transition annotation always uses the medium thresholds,
+    even at risk='high' — the high relaxation requires an explicit is_risky flag.
+    """
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=192.0, camelot_key="8A", genre="DnB"),  # jump=18
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=192.0, camelot_key="8A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)  # no transitions — tr is None
+    canvas = _make_canvas(ids)
+
+    warnings_medium = validate_stage2_output([concept], [canvas], lib, set(), set(), risk="medium")
+    assert any("BPM jump" in w for w in warnings_medium)
+
+    warnings_high = validate_stage2_output([concept], [canvas], lib, set(), set(), risk="high")
+    assert any("BPM jump" in w for w in warnings_high)
+
+
+def test_validate_stage2_output_12bpm_warns_at_low_silent_at_medium() -> None:
+    """A 12 BPM jump clears the low threshold (10) but not the medium threshold (15)."""
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=186.0, camelot_key="8A", genre="DnB"),  # jump=12
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=186.0, camelot_key="8A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+
+    warnings_low = validate_stage2_output([concept], [canvas], lib, set(), set(), risk="low")
+    assert any("BPM jump" in w for w in warnings_low)
+
+    warnings_medium = validate_stage2_output([concept], [canvas], lib, set(), set(), risk="medium")
+    assert not any("BPM jump" in w for w in warnings_medium)
 
 
 def test_validate_stage2_output_artist_repeat_warning() -> None:

@@ -747,6 +747,16 @@ _STAGE2_MODE_FRAGMENTS: dict[TrackMode, str] = {
     "all": _STAGE2_MODE_FRAGMENT_ALL,
 }
 
+# Risk-tolerance Stage 2 framing fragments (#42). Appended after the mode fragment,
+# genre mode only. "medium" appends nothing — byte-stable default.
+_STAGE2_RISK_FRAGMENT_HIGH = """\
+\nRISK: HIGH — The user asked to be surprised. Prioritise the unexpected: prefer bridge/wildcard tracks flagged as concept anchors as FEATURED picks rather than exceptions; take the chance a cautious DJ wouldn't, and name the mechanism that makes each bold move survivable. Concepts should read as [ADVENTUROUS] statements — put that tag at the start of each concept's thesis line in the report.\
+"""
+
+_STAGE2_RISK_FRAGMENT_LOW = """\
+\nRISK: LOW — Restraint is the brief. Prefer core tracks, adjacent-key moves, and gentle BPM steps; save bold transitions for another day. A concept succeeds here by being effortlessly mixable end to end.\
+"""
+
 
 def select_shortlists_for_stage2(shortlists: list[MixConcept]) -> list[MixConcept]:
     """Select up to _STAGE2_CAP shortlists for Stage 2, sampling randomly from the top candidates by pool size.
@@ -892,6 +902,26 @@ def _cross_concept_distinctiveness_warnings(concepts: list[MixConcept]) -> list[
     return warnings
 
 
+_RISK_BPM_THRESHOLDS: dict[RiskTolerance, float] = {"low": 10.0, "medium": 15.0, "high": 20.0}
+_RISK_CAMELOT_THRESHOLDS: dict[RiskTolerance, int] = {"low": 3, "medium": 4, "high": 5}
+
+
+def _risk_jump_thresholds(risk: RiskTolerance, tr: Transition | None) -> tuple[float, int]:
+    """Return (bpm_threshold, camelot_threshold) for a transition under ``risk`` (#42).
+
+    At "low" and "medium" the thresholds are risk-fixed. At "high" the relaxed
+    thresholds (20 BPM / 5 Camelot) only apply to transitions explicitly annotated
+    ``is_risky=True`` — an unannotated jump still uses the medium thresholds even at
+    high risk, so a bold move still requires the model to name a mechanism.
+    """
+    if risk == "high":
+        annotated_risky = tr is not None and tr.is_risky
+        if annotated_risky:
+            return _RISK_BPM_THRESHOLDS["high"], _RISK_CAMELOT_THRESHOLDS["high"]
+        return _RISK_BPM_THRESHOLDS["medium"], _RISK_CAMELOT_THRESHOLDS["medium"]
+    return _RISK_BPM_THRESHOLDS[risk], _RISK_CAMELOT_THRESHOLDS[risk]
+
+
 def validate_stage2_output(
     concepts: list[MixConcept],
     canvases: list[MixCanvas],
@@ -900,6 +930,7 @@ def validate_stage2_output(
     denylist_ids: set[str],
     allow_played: bool = False,
     genre: str = "_default",
+    risk: RiskTolerance = "medium",
 ) -> list[str]:
     """Warn-only post-Stage-2 validation. Returns a list of warning strings (never raises)."""
     from collections import Counter
@@ -953,12 +984,13 @@ def validate_stage2_output(
             # over the threshold still warn as before.
             rel, _stretch = tempo_relation(a.bpm, b.bpm)
             is_ratio_move = rel not in ("straight", "incompatible")
-            if bpm_jump > 15 and not justified_risk and not is_ratio_move:
+            bpm_thr, cam_thr = _risk_jump_thresholds(risk, tr)
+            if bpm_jump > bpm_thr and not justified_risk and not is_ratio_move:
                 warnings.append(
                     f"{label} BPM jump {bpm_jump:.1f} between {a.artist} — {a.title} and {b.artist} — {b.title}"
                 )
             cam_dist = camelot_distance(a.camelot_key, b.camelot_key)
-            if cam_dist > 4 and not justified_risk:
+            if cam_dist > cam_thr and not justified_risk:
                 warnings.append(f"{label} Camelot jump {cam_dist} between {a.camelot_key} and {b.camelot_key}")
 
         # Bridge/wildcard tracks used without is_risky flag
@@ -2357,6 +2389,7 @@ async def revise_concepts(
     played_ids: set[str],
     allow_played: bool,
     genre: str,
+    risk: RiskTolerance = "medium",
 ) -> tuple[list[MixConcept], str, list[str]]:
     """One bounded self-revision pass (#55). Returns (possibly-updated concepts,
     possibly-updated report, final warnings).
@@ -2426,6 +2459,7 @@ async def revise_concepts(
             denylist_ids=set(),
             allow_played=allow_played,
             genre=genre,
+            risk=risk,
         )
         n_before = len(hard)
         n_after = len(_hard_findings_for_concept(revised, revised_warnings))
@@ -2459,6 +2493,7 @@ async def revise_concepts(
         denylist_ids=set(),
         allow_played=allow_played,
         genre=genre,
+        risk=risk,
     )
     return revised_concepts, report, final_warnings
 
@@ -2715,6 +2750,7 @@ async def stage2_curate_and_report(
     concept_history: ConceptHistory | None = None,
     genre_intent: str | None = None,
     mode: TrackMode | None = None,
+    risk: RiskTolerance = "medium",
     deep: bool = False,
     debug: bool = False,
     mix_length: int | None = None,
@@ -2940,6 +2976,12 @@ async def stage2_curate_and_report(
     # path, so the mode-fragment is genre-mode only.
     if playlist_name is None and mode is not None:
         stage2_system = stage2_system + _STAGE2_MODE_FRAGMENTS[mode]
+    # Risk-tolerance Stage 2 fragment (#42). Genre mode only, appended after the mode
+    # fragment. "medium" appends nothing — byte-stable default.
+    if playlist_name is None and risk == "high":
+        stage2_system = stage2_system + _STAGE2_RISK_FRAGMENT_HIGH
+    elif playlist_name is None and risk == "low":
+        stage2_system = stage2_system + _STAGE2_RISK_FRAGMENT_LOW
     _name_dedup_sentinel = 'The name should make someone curious, not nod in recognition. Add a "name_reason" field'
     if used_mix_names:
         assert _name_dedup_sentinel in stage2_system, (

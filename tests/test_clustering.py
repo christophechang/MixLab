@@ -2444,3 +2444,151 @@ def test_window_shortlist_different_seeds_vary_the_fill() -> None:
     w1, _ = _window_shortlist(oversized, _random.Random(1))
     w2, _ = _window_shortlist(oversized, _random.Random(2))
     assert {t.track_id for t in w1} != {t.track_id for t in w2}
+
+
+# ---------------------------------------------------------------------------
+# Risk knob (#42) — CANVAS_SCORE_WEIGHTS_BY_RISK / select_canvases(risk=...)
+# ---------------------------------------------------------------------------
+
+
+def test_canvas_weights_by_risk_sum_to_one() -> None:
+    """Every non-None risk weight table must sum exactly to 1.0 (validated by
+    CanvasScoreWeights.__post_init__ at construction — this asserts it explicitly).
+    """
+    from mixlab.clustering import CANVAS_SCORE_WEIGHTS_BY_RISK
+
+    for risk, w in CANVAS_SCORE_WEIGHTS_BY_RISK.items():
+        if w is None:
+            continue
+        total = (
+            w.technical_viability
+            + w.role_coverage
+            + w.anchor_strength
+            + w.contrast_potential
+            + w.distinctiveness
+            + w.era_coherence
+            + w.label_coherence
+            + w.novelty
+        )
+        assert abs(total - 1.0) < 1e-9, f"risk {risk!r} weights sum to {total}, not 1.0"
+
+
+def test_canvas_weights_by_risk_medium_is_none() -> None:
+    """risk='medium' must map to None — it is a no-op override so the mode/default
+    table is used unchanged (byte-stable with pre-#42 behaviour).
+    """
+    from mixlab.clustering import CANVAS_SCORE_WEIGHTS_BY_RISK
+
+    assert CANVAS_SCORE_WEIGHTS_BY_RISK["medium"] is None
+
+
+def test_select_canvases_risk_medium_matches_default_selection() -> None:
+    """risk='medium' (explicit) must produce byte-identical selection to omitting
+    the argument entirely — the regression guard for #42's default behaviour.
+    """
+    from mixlab.models import MixCanvas
+
+    good = _rich_canvas("good", [f"T{i:03d}" for i in range(20)])
+    poor = _rich_canvas("poor", ["X001"])
+    assert isinstance(good, MixCanvas)
+    assert isinstance(poor, MixCanvas)
+    selected_default = select_canvases([poor, good], ConceptHistory(), n=1)
+    selected_medium = select_canvases([poor, good], ConceptHistory(), n=1, risk="medium")
+    assert [c.canvas_id for c in selected_default] == [c.canvas_id for c in selected_medium]
+
+
+def test_select_canvases_risk_high_promotes_contrast_over_role_coverage() -> None:
+    """A contrast-rich, role-sparse, wildcard-heavy canvas loses to a role-complete,
+    contrast-free canvas at risk='medium', but wins at risk='high' — the risk table
+    shifts enough weight from role_coverage/anchor_strength to contrast_potential to
+    flip the ranking (#42).
+    """
+    from mixlab.models import CanvasRoleCandidates, CanvasScore, ContrastAssets, MixCanvas
+
+    clean_ids = [f"C{i:03d}" for i in range(20)]
+    clean = MixCanvas(
+        canvas_id="clean",
+        genre="Drum & Bass",
+        bpm_range=(168.0, 176.0),
+        dominant_bpm=172.0,
+        dominant_camelot="4A",
+        core_track_ids=clean_ids,
+        bridge_track_ids=[],
+        wildcard_track_ids=[],
+        roles=CanvasRoleCandidates(
+            opener=clean_ids[:1],
+            groove_locker=clean_ids[:2],
+            builder=clean_ids[1:3],
+            pivot=clean_ids[10:11],
+            peak=clean_ids[-2:],
+            closer=clean_ids[-1:],
+        ),
+        contrast=ContrastAssets(
+            vocal_moments=[], texture_changes=[], darker_turns=[], brighter_lifts=[], lower_pressure_resets=[]
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=MixConcept(title="Clean", mood="steady", track_ids=clean_ids),
+    )
+
+    wild_ids = [f"W{i:03d}" for i in range(20)]
+    contrast_rich = MixCanvas(
+        canvas_id="contrast",
+        genre="Drum & Bass",
+        bpm_range=(168.0, 176.0),
+        dominant_bpm=172.0,
+        dominant_camelot="4A",
+        core_track_ids=wild_ids,
+        bridge_track_ids=[f"B{i:03d}" for i in range(3)],
+        wildcard_track_ids=[f"WC{i:03d}" for i in range(3)],
+        roles=CanvasRoleCandidates(
+            opener=[],
+            groove_locker=wild_ids[:2],
+            builder=[],
+            pivot=[],
+            peak=wild_ids[-2:],
+            closer=[],
+        ),
+        contrast=ContrastAssets(
+            vocal_moments=wild_ids[:1],
+            texture_changes=wild_ids[1:2],
+            darker_turns=wild_ids[2:3],
+            brighter_lifts=wild_ids[3:4],
+            lower_pressure_resets=[],
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=MixConcept(title="Contrast", mood="wild", track_ids=wild_ids),
+    )
+
+    picked_medium = select_canvases([clean, contrast_rich], ConceptHistory(), n=1, risk="medium")
+    picked_high = select_canvases([clean, contrast_rich], ConceptHistory(), n=1, risk="high")
+
+    assert picked_medium[0].canvas_id == "clean"
+    assert picked_high[0].canvas_id == "contrast"
+
+
+def test_select_canvases_risk_low_favours_role_coverage_and_anchors() -> None:
+    """risk='low' weights role_coverage/anchor_strength even more heavily than medium —
+    the clean, role-complete canvas should still win (sanity check that the low table
+    doesn't accidentally invert the medium ranking).
+    """
+    from mixlab.models import MixCanvas
+
+    good = _rich_canvas("good", [f"T{i:03d}" for i in range(20)])
+    poor = _rich_canvas("poor", ["X001"])
+    assert isinstance(good, MixCanvas)
+    assert isinstance(poor, MixCanvas)
+    selected = select_canvases([poor, good], ConceptHistory(), n=1, risk="low")
+    assert selected[0].canvas_id == "good"
+
+
+def test_select_canvases_debug_risk_in_output(capsys: pytest.CaptureFixture[str]) -> None:
+    """Debug output names the active risk tolerance (#42)."""
+    from mixlab.models import MixCanvas
+
+    canvases = [_rich_canvas(f"c{i}", [f"T{i}{j:02d}" for j in range(10)]) for i in range(3)]
+    assert all(isinstance(c, MixCanvas) for c in canvases)
+    select_canvases(canvases, ConceptHistory(), n=2, risk="high", debug=True)  # type: ignore[arg-type]
+    captured = capsys.readouterr()
+    assert "risk=high" in captured.err
