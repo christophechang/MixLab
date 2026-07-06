@@ -430,15 +430,15 @@ async def run_playlist_mode(
 
 
 async def run_export_unplayed() -> None:
-    tracks = parse_collection(_XML_PATH)
-    tracks, denylist_excluded = _apply_do_not_recommend_filter(tracks, _XML_PATH)
-    tracks = apply_bpm_corrections(tracks)
-
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
     catalog_url = os.environ.get("CATALOG_API_URL", "")
     if not catalog_url:
         print("ERROR: CATALOG_API_URL not set — cannot determine unplayed tracks.", file=sys.stderr)
         sys.exit(1)
+
+    tracks = parse_collection(_XML_PATH)
+    tracks, denylist_excluded = _apply_do_not_recommend_filter(tracks, _XML_PATH)
+    tracks = apply_bpm_corrections(tracks)
 
     try:
         played = await fetch_played_tracks(api_key, catalog_url)
@@ -879,8 +879,7 @@ custom genres (merge multiple genres into one cross-genre pool):
   4x4   house + electronica + disco +     no BPM filter (Stage 1 groups by BPM)
         progressive + techno
 
-  Custom genres pick a random 120-track window from the full pool each run,
-  so repeated runs explore different corners of the collection.
+  Custom genre pools are partitioned deterministically by BPM/key/era (see docs/architecture/deterministic-stage1.md).
 
 examples:
   mixlab                              show crate availability table (no LLM)

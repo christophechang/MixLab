@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from difflib import get_close_matches
-from statistics import median
 
 from mixlab.clustering import (
     build_custom_genre_pool,
@@ -19,9 +18,6 @@ from mixlab.models import (
     Track,
 )
 
-_SEED_WEIGHT: float = 2.0
-_UNPLAYED_WEIGHT: float = 1.5
-_MAX_PLAYLIST_POOL: int = 120
 _MIN_PLAYLIST_TRACKS: int = 4
 
 # Zone-aware pool constants
@@ -238,50 +234,6 @@ def resolve_playlist(name: str, playlists: dict[str, list[str]]) -> list[str]:
     raise ValueError(f'Playlist "{name}" not found.')
 
 
-def build_playlist_pool(
-    seed_track_ids: list[str],
-    all_tracks: list[Track],
-    tracks_by_id: dict[str, Track],
-    unplayed_ids: set[str] | None,
-    all_tracks_flag: bool = False,
-    bpm_expansion: float = 15.0,
-) -> list[Track]:
-    seed_tracks = [tracks_by_id[track_id] for track_id in seed_track_ids if track_id in tracks_by_id]
-    if len(seed_tracks) < _MIN_PLAYLIST_TRACKS:
-        raise ValueError(
-            "Playlist mode requires at least "
-            f"{_MIN_PLAYLIST_TRACKS} valid seed tracks with BPM and Camelot key after collection parsing."
-        )
-
-    bpm_min = min(track.bpm for track in seed_tracks) - bpm_expansion
-    bpm_max = max(track.bpm for track in seed_tracks) + bpm_expansion
-    seed_median_bpm = median(track.bpm for track in seed_tracks)
-    seed_ids = {track.track_id for track in seed_tracks}
-    library_tracks = [
-        track for track in all_tracks if track.track_id not in seed_ids and bpm_min <= track.bpm <= bpm_max
-    ]
-
-    def is_unplayed(track: Track) -> bool:
-        if unplayed_ids is not None:
-            return track.track_id in unplayed_ids
-        return track.play_count == 0
-
-    def score(track: Track) -> float:
-        score_value = 1.0
-        if track.track_id in seed_ids:
-            score_value *= _SEED_WEIGHT
-        if not all_tracks_flag and is_unplayed(track):
-            score_value *= _UNPLAYED_WEIGHT
-        return score_value
-
-    ranked_library_tracks = sorted(
-        library_tracks,
-        key=lambda track: (-score(track), abs(track.bpm - seed_median_bpm), track.artist, track.title),
-    )
-    max_library_tracks = max(0, _MAX_PLAYLIST_POOL - len(seed_tracks))
-    return seed_tracks + ranked_library_tracks[:max_library_tracks]
-
-
 def cluster_seed_zones(
     seed_tracks: list[Track],
     gap_bpm: float = _ZONE_GAP_BPM,
@@ -374,7 +326,7 @@ def _score_candidate(
         elif "resolution" in missing_roles and track.energy <= 4:
             role_score = 0.4
 
-    unplayed_bonus = 0.3 if is_unplayed else 0.0
+    unplayed_bonus = 1.0 if is_unplayed else 0.0
 
     return bpm_score * 0.35 + camelot_score * 0.35 + role_score * 0.15 + unplayed_bonus * 0.15
 

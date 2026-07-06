@@ -180,14 +180,6 @@ def partition_outliers(
     return clusters, outliers
 
 
-def filter_by_bpm(tracks: list[Track]) -> list[Track]:
-    """Remove tracks whose BPM is more than _BPM_SPREAD from the cluster median."""
-    if not tracks:
-        return tracks
-    median = statistics.median(t.bpm for t in tracks)
-    return [t for t in tracks if abs(t.bpm - median) <= _BPM_SPREAD]
-
-
 _BRIDGE_SPREAD = 12.0
 
 
@@ -243,7 +235,6 @@ def build_custom_genre_pool(
 # Mix Canvas — role inference, contrast detection, risk notes, scoring
 # ---------------------------------------------------------------------------
 
-_VOCAL_TOKENS = frozenset({"feat.", "ft.", "feat", "ft", "vocal", "vocals", "w/"})
 _OPENER_MAX_ENERGY = 3
 _CLOSER_MAX_ENERGY = 4
 _GROOVE_ENERGY_MIN = 3
@@ -253,10 +244,14 @@ _BUILDER_ENERGY_MAX = 6
 _PEAK_ENERGY_MIN = 6
 _GROOVE_BPM_TOLERANCE = 2.0
 
+# Precompiled regex for matching vocal tokens as whole words (case-insensitive)
+# Matches: feat, feat., ft, ft., featuring, vocal, vocals, w/ (feat/ft with optional dot)
+# Note: w/ needs special handling since / is not a word character
+_VOCAL_TOKEN_PATTERN = re.compile(r"(?<![a-z])(?:feat\.?|ft\.?|featuring|vocals?|w/)(?![a-z])", re.IGNORECASE)
+
 
 def _has_vocal_token(text: str) -> bool:
-    lower = text.lower()
-    return any(tok in lower for tok in _VOCAL_TOKENS)
+    return bool(_VOCAL_TOKEN_PATTERN.search(text))
 
 
 def _energy_median(tracks: list[Track]) -> float | None:

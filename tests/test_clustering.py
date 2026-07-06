@@ -14,6 +14,7 @@ from mixlab.clustering import (
     _camelot_components,
     _era_split,
     _find_bpm_peaks,
+    _has_vocal_token,
     _infer_shortlist_mood,
     _resize_shortlists,
     build_custom_genre_pool,
@@ -409,6 +410,33 @@ def test_build_mix_canvas_contrast_assets_vocal() -> None:
     canvas = build_mix_canvas(concept, _tracks_by_id(vocal_t, plain_t))
     assert "voc" in canvas.contrast.vocal_moments
     assert "plain" not in canvas.contrast.vocal_moments
+
+
+def test_has_vocal_token_rejects_false_positives() -> None:
+    """Ensure vocal token matching uses word boundaries, not substring matching."""
+    # These should NOT match (false positives with substring matching)
+    assert not _has_vocal_token("Afterlife")  # contains "ft" but not as word boundary
+    assert not _has_vocal_token("Left Field")  # contains "ft" in "Left"
+    assert not _has_vocal_token("Soft Focus")  # contains "ft" in "Soft"
+    assert not _has_vocal_token("The Loft")  # contains "ft" in "Loft"
+    assert not _has_vocal_token("Swift Motion")  # contains "ft" in "Swift"
+
+
+def test_has_vocal_token_accepts_vocal_tokens() -> None:
+    """Ensure vocal token matching detects valid tokens."""
+    # These SHOULD match
+    assert _has_vocal_token("Massive Attack feat. Tracey Thorn")  # feat. token
+    assert _has_vocal_token("ft. MC Det")  # ft. token
+    assert _has_vocal_token("Vocal Mix")  # vocal token
+    assert _has_vocal_token("w/ Jenna G")  # w/ token
+    assert _has_vocal_token("Featuring Sara")  # featuring token
+    # Case insensitivity
+    assert _has_vocal_token("FEAT Sample")
+    assert _has_vocal_token("Featuring Artist")
+    assert _has_vocal_token("VOCALS Remix")
+    # Variations
+    assert _has_vocal_token("feat Sample")
+    assert _has_vocal_token("ft Sample")
 
 
 def test_build_mix_canvas_risk_notes_weak_closer_no_energy() -> None:

@@ -379,17 +379,9 @@ Custom genres behave differently from standard genres in two key ways:
 
 **2. Stage 2 cross-genre guidance.** The Stage 2 prompt is given the list of sub-genres and instructed to justify any move across genre boundaries — naming the specific mechanism that makes the transition work (BPM alignment, rhythmic character, harmonic relationship, or the energy state of the room). Cross-genre moves are not avoided; they are the point of using a custom genre. But every such move must be defensible.
 
-#### Why random selection?
+#### How large pools are handled
 
-Custom genre pools are large — `4x4` alone is ~800 tracks. Sending the whole pool to Stage 1 would mean 10–15 sequential API calls to a free-tier LLM provider, which hits rate limits on every run and produces the same output every time.
-
-Instead, MixLab picks a **random 120-track window** from the BPM-sorted pool on each run:
-
-- The pool is sorted by BPM, so adjacent tracks in the sorted list are in the same tempo zone. The window always lands on a BPM-coherent slice — house tracks at 120–125 one run, progressive/techno at 128–133 the next.
-- Only 2 Stage 1 API calls are made per run (120 tracks / 60 per call), keeping the LLM load light and the rate limits safe.
-- Each run explores a different section of the collection, so you get different concepts each time without manually curating which tracks to send.
-
-Run the same custom genre multiple times. Each run will focus on a different corner of the pool and produce different concepts.
+Custom genre pools are large — `4x4` alone is ~800 tracks. Since v0.13, Stage 1 is deterministic: the pool is partitioned by BPM peaks, Camelot connectivity, and era. The same pool produces the same shortlists every time, making runs reproducible and allowing targeted exploration by genre/era without random sampling. See `docs/architecture/deterministic-stage1.md` for the full partitioning algorithm.
 
 ---
 
@@ -401,7 +393,7 @@ Run the same custom genre multiple times. Each run will focus on a different cor
 - Tracks missing BPM or Camelot key are excluded with a warning printed to stderr
 - SoundCloud tracks (Location starting with `file://localhostsoundcloud`) are excluded silently
 - Tracks in a Rekordbox playlist named `DO NOT RECOMMEND` are excluded from every run; the crate snapshot shows how many were excluded, and a warning fires if the playlist is missing from the XML
-- If `CATALOG_API_URL` is set, tracks in your catalog play history are excluded — fuzzy-matched on artist + title with unicode normalisation, dash normalisation, and feat. stripping; otherwise all tracks are treated as unplayed
+- If `CATALOG_API_URL` is set, tracks in your catalog play history are excluded — matched on normalised artist + title keys (unicode/dash normalisation, feat. stripping, version-suffix stripping); otherwise all tracks are treated as unplayed
 
 ### BPM correction
 
@@ -429,7 +421,7 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 - Provider cascade tried in order, falling through on error or missing key:
   **Groq → Gemini → Mistral**
 - **Standard genres:** clusters larger than 40 tracks are chunked; each chunk is called independently and concepts merged
-- **Custom genres:** a random 120-track window is selected from the BPM-sorted pool each run (see [Why random selection?](#why-random-selection)); 60 tracks per call, 2 calls maximum; shortlist target is 20–25 tracks per concept (vs 15–25 for standard)
+- **Custom genres:** the pool is partitioned deterministically by BPM peaks, Camelot connectivity, and era (see `docs/architecture/deterministic-stage1.md`) — same shortlist algorithm as standard genres, applied to the merged cross-genre pool
 - Track IDs are aliased to short positional keys (`T001`, `T002`, …) in the prompt; hallucinated IDs are structurally impossible and concepts with fewer than 4 resolvable aliases are discarded
 - Stage 1 concepts are wrapped into **Mix Canvases** — structured objects that add role candidates (opener, groove-locker, builder, pivot, peak, closer), contrast assets (vocal moments, texture changes, darker/brighter turns), deterministic risk notes (weak opener/closer pool, BPM spread, artist repetition), an era window and dominant label when the core pool supports them, identity-defining `Anchors` from the core pool (provenance + library rarity + pool centrality), and `Concept anchors` tagging bridge/wildcard tracks as `peak`, `identity`, or `structural-exception`. Up to 6 canvases are forwarded to Stage 2, selected by a weighted scoring model covering technical viability, role coverage, anchor strength, contrast potential, cross-canvas distinctiveness, era coherence, label coherence, and novelty against recent run history. Weights are mode-aware — `unplayed` mode prioritises novelty, `played` mode prioritises anchor strength, `all` mode prioritises cross-canvas distinctiveness. Selection is deterministic given the same input — no random sampling.
 

@@ -9,7 +9,6 @@ import pytest
 from mixlab.models import IntentBrief, MixConcept, Track
 from mixlab.playlist_mode import (
     _score_candidate,  # noqa: PLC2701
-    build_playlist_pool,
     build_zone_shortlists,
     cluster_seed_zones,
     compute_deterministic_intent,
@@ -71,122 +70,6 @@ def test_resolve_playlist_no_suggestions_when_nothing_close() -> None:
     playlists = {"Sets/Warm Up": ["1"]}
     with pytest.raises(ValueError, match='Playlist "Techno Tools" not found\\.'):
         resolve_playlist("Techno Tools", playlists)
-
-
-def test_build_playlist_pool_includes_all_seed_tracks() -> None:
-    tracks = [
-        _make_track("1", bpm=122.0),
-        _make_track("2", bpm=124.0),
-        _make_track("3", bpm=126.0),
-        _make_track("4", bpm=128.0),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, {"1", "2", "3", "4"})
-    assert [track.track_id for track in pool[:4]] == ["1", "2", "3", "4"]
-
-
-def test_build_playlist_pool_expands_with_bpm_range() -> None:
-    tracks = [
-        _make_track("1", bpm=120.0),
-        _make_track("2", bpm=122.0),
-        _make_track("3", bpm=124.0),
-        _make_track("4", bpm=126.0),
-        _make_track("5", bpm=139.0),
-        _make_track("6", bpm=145.5),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, {"1", "2", "3", "4", "5"})
-    assert "5" in [track.track_id for track in pool]
-    assert "6" not in [track.track_id for track in pool]
-
-
-def test_build_playlist_pool_too_few_seed_tracks_raises() -> None:
-    tracks = [_make_track("1"), _make_track("2"), _make_track("3")]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    with pytest.raises(ValueError, match="requires at least 4 valid seed tracks"):
-        build_playlist_pool(["1", "2", "3"], tracks, tracks_by_id, {"1", "2", "3"})
-
-
-def test_build_playlist_pool_unplayed_ids_ranked_above_played() -> None:
-    tracks = [
-        _make_track("1", bpm=122.0),
-        _make_track("2", bpm=124.0),
-        _make_track("3", bpm=126.0),
-        _make_track("4", bpm=128.0),
-        _make_track("5", bpm=123.0, play_count=1),
-        _make_track("6", bpm=123.5, play_count=1),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, {"1", "2", "3", "4", "6"})
-    ids = [track.track_id for track in pool]
-    assert ids.index("6") < ids.index("5")
-
-
-def test_build_playlist_pool_play_count_fallback_when_unplayed_ids_none() -> None:
-    tracks = [
-        _make_track("1", bpm=122.0),
-        _make_track("2", bpm=124.0),
-        _make_track("3", bpm=126.0),
-        _make_track("4", bpm=128.0),
-        _make_track("5", bpm=123.0, play_count=1),
-        _make_track("6", bpm=123.5, play_count=0),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, None)
-    ids = [track.track_id for track in pool]
-    assert ids.index("6") < ids.index("5")
-
-
-def test_build_playlist_pool_played_tracks_remain_in_pool() -> None:
-    tracks = [
-        _make_track("1", bpm=122.0),
-        _make_track("2", bpm=124.0),
-        _make_track("3", bpm=126.0),
-        _make_track("4", bpm=128.0),
-        _make_track("5", bpm=123.0, play_count=3),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, {"1", "2", "3", "4"})
-    assert "5" in [track.track_id for track in pool]
-
-
-def test_build_playlist_pool_all_tracks_flag_disables_unplayed_bonus() -> None:
-    tracks = [
-        _make_track("1", bpm=122.0),
-        _make_track("2", bpm=124.0),
-        _make_track("3", bpm=126.0),
-        _make_track("4", bpm=128.0),
-        _make_track("5", bpm=123.0, play_count=1, artist="Z Artist"),
-        _make_track("6", bpm=129.8, play_count=0, artist="A Artist"),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(
-        ["1", "2", "3", "4"], tracks, tracks_by_id, {"1", "2", "3", "4", "6"}, all_tracks_flag=True
-    )
-    ids = [track.track_id for track in pool]
-    assert ids.index("5") < ids.index("6")
-
-
-def test_build_playlist_pool_capped_at_max_with_seed_guaranteed() -> None:
-    seed_tracks = [_make_track(str(index), bpm=120.0 + index) for index in range(1, 5)]
-    extras = [_make_track(str(index), bpm=123.0) for index in range(5, 140)]
-    tracks = seed_tracks + extras
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, None)
-    assert len(pool) == 120
-    assert [track.track_id for track in pool[:4]] == ["1", "2", "3", "4"]
-
-
-def test_build_playlist_pool_deduplicates_seed_from_library() -> None:
-    tracks = [
-        _make_track("1", bpm=122.0),
-        _make_track("2", bpm=124.0),
-        _make_track("3", bpm=126.0),
-        _make_track("4", bpm=128.0),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, None)
-    assert [track.track_id for track in pool].count("1") == 1
 
 
 # ---------------------------------------------------------------------------

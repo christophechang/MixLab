@@ -13,19 +13,9 @@
       "description": "Run pipeline scoped to a single genre (Anthropic Stage 2)"
     },
     {
-      "pattern": "^!mixlab ([a-zA-Z_&]+) minimax$",
-      "command": "./mixlab --genre \"$1\" --stage2-provider minimax --export-playlists",
-      "description": "Run pipeline for a genre using MiniMax for Stage 2 (cheaper)"
-    },
-    {
       "pattern": "^!mixlab ([a-zA-Z_&]+) (\\d+)$",
       "command": "./mixlab --genre \"$1\" --duration $2 --export-playlists",
       "description": "Run pipeline for a genre with a target set duration (minutes)"
-    },
-    {
-      "pattern": "^!mixlab ([a-zA-Z_&]+) (\\d+) minimax$",
-      "command": "./mixlab --genre \"$1\" --duration $2 --stage2-provider minimax --export-playlists",
-      "description": "Run pipeline for a genre with duration and MiniMax Stage 2"
     }
   ],
   "env": [
