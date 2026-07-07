@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.7.3 — 2026-07-07
+
+Two fixes from the first post-v1.7.2 live run, where four of six concept names were exact repeats of earlier same-day runs — the detection guard flagged every one, but the prompt-side avoidance was skated past.
+
+- **Forbidden-names block.** The avoid list moves from a mid-sentence aside to a hard `FORBIDDEN NAMES` block at the end of the Stage 2 system prompt, with an explicit per-title self-check ("if it appears here, or shares a distinctive word with an entry here, DISCARD it").
+- **Within-day lens rotation.** The naming-lens seed now advances with every recorded run (`date seed + history length`), so same-day runs get different lenses instead of identical naming pressure. Still fully reproducible from `--stage1-seed` plus history state.
+
+---
+
 ## v1.7.2 — 2026-07-07
 
 - **Recent concept titles join the name-avoid list (#75).** Live finding from the first Name Studio run: 'Heist Recordings' was generated twice in one day and 'Rej & The Room' echoed the earlier 'Rej' — the avoid list only carried catalogue mix names, so same-day repeats were invisible to both the prompt and the name-family guard. `recent_concept_titles` (last 10 runs, deduped, newest first) now merges into the avoid list for the Stage 2 prompt and the history-echo validation check.

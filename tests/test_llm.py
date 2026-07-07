@@ -3031,39 +3031,49 @@ async def test_stage2_curate_naming_seed_injects_lenses_genre_mode_only(
     assert "NAMING LENSES for this run" in system
 
 
-def test_used_mix_names_are_injected_into_standard_selection_system() -> None:
-    """Regression: the replace() search string previously had a spurious backslash that never matched."""
-    from mixlab.llm import _STAGE2_SYSTEM_SELECTION
+def test_forbidden_names_block_lists_names_with_discard_instruction() -> None:
+    """Live finding: the old mid-sentence avoid-list injection was skated past —
+    a run reproduced four already-used titles verbatim. The replacement is a hard
+    end-of-prompt block with an explicit per-title self-check."""
+    from mixlab.llm import _forbidden_names_block
 
-    names_str = "Slow Burn, Night Drive"
-    first_name = "Slow Burn"
-    system = _STAGE2_SYSTEM_SELECTION.replace(
-        'The name should make someone curious, not nod in recognition. Add a "name_reason" field',
-        "The name should make someone curious, not nod in recognition. "
-        f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. "
-        "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier "
-        f"(e.g. if '{first_name}' is in the list, '{first_name} Vol. 2' and any variation is forbidden). "
-        'Add a "name_reason" field',
-    )
-    assert "Slow Burn" in system
-    assert "Night Drive" in system
-    assert "Slow Burn Vol. 2" in system  # the example in the injected warning
+    block = _forbidden_names_block(["Slow Burn", "Night Drive"])
+    assert block.startswith("\n\nFORBIDDEN NAMES")
+    assert "Slow Burn, Night Drive" in block
+    assert "DISCARD" in block
+    assert "shares a distinctive word" in block
 
 
-def test_used_mix_names_are_injected_into_playlist_selection_system() -> None:
-    from mixlab.llm import _STAGE2_SYSTEM_PLAYLIST_SELECTION
+@respx.mock
+async def test_stage2_curate_used_mix_names_appends_forbidden_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import stage2_curate_and_report
 
-    names_str = "Slow Burn"
-    first_name = "Slow Burn"
-    system = _STAGE2_SYSTEM_PLAYLIST_SELECTION.replace(
-        'The name should make someone curious, not nod in recognition. Add a "name_reason" field',
-        "The name should make someone curious, not nod in recognition. "
-        f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. "
-        "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier "
-        f"(e.g. if '{first_name}' is in the list, '{first_name} Vol. 2' and any variation is forbidden). "
-        'Add a "name_reason" field',
-    )
-    assert "Slow Burn" in system
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    captured: list[dict[str, object]] = []
+
+    def capture(request: object) -> Response:
+        body = json.loads(request.content)  # type: ignore[attr-defined]
+        captured.append(body)
+        return Response(200, json={"content": [{"text": "[]"}], "stop_reason": "end_turn"})
+
+    respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
+
+    shortlist = MixConcept(title="pool", mood="m", track_ids=["1", "2"])
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=124.0, camelot_key="6A", genre="House")
+        for i in range(1, 3)
+    }
+
+    await stage2_curate_and_report([shortlist], tracks_by_id, used_mix_names=["Heist Recordings", "Milk & Rust"])
+
+    assert captured, "no Anthropic call captured"
+    system = str(captured[0]["system"])
+    assert "FORBIDDEN NAMES" in system
+    assert "Heist Recordings, Milk & Rust" in system
+    # The forbidden block must come AFTER the naming instructions, at the end.
+    assert system.index("FORBIDDEN NAMES") > system.index("name_reason")
 
 
 # ---------------------------------------------------------------------------
