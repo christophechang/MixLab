@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.0 — 2026-07-07
+
+- **Standalone HTML report (#45).** Every run now writes a self-contained HTML artifact to `output/reports/` (`MIXLAB_REPORT_DIR` override) and attaches it to the Discord message alongside the XML. One file, zero external requests, dark-mode aware, mobile-readable. Concept cards carry: energy sparklines, full track tables (key/BPM/duration/energy/intro-outro bars) with click-to-copy titles for Rekordbox search, per-transition mechanism and blend labels computed live from the transition graph with score-band colouring, the concept's prose report section, runtime/practicality, and the run's validation notes and crate snapshot. Discord text output unchanged; attachment MIME now inferred per file (was hardcoded `application/xml`).
+
+---
+
 ## v1.4.0 — 2026-07-07
 
 **The Mix Engine** (epic #58, sub-issues #41/#59/#60/#61): cue-aware blends and optimal sequencing. The beat grids and cue points already in the Rekordbox XML now inform transitions and play order — turning transition intelligence from prompt hints into deterministic guarantees.
