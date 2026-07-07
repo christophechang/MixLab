@@ -1144,6 +1144,12 @@ payoff.
 to sort or constrain selection. Unenriched tracks are first-class; absence of any field says nothing about \
 quality. When fields are missing, reason from BPM, key, genre, and artist knowledge as normal.
   - `energy:N/8` — Mixed in Key score (0=lowest, 8=highest). Use to build the energy arc.
+  - `intro:Nb` / `outro:Nb` — bar counts derived from the DJ's own placed cue points: bars from the \
+track's start to the mix-in cue, and from the mix-out cue to the track's end. `intro:0b` means the \
+mix-in cue sits at the very top — the DJ deliberately mixes this track in from bar one. That is a \
+normal, intentional choice: never read intro:0b as a cold drop, a missing intro, or "nothing to blend \
+over" — the blend simply rides over the track's opening bars. A missing token means no cue data yet, \
+not that the track lacks an intro or outro.
   - `unplayed` — never played live. Available for debut.
   - Year — production era. Useful when articulating era dialogue or coherence. Either is a valid concept \
 shape; neither is required.
@@ -1364,6 +1370,13 @@ progressive-build → Slow Climb; build-and-drop or double-peak → Double Peak;
 Front-Loaded Hook; dark-to-light → Dark to Light; light-to-dark → Light to Dark; narrative or \
 abstract-journey → choose the closest of the seven labels and reflect the framing in the thesis. \
 When arc_type is (none), choose freely. Do not contradict the declared arc.
+
+MIX POINTS: track lines may carry `intro:Nb` / `outro:Nb` tokens — bar counts derived from the DJ's \
+own placed cue points (bars from the track's start to the mix-in cue, and from the mix-out cue to the \
+end). `intro:0b` means the mix-in cue sits at the very top of the track — the DJ deliberately mixes it \
+in from bar one. That is a normal, intentional choice: never describe intro:0b as a cold drop, a \
+missing intro, or "nothing to blend over" — the blend simply rides over the track's opening bars. A \
+missing token means the track has no cue data yet, not that it lacks an intro or outro.
 
 Be opinionated, musical, and honest. Peer-to-peer, no marketing language, no filler.
 

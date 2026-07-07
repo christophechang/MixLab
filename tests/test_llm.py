@@ -2744,6 +2744,23 @@ def test_stage2_report_prompt_enforces_arc_consistency() -> None:
     assert "Do not contradict the declared arc." in _STAGE2_REPORT_SYSTEM
 
 
+def test_stage2_prompts_explain_intro_zero_as_deliberate_mix_in() -> None:
+    """intro:0b means the DJ's mix-in cue is at the track's top — not a cold drop.
+
+    Live-run finding: many first cues sit at 0:00 (confirmed deliberate by the owner),
+    and without a legend the report pass read intro:0b as "no intro to blend over".
+    The guidance must reach all Stage 2 prompt surfaces: selection, playlist
+    (derived from selection), and report.
+    """
+    from mixlab.llm import _STAGE2_REPORT_SYSTEM, _STAGE2_SYSTEM, _STAGE2_SYSTEM_PLAYLIST
+
+    for prompt in (_STAGE2_SYSTEM, _STAGE2_SYSTEM_PLAYLIST, _STAGE2_REPORT_SYSTEM):
+        assert "intro:0b" in prompt
+        assert "mixes" in prompt and "bar one" in prompt
+        assert "cold drop" in prompt
+        assert "no cue data yet" in prompt
+
+
 @respx.mock
 async def test_stage2_report_prompt_includes_declared_arc_type(
     monkeypatch: pytest.MonkeyPatch,
