@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.7.1 — 2026-07-07
+
+- **Fix: `--prep` now applies the DO NOT RECOMMEND denylist.** The first production run reported 414 house tracks where the concept pipeline sees 370 — `--prep` was counting (and could rank) denylisted tracks, and cueing tracks that are never recommended is exactly the wasted prep time the feature exists to avoid. The filter now runs before ranking, matching every other mode.
+
+---
+
 ## v1.7.0 — 2026-07-07
 
 - **Cue-Prep Assistant (epic #72).** `mixlab --prep` ranks every track with missing or partial cue data by expected payoff — how often concept history programs it, how harmonically central it is in its genre bucket, unplayed status, and gap severity — so cue-prep time in Rekordbox goes where booth sheets and blend scoring gain the most. Fully offline: no LLM, no API, no Discord. `--top N` and `--genre <standard label>` scope the table. Born from the Booth Sheet's scout notes (v1.6.0).
