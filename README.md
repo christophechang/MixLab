@@ -295,7 +295,7 @@ Playlist mode is a different workflow from genre mode:
 - Stage 2 generates exactly three completion variants (`practical`, `balanced`, and `adventurous`) and MixLab auto-selects the strongest one
 - The final report explains which seed tracks were retained, which were dropped, which library tracks were added, and which alternative strategy was rejected
 
-`--mix-length <minutes>` scales the number of tracks Stage 2 selects for each playlist completion variant. Without it, playlist mode targets 10–14 tracks. With it, the target is derived as `max(10, round(minutes / 4))` — for example 60 minutes → ~15 tracks, 90 minutes → ~22 tracks. Arc quality takes priority: Stage 2 will cut weak tracks rather than padding to hit the count.
+`--mix-length <minutes>` works in **both genre and playlist mode** and scales the number of tracks Stage 2 selects. The target is derived from the real durations of the candidate pool (`TotalTime` from the Rekordbox XML) — 60 minutes of ~4-minute house targets ~15 tracks, 60 minutes of ~6-minute progressive targets ~10. When no track in the pool carries a duration, it falls back to the old `max(10, round(minutes / 4))` heuristic. Without the flag, playlist mode targets 10–14 tracks and genre mode uses per-genre targets. Arc quality takes priority: Stage 2 will cut weak tracks rather than padding to hit the count. Reports show per-track durations and a `Runtime: ~NNm` footer whenever duration data exists.
 
 Important playlist-mode rules:
 
@@ -367,6 +367,16 @@ Compares your full Rekordbox collection against your play history and exports ev
 
 Emits per-canvas scoring diagnostics to stderr: every weighted component, weakness penalty, floor multiplier, overlap penalty against already-picked canvases, novelty breakdown (track-overlap component + shape-similarity component + closest history match), era/label coherence values, and risk notes. Normal stdout output and Discord delivery are unchanged.
 
+### Record feedback on generated concepts
+
+```bash
+./mixlab --feedback                                              # list the most recent run's concepts
+./mixlab --feedback --concept "Ladbroke to Kaoz" --verdict played
+./mixlab --feedback --concept "Glass Crate" --verdict rejected --notes "peak section didn't land"
+```
+
+Every run stores its concepts in `.mixlab/concept-history.json`. `--feedback` lets you tell MixLab what actually happened to them: `played`, `played_modified`, `rejected`, or `unused`. Verdicts feed straight into novelty scoring on future runs — a concept you **played** penalises similar candidates ~1.5× harder (you've used that idea), while a **rejected** concept's penalty is muted to 0.25× (you said no; don't let it block fresh attempts). Concepts are matched by case-insensitive title or ID prefix against the most recent run containing them; no LLM or network calls.
+
 ### View cached genre counts from the last run (no API calls at all)
 
 ```bash
@@ -421,7 +431,7 @@ Custom genres behave differently from standard genres in two key ways:
 
 #### How large pools are handled
 
-Custom genre pools are large — `4x4` alone is ~800 tracks. Since v0.13, Stage 1 is deterministic: the pool is partitioned by BPM peaks, Camelot connectivity, and era. The same pool produces the same shortlists every time, making runs reproducible and allowing targeted exploration by genre/era without random sampling. See `docs/architecture/deterministic-stage1.md` for the full partitioning algorithm.
+Custom genre pools are large — `4x4` alone is ~800 tracks. Stage 1 partitions the pool deterministically by BPM peaks, Camelot connectivity, and era, then enforces the 15–25 track shortlist contract with **seeded windowing**: any oversized shortlist keeps its 15 most-central tracks as a fixed spine and fills the remaining 10 slots by sampling rotated by the run seed. The seed defaults to today's date and is printed at run start (`Stage 1 seed: 20260707 (reproduce with --stage1-seed 20260707)`) — so the same seed reproduces a run exactly, while different days explore different corners of a big pool. Tracks beyond the windows are reported per-shortlist on stderr and as a `Stage 1 overflow` line in the pipeline summary, never silently dropped. See `docs/architecture/deterministic-stage1.md` for the full algorithm.
 
 ---
 
