@@ -787,6 +787,37 @@ _STAGE2_RISK_FRAGMENT_LOW = """\
 \nRISK: LOW — Restraint is the brief. Prefer core tracks, adjacent-key moves, and gentle BPM steps; save bold transitions for another day. A concept succeeds here by being effortlessly mixable end to end.\
 """
 
+# Naming lenses (#75): concrete title-crafting techniques rotated per run so name
+# character varies day to day instead of converging on one house style. Three are
+# sampled by the run seed (same date-derived seed as Stage 1, overridable via
+# --stage1-seed) and injected into the Stage 2 selection prompt.
+_NAMING_LENSES: tuple[str, ...] = (
+    "lift a 2-4 word fragment from a lyric or track title in the pool and cut it mid-phrase so it reads unfinished",
+    "name a specific place at a specific hour — pick the place from the music's scene geography, not a postcard",
+    "fuse two artist or title words from the pool into one invented portmanteau word",
+    "deliberately mishear a lyric or title from the pool and write down the wrong version",
+    "use scene slang or studio jargon from the pool's dominant production era",
+    "name a physical object that would be in the booth or on the floor during this exact set",
+    "use weather or temperature as a verb, not an adjective",
+    "a fragment of overheard smoking-area conversation — first person, mid-sentence",
+    "a night-transit reference — last train, night bus route, taxi rank — matched to the set's energy",
+    "something from a DJ's phone notes at 4am: cryptic, personal, no explanation",
+    "the cadence of a white-label etching or dubplate scrawl — terse, initials, studio shorthand",
+    "a number that means something inside the set (a year, a BPM only insiders would clock) worn as a name",
+)
+
+
+def _naming_lenses_block(seed: int) -> str:
+    """Three seed-rotated naming techniques, formatted for prompt injection (#75)."""
+    rng = random.Random(seed)
+    picks = rng.sample(list(_NAMING_LENSES), 3)
+    lines = "\n".join(f"- {lens}" for lens in picks)
+    return (
+        "\n\nNAMING LENSES for this run — use each of these techniques for exactly one "
+        "concept name in this response; name any remaining concepts with distinct "
+        "techniques of your own:\n" + lines
+    )
+
 
 def select_shortlists_for_stage2(shortlists: list[MixConcept]) -> list[MixConcept]:
     """Select up to _STAGE2_CAP shortlists for Stage 2, sampling randomly from the top candidates by pool size.
@@ -911,6 +942,121 @@ def _generic_name_warning(concept: MixConcept) -> str | None:
     return None
 
 
+# Deterministic name-family guard (#75 part C). Warn-only: none of these strings may
+# contain a substring from _HARD_FINDING_MARKERS — they are advisory, not hard findings,
+# and must never trigger the bounded self-revision pass.
+_NAME_FAMILY_STOPWORDS = frozenset({"with", "from", "into", "over", "under", "this", "that", "night", "house"})
+_SALIENT_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+_AMPERSAND_FAMILY_RE = re.compile(r"\s&\s|\band\b", re.IGNORECASE)
+
+
+def _salient_words(text: str) -> list[str]:
+    """Casefolded alphanumeric tokens of length >= 4, minus scene-generic stopwords.
+
+    Order-preserving and de-duplicated so callers can deterministically pick "the
+    first shared word" by title word order.
+    """
+    seen: set[str] = set()
+    words: list[str] = []
+    for match in _SALIENT_WORD_RE.findall(text.casefold()):
+        if len(match) >= 4 and match not in _NAME_FAMILY_STOPWORDS and match not in seen:
+            seen.add(match)
+            words.append(match)
+    return words
+
+
+def _history_echo_warnings(concepts: list[MixConcept], used_mix_names: list[str]) -> list[str]:
+    """Warn when a concept title shares a salient word with a name already in the catalogue."""
+    if not used_mix_names:
+        return []
+    existing: list[tuple[str, set[str]]] = [(name, set(_salient_words(name))) for name in used_mix_names]
+    warnings: list[str] = []
+    for concept in concepts:
+        concept_words = _salient_words(concept.title)
+        if not concept_words:
+            continue
+        for existing_name, existing_words in existing:
+            shared_word = next((word for word in concept_words if word in existing_words), None)
+            if shared_word is not None:
+                warnings.append(
+                    f"Concept title '{concept.title}' echoes existing mix name '{existing_name}' "
+                    f"(shared word '{shared_word}') — consider renaming"
+                )
+                break
+    return warnings
+
+
+def _within_run_shared_word_warnings(concepts: list[MixConcept]) -> list[str]:
+    """Warn once per pair of concept titles in this run that share a salient word."""
+    word_lists = [_salient_words(c.title) for c in concepts]
+    warnings: list[str] = []
+    for i in range(len(concepts)):
+        words_i = word_lists[i]
+        for j in range(i + 1, len(concepts)):
+            words_j_set = set(word_lists[j])
+            shared_word = next((word for word in words_i if word in words_j_set), None)
+            if shared_word is not None:
+                warnings.append(
+                    f"Concept titles '{concepts[i].title}' and '{concepts[j].title}' share the word "
+                    f"'{shared_word}' — same name family in one run"
+                )
+    return warnings
+
+
+def _ampersand_family_warning(concepts: list[MixConcept]) -> str | None:
+    """Warn when more than one concept title in the run uses a '[Word] & [Word]' shape."""
+    count = sum(1 for c in concepts if _AMPERSAND_FAMILY_RE.search(c.title))
+    if count > 1:
+        return f"{count} concept titles use the '[Word] & [Word]' shape in one run — vary the naming pattern"
+    return None
+
+
+def _anchor_lift_warning(concepts: list[MixConcept], tracks_by_id: dict[str, Track]) -> str | None:
+    """Warn when more than one concept title is lifted from its own tracks' title/artist/label."""
+    lifted_titles: list[str] = []
+    for concept in concepts:
+        concept_words = set(_salient_words(concept.title))
+        if not concept_words:
+            continue
+        track_words: set[str] = set()
+        for tid in concept.track_ids:
+            track = tracks_by_id.get(tid)
+            if track is None:
+                continue
+            track_words.update(_salient_words(track.title))
+            track_words.update(_salient_words(track.artist))
+            track_words.update(_salient_words(track.label))
+        if concept_words & track_words:
+            lifted_titles.append(concept.title)
+    if len(lifted_titles) > 1:
+        titles_str = ", ".join(f"'{title}'" for title in lifted_titles)
+        return (
+            f"{len(lifted_titles)} concept titles are lifted from their own track lists "
+            f"({titles_str}) — at most one anchor-lift per run"
+        )
+    return None
+
+
+def _flag_name_families(
+    concepts: list[MixConcept],
+    tracks_by_id: dict[str, Track],
+    used_mix_names: list[str] | None,
+) -> list[str]:
+    """Deterministic name-family guard (#75 part C) — warn-only drift detection for
+    repetitive concept-title patterns, within this run and against catalogue history.
+    """
+    warnings: list[str] = []
+    warnings.extend(_history_echo_warnings(concepts, used_mix_names or []))
+    warnings.extend(_within_run_shared_word_warnings(concepts))
+    ampersand_warning = _ampersand_family_warning(concepts)
+    if ampersand_warning is not None:
+        warnings.append(ampersand_warning)
+    anchor_warning = _anchor_lift_warning(concepts, tracks_by_id)
+    if anchor_warning is not None:
+        warnings.append(anchor_warning)
+    return warnings
+
+
 def _cross_concept_distinctiveness_warnings(concepts: list[MixConcept]) -> list[str]:
     """Warn when two concepts share >50% of tracks (against the prompt's distinctiveness rule)."""
     warnings: list[str] = []
@@ -961,8 +1107,16 @@ def validate_stage2_output(
     allow_played: bool = False,
     genre: str = "_default",
     risk: RiskTolerance = "medium",
+    *,
+    used_mix_names: list[str] | None = None,
 ) -> list[str]:
-    """Warn-only post-Stage-2 validation. Returns a list of warning strings (never raises)."""
+    """Warn-only post-Stage-2 validation. Returns a list of warning strings (never raises).
+
+    ``used_mix_names`` (#75 part C) enables the history-echo name-family check against
+    catalogue mix names already in use. Callers that re-validate purely for hard-finding
+    counting (the bounded self-revision path) should omit it — name warnings there would
+    be noise on top of the same concept re-checked mid-repair.
+    """
     from collections import Counter
 
     warnings: list[str] = []
@@ -1031,12 +1185,16 @@ def validate_stage2_output(
 
         # Bridge/wildcard tracks used without is_risky flag
         for i in range(len(seq) - 1):
-            to_id = seq[i + 1].track_id
+            to = seq[i + 1]
+            to_id = to.track_id
             if to_id in bridge_ids or to_id in wildcard_ids:
                 tr = transition_map.get((seq[i].track_id, to_id))
                 pool = "bridge" if to_id in bridge_ids else "wildcard"
                 if tr is None or (not tr.is_risky and tr.risk_type == ""):
-                    warnings.append(f"{label} {pool} track ID {to_id} used without a justified transition")
+                    warnings.append(
+                        f"{label} {pool} track {to.artist} — {to.title} (ID {to_id}) "
+                        f"used without a justified transition"
+                    )
 
         # Wildcard used in any role but not flagged as a concept-anchor candidate (#10).
         # Wildcard inclusion outside the anchor list raises the bar for justification.
@@ -1045,9 +1203,9 @@ def validate_stage2_output(
             anchor_track_ids = {a.track_id for a in canvas_for_concept_anchors.concept_anchor_candidates}
             for tid in concept.track_ids:
                 if tid in wildcard_ids and tid not in anchor_track_ids:
-                    warnings.append(
-                        f"{label} wildcard track ID {tid} used but not flagged as a concept-anchor candidate"
-                    )
+                    t = tracks_by_id.get(tid)
+                    name = f"{t.artist} — {t.title} (ID {tid})" if t is not None else f"ID {tid}"
+                    warnings.append(f"{label} wildcard track {name} used but not flagged as a concept-anchor candidate")
 
         # DJ-structural warnings: opener/closer presence, peak, wind-down, role-family runs,
         # energy bands. Genre-aware and arc_type-aware softening for soft-tier checks.
@@ -1069,6 +1227,9 @@ def validate_stage2_output(
     # Cross-concept distinctiveness — runs after per-concept checks so the warning surfaces
     # alongside the per-concept ones, not as a separate report section.
     warnings.extend(_cross_concept_distinctiveness_warnings(concepts))
+
+    # Deterministic name-family guard (#75 part C) — warn-only, never a hard finding.
+    warnings.extend(_flag_name_families(concepts, tracks_by_id, used_mix_names))
 
     return warnings
 
@@ -1207,10 +1368,15 @@ The "mood" value must be a SHORT phrase — 12 words maximum. It is a character 
 the full thesis belongs in the report, not the mood field.
 
 Give each concept a short, evocative name (2–4 words max) — not the pool name from Stage 1. \
-Avoid generic [Adjective][Noun] patterns (e.g. "Warm Gravity", "Committed Floor", "Orbital Descent" are bad). \
-Good names are oblique, specific, or surprising — they suggest a place, a feeling, a moment, or a cultural \
-reference rather than describing the music. Think how a DJ would title a mix: "Late Latitude", "Fever", \
-"Interzone", "Red Light", "The Slow Hours". The name should make someone curious, not nod in recognition. \
+NAME CRAFT: names come from technique, not vocabulary. Any example name printed anywhere in these \
+instructions is ALREADY TAKEN — never reuse, echo, or recombine its words ("Warm Gravity", "Committed \
+Floor", "Orbital Descent" are all burned, and bad besides: the generic [Adjective][Noun] mood pattern \
+is banned entirely). Hard rules across this whole response: no two names may share a distinctive word; \
+use the "[Word] & [Word]" shape at most once; at most ONE name may be lifted from a track title, artist, \
+or label in its own track list — and it must be twisted, not quoted verbatim. Use a different naming \
+technique for every concept in the response. A good name sounds like something you'd text a friend at \
+2am about last night, not a poetry-collection title. \
+The name should make someone curious, not nod in recognition. \
 Add a "name_reason" field: one short sentence (max 15 words) explaining WHY this specific title was \
 chosen — what literal or metaphorical quality in the track list earns the name. This must reference \
 the title explicitly and connect it to something audible (BPM arc, key centre, a specific track, \
@@ -2945,6 +3111,7 @@ async def stage2_curate_and_report(
     deep: bool = False,
     debug: bool = False,
     mix_length: int | None = None,
+    naming_seed: int | None = None,
 ) -> tuple[list[MixConcept], str]:
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
     if not stage2_key:
@@ -3173,6 +3340,10 @@ async def stage2_curate_and_report(
         stage2_system = stage2_system + _STAGE2_RISK_FRAGMENT_HIGH
     elif playlist_name is None and risk == "low":
         stage2_system = stage2_system + _STAGE2_RISK_FRAGMENT_LOW
+    # Naming lenses (#75): genre mode only — playlist mode overwrites titles via
+    # _retitle_playlist_concept, so lens pressure there would be wasted tokens.
+    if playlist_name is None and naming_seed is not None:
+        stage2_system = stage2_system + _naming_lenses_block(naming_seed)
     _name_dedup_sentinel = 'The name should make someone curious, not nod in recognition. Add a "name_reason" field'
     if used_mix_names:
         assert _name_dedup_sentinel in stage2_system, (

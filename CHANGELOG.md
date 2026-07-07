@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.7.0 — 2026-07-07
+
+- **Cue-Prep Assistant (epic #72).** `mixlab --prep` ranks every track with missing or partial cue data by expected payoff — how often concept history programs it, how harmonically central it is in its genre bucket, unplayed status, and gap severity — so cue-prep time in Rekordbox goes where booth sheets and blend scoring gain the most. Fully offline: no LLM, no API, no Discord. `--top N` and `--genre <standard label>` scope the table. Born from the Booth Sheet's scout notes (v1.6.0).
+- **Named tracks in validation warnings.** Bridge/wildcard warnings now say which track ("wildcard track Artist — Title (ID …) used without a justified transition") instead of a bare Rekordbox ID.
+- **Name Studio (#75).** Mix names get technique instead of vocabulary. Live finding: the Stage 2 prompt's own example names were leaking into output ("Fever" + "Late Latitude" exemplars produced "Fever Latitude" and "Fever Chart" on the same day). The naming section now marks all examples as ALREADY TAKEN, bans the generic [Adjective][Noun] pattern outright, and enforces per-run family rules (no shared salient words between titles, one "[Word] & [Word]" max, one anchor-lift from a concept's own track list max — twisted, not quoted). Twelve naming lenses (lyric fragments cut mid-phrase, portmanteaus, misheard titles, phone-notes-at-4am, dubplate scrawl…) rotate three per run on the Stage 1 date seed. A deterministic warn-only family guard surfaces history echoes and within-run repeats in validation notes without ever triggering revision. Name quality needs live-run verification.
+
+---
+
 ## v1.6.0 — 2026-07-07
 
 - **Booth Sheet (epic #67, mock approved by owner).** Each concept card in the HTML report now carries a per-transition execution plan: clock position of the outgoing mix-out cue, pitch-fader percentage (tempo-relation aware), key move, bars available, a plan line in booth language with fallback and scout notes, colour-coded by blend headroom (relaxed/tight/hard). Fully deterministic — computed from cue points and beat grids already in the Rekordbox XML, zero LLM calls (#68 core module, #69 rendering). Scout notes double as a cue-prep to-do list.
