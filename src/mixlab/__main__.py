@@ -33,7 +33,15 @@ from mixlab.clustering import (
 from mixlab.config import CUSTOM_GENRES, GENRE_MAP, IGNORED_GENRES
 from mixlab.directions import generate_directions
 from mixlab.discord_client import send_report
-from mixlab.history import ConceptHistory, ConceptRecord, HistoryEntry, append_run, load_history, save_history
+from mixlab.history import (
+    ConceptHistory,
+    ConceptRecord,
+    HistoryEntry,
+    append_run,
+    load_history,
+    recent_concept_titles,
+    save_history,
+)
 from mixlab.html_report import render_html_report, report_filename
 from mixlab.llm import (
     _parse_user_intent,  # noqa: PLC2701 — reused here for playlist-mode risk override (#54)
@@ -893,6 +901,11 @@ async def run(
     history = load_history(_HISTORY_PATH)
     all_canvases: list[MixCanvas] = [build_mix_canvas(c, tracks_by_id) for c in all_shortlists]
 
+    # Name-avoid list (#75): catalogue mix names plus recent history concept titles,
+    # so freshly generated names cannot repeat what earlier runs already produced.
+    catalog_name_keys = {n.casefold() for n in mix_names}
+    avoid_names = mix_names + [t for t in recent_concept_titles(history) if t.casefold() not in catalog_name_keys]
+
     # Direction source pool (#53): the full genre-scoped pool before BPM-pool partitioning.
     # For custom genres this is the merged cross-genre pool (genre_unplayed_track_ids_source
     # == pool, with no outliers); for standard genres it is the flattened genre scope plus
@@ -938,7 +951,7 @@ async def run(
         tracks_by_id,
         custom_genre_label=genre if is_custom else None,
         custom_genre_sub_genres=custom_genre_sub_genres,
-        used_mix_names=mix_names or None,
+        used_mix_names=avoid_names or None,
         canvases=selected_canvases,
         unplayed_ids=unplayed_ids_for_stage2,
         concept_history=history,
@@ -964,7 +977,7 @@ async def run(
         allow_played=mode in ("all", "played"),
         genre=genre or "_default",
         risk=risk,
-        used_mix_names=mix_names or None,
+        used_mix_names=avoid_names or None,
     )
 
     # Bounded self-revision pass (#55). Runs when revision is enabled and there is

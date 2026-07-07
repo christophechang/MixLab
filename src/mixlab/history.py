@@ -312,6 +312,29 @@ def _pseudo_concept_record(entry: HistoryEntry) -> ConceptRecord:
     )
 
 
+def recent_concept_titles(history: ConceptHistory, limit_runs: int = 10) -> list[str]:
+    """Titles of every concept from the most recent ``limit_runs`` runs, newest first.
+
+    Feeds the Stage 2 name-avoid list and the name-family guard (#75): freshly
+    generated titles must not echo what the last few runs already produced — the
+    catalogue mix names alone cannot see same-day repeats (live finding: 'Heist
+    Recordings' generated twice in one day). Deduplicated case-insensitively with
+    order preserved; entries without a #52 concepts list fall back to the legacy
+    single-concept title field.
+    """
+    titles: list[str] = []
+    seen: set[str] = set()
+    for entry in reversed(history.runs[-limit_runs:]):
+        records = entry.concepts if entry.concepts else [_pseudo_concept_record(entry)]
+        for record in records:
+            title = record.title.strip()
+            key = title.casefold()
+            if title and key not in seen:
+                seen.add(key)
+                titles.append(title)
+    return titles
+
+
 def format_recent_concepts(history: ConceptHistory, limit: int = _RECENT_CONCEPTS_LIMIT) -> str | None:
     """Build a compact 'recent concepts' block for Stage 2 prompt injection.
 

@@ -886,3 +886,60 @@ def test_similarity_breakdown_scales_shape_only_match_by_rejected_multiplier() -
     breakdown = similarity_breakdown_to_history(canvas, ConceptHistory(runs=[entry]))
     assert breakdown.feedback_multiplier == pytest.approx(0.25)
     assert breakdown.combined == pytest.approx(_NOVELTY_SHAPE_WEIGHT * 0.25)
+
+
+# ---------------------------------------------------------------------------
+# recent_concept_titles (#75) — name-avoid list from history
+# ---------------------------------------------------------------------------
+
+
+def test_recent_concept_titles_newest_first_across_runs() -> None:
+    from mixlab.history import recent_concept_titles
+
+    older = _entry("r1", ["1"])
+    older.concepts = [_record("c1", "Milk & Rust"), _record("c2", "Orbital Debt")]
+    newer = _entry("r2", ["2"])
+    newer.concepts = [_record("c3", "Heist Recordings"), _record("c4", "Rej & The Room")]
+
+    titles = recent_concept_titles(ConceptHistory(runs=[older, newer]))
+    assert titles == ["Heist Recordings", "Rej & The Room", "Milk & Rust", "Orbital Debt"]
+
+
+def test_recent_concept_titles_dedupes_case_insensitively() -> None:
+    from mixlab.history import recent_concept_titles
+
+    a = _entry("r1", ["1"])
+    a.concepts = [_record("c1", "heist recordings")]
+    b = _entry("r2", ["2"])
+    b.concepts = [_record("c2", "Heist Recordings"), _record("c3", "Fresh Name")]
+
+    titles = recent_concept_titles(ConceptHistory(runs=[a, b]))
+    assert titles == ["Heist Recordings", "Fresh Name"]
+
+
+def test_recent_concept_titles_legacy_entry_falls_back_to_concept_title() -> None:
+    from mixlab.history import recent_concept_titles
+
+    legacy = _entry("r1", ["1"])  # no .concepts list — pre-#52 shape
+    legacy.concept_title = "Old Single Title"
+
+    assert recent_concept_titles(ConceptHistory(runs=[legacy])) == ["Old Single Title"]
+
+
+def test_recent_concept_titles_limit_runs_skips_older_entries() -> None:
+    from mixlab.history import recent_concept_titles
+
+    entries = []
+    for i in range(4):
+        e = _entry(f"r{i}", [str(i)])
+        e.concepts = [_record(f"c{i}", f"Title {i}")]
+        entries.append(e)
+
+    titles = recent_concept_titles(ConceptHistory(runs=entries), limit_runs=2)
+    assert titles == ["Title 3", "Title 2"]
+
+
+def test_recent_concept_titles_empty_history_returns_empty() -> None:
+    from mixlab.history import recent_concept_titles
+
+    assert recent_concept_titles(ConceptHistory()) == []
