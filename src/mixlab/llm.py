@@ -819,6 +819,23 @@ def _naming_lenses_block(seed: int) -> str:
     )
 
 
+def _forbidden_names_block(used_mix_names: list[str]) -> str:
+    """Hard forbidden-names block appended at the end of the Stage 2 system prompt (#75).
+
+    Live finding: the previous mid-sentence avoid-list injection was skated past —
+    a run reproduced four already-used titles verbatim while the deterministic
+    guard flagged every one. A terse, prominently-placed block with an explicit
+    self-check instruction replaces it.
+    """
+    names_str = ", ".join(used_mix_names)
+    return (
+        "\n\nFORBIDDEN NAMES — every title below is already used (catalogue mixes and recent runs). "
+        "Before finalising each concept title, check it against this list: if it appears here, or shares "
+        "a distinctive word with an entry here, DISCARD it and craft a different name with a different "
+        f"technique. No exceptions.\n{names_str}"
+    )
+
+
 def select_shortlists_for_stage2(shortlists: list[MixConcept]) -> list[MixConcept]:
     """Select up to _STAGE2_CAP shortlists for Stage 2, sampling randomly from the top candidates by pool size.
 
@@ -3344,20 +3361,8 @@ async def stage2_curate_and_report(
     # _retitle_playlist_concept, so lens pressure there would be wasted tokens.
     if playlist_name is None and naming_seed is not None:
         stage2_system = stage2_system + _naming_lenses_block(naming_seed)
-    _name_dedup_sentinel = 'The name should make someone curious, not nod in recognition. Add a "name_reason" field'
     if used_mix_names:
-        assert _name_dedup_sentinel in stage2_system, (
-            "Stage 2 name-dedup injection: sentinel not found — naming instruction drifted from expected text"
-        )
-        names_str = ", ".join(used_mix_names)
-        stage2_system = stage2_system.replace(
-            _name_dedup_sentinel,
-            "The name should make someone curious, not nod in recognition. "
-            f"Do not reuse or closely echo any of these existing mix names from the DJ's catalogue: {names_str}. "
-            "Avoid borrowing any word, phrase, or trope from those names — even as a prefix, suffix, or modifier "
-            f"(e.g. if '{used_mix_names[0]}' is in the list, '{used_mix_names[0]} Vol. 2' and any variation is forbidden). "
-            'Add a "name_reason" field',
-        )
+        stage2_system = stage2_system + _forbidden_names_block(used_mix_names)
 
     raw = await _call_stage2_raw(prompt, stage2_system, stage2_key, max_tokens=32768)
 

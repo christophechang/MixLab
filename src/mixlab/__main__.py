@@ -961,7 +961,11 @@ async def run(
         deep=deep,
         debug=debug,
         mix_length=mix_length,
-        naming_seed=effective_seed,
+        # Lens rotation advances with every recorded run, so same-day runs get
+        # different naming lenses instead of identical pressure (live finding:
+        # the date-only seed gave every run of the day the same three lenses).
+        # Still reproducible: derived from --stage1-seed/date plus history length.
+        naming_seed=effective_seed + len(history.runs),
     )
     if not all_concepts:
         print(report, file=sys.stderr)
