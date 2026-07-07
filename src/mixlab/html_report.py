@@ -118,6 +118,9 @@ def _split_prose(report_text: str, n_concepts: int) -> tuple[list[str | None], l
     """
     if not report_text.strip():
         return [None] * n_concepts, []
+    # The validation-notes block is rendered as its own section from the structured
+    # warnings list; strip its textual copy so run notes don't duplicate it.
+    report_text = re.sub(r"\n*⚠ \*\*Validation Notes\*\*\n(?:- [^\n]*\n?)*", "\n", report_text)
     parts = report_text.split(_PROSE_SEPARATOR)
     if n_concepts > 0 and len(parts) >= n_concepts:
         per_concept: list[str | None] = list(parts[:n_concepts])

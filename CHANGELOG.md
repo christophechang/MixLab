@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.5.1 — 2026-07-07
+
+Three fixes from the first real production run of the v1.5.0 HTML report (house crate, live feedback).
+
+- **Arc-consistent prose.** The Stage 2 report pass now receives each concept's declared `arc_type` and must match its "Energy path:" label to it (explicit mapping for all nine arc values) — no more `wave` badge next to "Slow Climb" prose.
+- **`intro:0b` read as deliberate.** Owner-confirmed: cues at 0:00 are real mix-in points. Stage 2 prompts now carry a mix-point token legend stating that `intro:0b` means the track mixes in from bar one by design — never "cold drop / nothing to blend over" — and that a missing token means no cue data, not no intro.
+- **HTML run notes de-duplicated.** The textual "⚠ Validation Notes" block embedded in the Discord report text is stripped from the HTML report's Run notes, which already renders warnings in a dedicated section.
+
+---
+
 ## v1.5.0 — 2026-07-07
 
 - **Standalone HTML report (#45).** Every run now writes a self-contained HTML artifact to `output/reports/` (`MIXLAB_REPORT_DIR` override) and attaches it to the Discord message alongside the XML. One file, zero external requests, dark-mode aware, mobile-readable. Concept cards carry: energy sparklines, full track tables (key/BPM/duration/energy/intro-outro bars) with click-to-copy titles for Rekordbox search, per-transition mechanism and blend labels computed live from the transition graph with score-band colouring, the concept's prose report section, runtime/practicality, and the run's validation notes and crate snapshot. Discord text output unchanged; attachment MIME now inferred per file (was hardcoded `application/xml`).
