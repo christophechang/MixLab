@@ -22,6 +22,7 @@ for the validation philosophy.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import os
@@ -55,13 +56,10 @@ from mixlab.models import (
     TrackMode,
     Transition,
 )
+from mixlab.transitions import relation_label, strong_edges, tempo_relation, trace_arc
 
 _ARC_TYPE_VALUES: frozenset[str] = frozenset(get_args(ArcType))
 
-_MAX_TRACKS_PER_CALL = 40
-_MAX_TRACKS_PER_CALL_CUSTOM = 60  # larger chunks for custom multi-genre pools
-MAX_STAGE1_POOL_CUSTOM = 120  # random window size for custom pools (2 chunks × 60 = 2 API calls)
-MIN_SHORTLIST_TRACKS = 8  # Stage 1: minimum candidates per pool
 _MIN_CONCEPT_TRACKS = 4  # Stage 2: minimum tracks in a final curated set
 _STAGE2_CAP = 6  # max shortlists sent to Stage 2
 _STAGE2_CANDIDATE_POOL = 12  # top N by size to sample from (ensures variety across runs)
@@ -80,11 +78,11 @@ def _strip_thinking(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Stage 1 — candidate shortlisting (provider cascade)
+# Stage 1 — candidate shortlisting (provider cascade for Stage 0 only)
 # ---------------------------------------------------------------------------
 
-# DEPRECATED (issue #17): _STAGE1_SYSTEM*, stage1_concepts, and select_stage1_window
-# are kept for the 30-day soak period behind MIXLAB_STAGE1_LLM=1. Remove after soak.
+# _STAGE1_SYSTEM is used as default system prompt for cascade providers, which are invoked
+# by Stage 0 intent extraction (playlist mode) and previously by deprecated Stage 1 path.
 _STAGE1_SYSTEM = """\
 You are a music data analyst pre-screening a DJ's track collection to build candidate shortlists for mix concepts.
 
@@ -106,53 +104,6 @@ Give each shortlist a rough descriptive title (e.g. "Deep 122 BPM / 4A–7A Pool
 Some tracks include supplementary metadata: `energy:N/8` is a Mixed in Key automated score (0=lowest, 8=highest) and can help signal intensity. Treat it as a useful hint when present — not all tracks will have it, and its absence says nothing about the track's quality or suitability. When Year is present, you may form era-coherent groupings (e.g. a 1994–1997 pool alongside a 2018–present pool) as an alternative dimension to BPM-centre variation — but only when the material clearly separates into eras.
 
 Respond ONLY with a JSON array matching this schema:
-[{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]\
-"""
-
-# Custom genre variant: larger shortlists (20-25) to give Stage 2 more material to discard.
-_STAGE1_SYSTEM_CUSTOM = """\
-You are a music data analyst pre-screening a DJ's track collection to build candidate shortlists for mix concepts.
-
-Your task is purely technical pre-screening — not creative curation.
-
-This pool spans multiple related sub-genres. Tracks from different sub-genres may appear together.
-
-For each shortlist you create:
-- Group tracks that are plausibly technically compatible: similar BPM (±6 BPM within the pool) and harmonically \
-related keys (adjacent or nearby Camelot positions).
-- Each shortlist should contain 20–25 candidate tracks that a DJ could plausibly draw from for one mix concept.
-- Generate 3–5 distinct shortlists with different BPM centres or key characters so they serve different mood directions. \
-If the material only supports 1 or 2 distinct shortlists, produce what the material supports — do not pad. \
-If no coherent shortlist of 8+ tracks can be formed, return an empty array [].
-- Do NOT make final ordering decisions. Do NOT decide openers or closers. Simply group technically compatible tracks.
-- Exclude obvious outliers: tracks more than 8 BPM from the group median, or in keys with no harmonic relationship \
-to the rest of the pool.
-
-Give each shortlist a rough descriptive title (e.g. "Deep 122 BPM / 4A–7A Pool") and a one-line sonic mood.
-
-Some tracks include supplementary metadata: `energy:N/8` is a Mixed in Key automated score (0=lowest, 8=highest) and can help signal intensity. Treat it as a useful hint when present — not all tracks will have it, and its absence says nothing about the track's quality or suitability. When Year is present, you may form era-coherent groupings as an alternative dimension to BPM-centre variation — but only when the material clearly separates into eras.
-
-Respond ONLY with a JSON array matching this schema:
-[{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]\
-"""
-
-
-_STAGE1_SYSTEM_PLAYLIST = """\
-You are a music data analyst pre-screening a DJ's track collection to build candidate shortlists for a playlist completion concept.
-
-Tracks marked [seed] come from an existing playlist and represent the intended musical direction. Treat them as strong candidates — but group by BPM and harmonic compatibility above all else. A seed track that is an outlier (more than 8 BPM from the group median, or in a harmonically unrelated key) should still be excluded from any group where it does not fit.
-
-For each shortlist:
-- Group tracks that are plausibly technically compatible: similar BPM (±6 BPM within the pool) and harmonically related keys (adjacent or nearby Camelot positions).
-- Each shortlist should contain 15–25 candidate tracks.
-- Generate 1–3 distinct shortlists. If the material only supports one coherent group, produce one.
-- Do NOT make final ordering decisions. Simply group technically compatible tracks.
-
-Give each shortlist a rough descriptive title and a one-line sonic mood.
-
-Some tracks include supplementary metadata: `energy:N/8` is a Mixed in Key score. [seed] marks tracks from the source playlist.
-
-Respond ONLY with a JSON array:
 [{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]\
 """
 
@@ -442,6 +393,24 @@ async def _call_openai_compat(
         return _strip_thinking(str(resp.json()["choices"][0]["message"]["content"]))
 
 
+_ANTHROPIC_MAX_ATTEMPTS = 3
+_ANTHROPIC_BACKOFFS_SECS = (1.0, 2.0)
+
+
+def _stage2_model() -> str:
+    """Anthropic model id for Stage 2 (selection, report, critique) — overridable for eval/rollback."""
+    return os.environ.get("MIXLAB_STAGE2_MODEL", "claude-sonnet-4-6")
+
+
+def _stage2_temperature() -> float:
+    """Stage 2 selection-pass temperature — overridable for eval/rollback. Falls back to 0.5 on unset or invalid input."""
+    raw = os.environ.get("MIXLAB_STAGE2_TEMPERATURE", "")
+    try:
+        return float(raw) if raw else 0.5
+    except ValueError:
+        return 0.5
+
+
 async def _call_anthropic_http(
     api_key: str,
     model: str,
@@ -465,9 +434,48 @@ async def _call_anthropic_http(
         "messages": [{"role": "user", "content": prompt}],
     }
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
-        resp.raise_for_status()
-        return str(resp.json()["content"][0]["text"])
+        for attempt in range(1, _ANTHROPIC_MAX_ATTEMPTS + 1):
+            is_final_attempt = attempt == _ANTHROPIC_MAX_ATTEMPTS
+            try:
+                resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if is_final_attempt:
+                    raise
+                delay = _ANTHROPIC_BACKOFFS_SECS[attempt - 1]
+                print(
+                    f"Anthropic retry {attempt}/{_ANTHROPIC_MAX_ATTEMPTS} after "
+                    f"{type(exc).__name__} (waiting {delay:.1f}s)",
+                    file=sys.stderr,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if is_final_attempt:
+                    resp.raise_for_status()
+                delay = _ANTHROPIC_BACKOFFS_SECS[attempt - 1]
+                retry_after_header = resp.headers.get("retry-after")
+                if retry_after_header is not None:
+                    with contextlib.suppress(ValueError):
+                        delay = max(delay, float(retry_after_header))
+                print(
+                    f"Anthropic retry {attempt}/{_ANTHROPIC_MAX_ATTEMPTS} after "
+                    f"{resp.status_code} (waiting {delay:.1f}s)",
+                    file=sys.stderr,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            resp.raise_for_status()  # non-retryable 4xx raises immediately
+            data = resp.json()
+            if data.get("stop_reason") == "max_tokens":
+                print(
+                    f"WARNING: Anthropic response truncated at max_tokens={max_tokens} — output may be incomplete.",
+                    file=sys.stderr,
+                )
+            return str(data["content"][0]["text"])
+
+    raise RuntimeError("Anthropic request failed — retry loop exited without a response.")
 
 
 async def _try_groq(prompt: str, system: str = _STAGE1_SYSTEM) -> str | None:
@@ -505,7 +513,7 @@ async def _try_anthropic(prompt: str, system: str = _STAGE1_SYSTEM) -> str | Non
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         return None
-    return await _call_anthropic_http(key, "claude-sonnet-4-6", system, prompt)
+    return await _call_anthropic_http(key, _stage2_model(), system, prompt)
 
 
 _OPENROUTER_BASE = "https://openrouter.ai/api"
@@ -565,110 +573,24 @@ def make_cascade_state() -> CascadeState:
     return CascadeState()
 
 
-def _print_stage1_provider_summary(
-    provider_name: str,
-    genre: str,
-    input_track_count: int,
-    parsed: list[MixConcept],
-    cleaned: list[MixConcept],
-    kept: list[MixConcept],
-) -> None:
-    print(
-        f"Stage 1 provider: {provider_name} | genre={genre} | input={input_track_count} tracks | "
-        f"parsed={len(parsed)} | cleaned={len(cleaned)} | kept={len(kept)}"
-    )
-    for raw_concept, cleaned_concept in zip(parsed, cleaned, strict=False):
-        status = "kept" if len(cleaned_concept.track_ids) >= MIN_SHORTLIST_TRACKS else "dropped (<8)"
-        print(
-            f"  - {cleaned_concept.title} | raw={len(raw_concept.track_ids)} | "
-            f"kept={len(cleaned_concept.track_ids)} | {status}"
-        )
-    if not cleaned:
-        print("  - no concepts returned")
+def _format_duration(secs: int) -> str:
+    """Format a duration in seconds as ``m:ss`` (minutes not zero-padded)."""
+    minutes, seconds = divmod(secs, 60)
+    return f"{minutes}:{seconds:02d}"
 
 
-def _print_stage1_provider_attempt(provider_name: str, genre: str, input_track_count: int) -> None:
-    print(f"Stage 1 trying provider: {provider_name} | genre={genre} | input={input_track_count} tracks")
+def _duration_target_tracks(mix_length: int, tracks: list[Track]) -> int:
+    """Derive a target track count for a set length from real track durations.
 
-
-async def _call_stage1_once(
-    tracks: list[Track],
-    genre: str,
-    state: CascadeState,
-    custom: bool = False,
-    seed_ids: frozenset[str] | None = None,
-) -> list[MixConcept]:
-    alias_to_id, id_to_alias = _make_alias_map(tracks)
-    prompt = f"Genre: {genre}\n\nTracks:\n{_tracks_to_text(tracks, seed_ids=seed_ids, id_to_alias=id_to_alias)}"
-    system = _STAGE1_SYSTEM_PLAYLIST if seed_ids is not None else _STAGE1_SYSTEM_CUSTOM if custom else _STAGE1_SYSTEM
-
-    for _ in range(len(_CASCADE)):
-        provider = _CASCADE[state.index]
-        try:
-            _print_stage1_provider_attempt(provider.__name__, genre, len(tracks))
-            result = await provider(prompt, system=system)
-            if result is None:  # provider not configured — skip silently, no failure counted
-                state.index = (state.index + 1) % len(_CASCADE)
-                continue
-            if not result.strip():  # provider returned empty content — treat as a failure
-                raise ValueError(f"Provider {provider.__name__} returned empty content.")
-            concepts = _parse_concepts(result)
-            # Map aliases back to real IDs. Aliases not in the map are hallucinated — drop them.
-            cleaned = [
-                MixConcept(
-                    title=c.title,
-                    mood=c.mood,
-                    track_ids=[alias_to_id[a] for a in c.track_ids if a in alias_to_id],
-                )
-                for c in concepts
-            ]
-            kept = [c for c in cleaned if len(c.track_ids) >= MIN_SHORTLIST_TRACKS]
-            _print_stage1_provider_summary(provider.__name__, genre, len(tracks), concepts, cleaned, kept)
-            state.consecutive_failures = 0
-            return kept
-        except Exception as exc:  # noqa: BLE001 — cascade
-            print(f"Provider {provider.__name__} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-            state.consecutive_failures += 1
-            if state.consecutive_failures >= len(_CASCADE):
-                raise RuntimeError(
-                    f"All Stage 1 providers failed — {state.consecutive_failures} consecutive failures "
-                    f"with no successful call."
-                ) from exc
-            state.index = (state.index + 1) % len(_CASCADE)
-
-    raise RuntimeError(f"All Stage 1 providers exhausted for genre '{genre}'.")
-
-
-async def stage1_concepts(  # DEPRECATED (issue #17) — remove after 30-day soak
-    cluster: list[Track],
-    genre: str,
-    state: CascadeState,
-    custom: bool = False,
-    seed_ids: frozenset[str] | None = None,
-) -> list[MixConcept]:
-    chunk_size = _MAX_TRACKS_PER_CALL_CUSTOM if custom else _MAX_TRACKS_PER_CALL
-    if len(cluster) <= chunk_size:
-        return await _call_stage1_once(cluster, genre, state, custom=custom, seed_ids=seed_ids)
-
-    concepts: list[MixConcept] = []
-    for i in range(0, len(cluster), chunk_size):
-        concepts.extend(
-            await _call_stage1_once(cluster[i : i + chunk_size], genre, state, custom=custom, seed_ids=seed_ids)
-        )
-    return concepts
-
-
-def select_stage1_window(tracks: list[Track], max_count: int) -> list[Track]:  # DEPRECATED (issue #17)
-    """Pick a random contiguous window of up to max_count tracks from a Camelot-sorted pool.
-
-    Each run starts at a different position in the sorted list, giving variety across runs
-    while keeping Stage 1 input small enough to avoid LLM rate limits.
-    The window is a coherent BPM/key slice because the input is Camelot-sorted.
+    Uses the mean duration across ``tracks`` that carry a known ``duration_secs``.
+    Falls back to the crude minutes/4 heuristic when none of the offered tracks
+    have duration data.
     """
-    if len(tracks) <= max_count:
-        return tracks
-    start = random.randint(0, len(tracks) - max_count)
-    return tracks[start : start + max_count]
+    known_durations = [t.duration_secs for t in tracks if t.duration_secs is not None]
+    if not known_durations:
+        return max(10, round(mix_length / 4.0))
+    mean_secs = statistics.fmean(known_durations)
+    return max(6, round(mix_length * 60 / mean_secs))
 
 
 def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) -> str:
@@ -679,8 +601,10 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
 
     r = canvas.roles
     c = canvas.contrast
+    min_count, max_count = TRACK_COUNT_TARGETS.get(canvas.genre, TRACK_COUNT_TARGETS["_default"])
     lines = [
         f"[Canvas {canvas.canvas_id} | novelty:{canvas.score.novelty:.2f}]",
+        f"Target: {min_count}-{max_count} tracks",
         f"Core: {ids_block(canvas.core_track_ids)}",
     ]
     bridge_str = ids_block(canvas.bridge_track_ids)
@@ -688,21 +612,29 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
     if canvas.bridge_track_ids or canvas.wildcard_track_ids:
         lines.append(f"Bridge: {bridge_str} | Wildcard: {wild_str}")
 
+    # Role hints demoted to Opener/Closer only (audit L4). Groove-locker/Builder/Peak/Pivot
+    # fired on nearly every energy band and added noise to the prompt surface — canvas.roles
+    # stays fully populated for scoring/history, this is a prompt-surface trim only.
     role_parts = []
     if r.opener:
         role_parts.append(f"Opener: {ids_block(r.opener)}")
-    if r.groove_locker:
-        role_parts.append(f"Groove-locker: {ids_block(r.groove_locker)}")
-    if r.builder:
-        role_parts.append(f"Builder: {ids_block(r.builder)}")
-    if r.peak:
-        role_parts.append(f"Peak: {ids_block(r.peak)}")
-    if r.pivot:
-        role_parts.append(f"Pivot: {ids_block(r.pivot)}")
     if r.closer:
         role_parts.append(f"Closer: {ids_block(r.closer)}")
     if role_parts:
         lines.append(" | ".join(role_parts))
+
+    # Strong transitions: non-obvious mixability mechanisms (halftime locks, energy
+    # lifts, 3:4 shuffles) over the canvas's resolvable tracks. Omitted when none.
+    canvas_tracks = [tracks_by_id[tid] for tid in canvas.source_concept.track_ids if tid in tracks_by_id]
+    edges = strong_edges(canvas_tracks, top_n=6)
+    if edges:
+        tracks_lookup = {t.track_id: t for t in canvas_tracks}
+        edge_parts = [
+            f"ID:{e.from_id}→ID:{e.to_id} "
+            f"({relation_label(e, tracks_lookup[e.from_id], tracks_lookup[e.to_id])}, score {e.score:.2f})"
+            for e in edges
+        ]
+        lines.append("Strong transitions: " + " | ".join(edge_parts))
 
     if canvas.core_anchor_ids:
         lines.append(f"Anchors: {ids_block(canvas.core_anchor_ids)}")
@@ -747,6 +679,8 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
         elif tid in canvas.wildcard_track_ids:
             pool_label = " [wildcard]"
         extras: list[str] = []
+        if t.duration_secs is not None:
+            extras.append(_format_duration(t.duration_secs))
         if t.year is not None:
             extras.append(str(t.year))
         if t.label:
@@ -765,6 +699,8 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
         )
 
     header = "\n".join(lines)
+    if canvas.brief:
+        header = f"DIRECTION BRIEF ({canvas.direction_type}):\n{canvas.brief}\n" + header
     candidates = "Candidates:\n" + "\n".join(track_lines) if track_lines else ""
     return f"{header}\n{candidates}"
 
@@ -782,7 +718,8 @@ _STAGE2_CANVAS_RULES = """\
 - Harmonic and BPM compatibility are helpers, not constraints.\n\
 - For transitions involving bridge or wildcard tracks, state the specific mechanism that makes it survivable.\n\
 - Anchor candidates shown on the canvas header (Anchors:) are tracks the system has identified as distinctive or identity-defining based on provenance, library rarity, and pool centrality. Prefer including one anchor in each concept's tracklist — the concept will feel more rooted. This is preference, not requirement; a concept built entirely from non-anchor tracks is acceptable if the narrative is stronger without anchor inclusion.\n\
-- Concept anchor candidates (Concept anchors: line) are bridge/wildcard tracks flagged as structurally interesting exceptions, tagged [peak], [identity], or [structural-exception]. If you use one in a structural role (opener, closer, pivot, reset, peak), name the specific role and why this track earns it. If you use a bridge/wildcard track that is not in this list, the bar for justification is higher — explain explicitly what concept-defining function it serves.\
+- Concept anchor candidates (Concept anchors: line) are bridge/wildcard tracks flagged as structurally interesting exceptions, tagged [peak], [identity], or [structural-exception]. If you use one in a structural role (opener, closer, pivot, reset, peak), name the specific role and why this track earns it. If you use a bridge/wildcard track that is not in this list, the bar for justification is higher — explain explicitly what concept-defining function it serves.\n\
+- When a canvas carries a DIRECTION BRIEF, the brief is that canvas's thesis. Honour it: the concept you build from that canvas must serve the stated direction, and the report's thesis line should echo it.\
 """
 
 
@@ -809,6 +746,16 @@ _STAGE2_MODE_FRAGMENTS: dict[TrackMode, str] = {
     "played": _STAGE2_MODE_FRAGMENT_PLAYED,
     "all": _STAGE2_MODE_FRAGMENT_ALL,
 }
+
+# Risk-tolerance Stage 2 framing fragments (#42). Appended after the mode fragment,
+# genre mode only. "medium" appends nothing — byte-stable default.
+_STAGE2_RISK_FRAGMENT_HIGH = """\
+\nRISK: HIGH — The user asked to be surprised. Prioritise the unexpected: prefer bridge/wildcard tracks flagged as concept anchors as FEATURED picks rather than exceptions; take the chance a cautious DJ wouldn't, and name the mechanism that makes each bold move survivable. Concepts should read as [ADVENTUROUS] statements — put that tag at the start of each concept's thesis line in the report.\
+"""
+
+_STAGE2_RISK_FRAGMENT_LOW = """\
+\nRISK: LOW — Restraint is the brief. Prefer core tracks, adjacent-key moves, and gentle BPM steps; save bold transitions for another day. A concept succeeds here by being effortlessly mixable end to end.\
+"""
 
 
 def select_shortlists_for_stage2(shortlists: list[MixConcept]) -> list[MixConcept]:
@@ -955,6 +902,26 @@ def _cross_concept_distinctiveness_warnings(concepts: list[MixConcept]) -> list[
     return warnings
 
 
+_RISK_BPM_THRESHOLDS: dict[RiskTolerance, float] = {"low": 10.0, "medium": 15.0, "high": 20.0}
+_RISK_CAMELOT_THRESHOLDS: dict[RiskTolerance, int] = {"low": 3, "medium": 4, "high": 5}
+
+
+def _risk_jump_thresholds(risk: RiskTolerance, tr: Transition | None) -> tuple[float, int]:
+    """Return (bpm_threshold, camelot_threshold) for a transition under ``risk`` (#42).
+
+    At "low" and "medium" the thresholds are risk-fixed. At "high" the relaxed
+    thresholds (20 BPM / 5 Camelot) only apply to transitions explicitly annotated
+    ``is_risky=True`` — an unannotated jump still uses the medium thresholds even at
+    high risk, so a bold move still requires the model to name a mechanism.
+    """
+    if risk == "high":
+        annotated_risky = tr is not None and tr.is_risky
+        if annotated_risky:
+            return _RISK_BPM_THRESHOLDS["high"], _RISK_CAMELOT_THRESHOLDS["high"]
+        return _RISK_BPM_THRESHOLDS["medium"], _RISK_CAMELOT_THRESHOLDS["medium"]
+    return _RISK_BPM_THRESHOLDS[risk], _RISK_CAMELOT_THRESHOLDS[risk]
+
+
 def validate_stage2_output(
     concepts: list[MixConcept],
     canvases: list[MixCanvas],
@@ -963,6 +930,7 @@ def validate_stage2_output(
     denylist_ids: set[str],
     allow_played: bool = False,
     genre: str = "_default",
+    risk: RiskTolerance = "medium",
 ) -> list[str]:
     """Warn-only post-Stage-2 validation. Returns a list of warning strings (never raises)."""
     from collections import Counter
@@ -990,9 +958,16 @@ def validate_stage2_output(
             warnings.append(f"{label} {n} tracks — maximum is {max_count} for this genre")
 
         seq = [tracks_by_id[tid] for tid in concept.track_ids if tid in tracks_by_id]
+        # Artist-thread canvases (#53) name a spine artist whose repetition is the whole
+        # point — suppress the repeat warning for that artist at up to 3 tracks (the
+        # thread cap). Every other artist, and a thread artist appearing 4+ times, warns.
+        thread_canvas = _match_canvas_for_concept(concept, canvases)
+        thread_artist = thread_canvas.thread_artist if thread_canvas is not None else ""
         artist_counts = Counter(t.artist for t in seq)
         for artist, count in artist_counts.items():
             if count >= 3:
+                if thread_artist and artist == thread_artist and count <= 3:
+                    continue
                 warnings.append(f"{label} artist '{artist}' appears {count} times")
 
         # Suppress BPM/Camelot jump warnings when the corresponding transition is annotated
@@ -1004,12 +979,18 @@ def validate_stage2_output(
             tr = transition_map.get((a.track_id, b.track_id))
             justified_risk = tr is not None and tr.is_risky and tr.risk_type != ""
             bpm_jump = abs(a.bpm - b.bpm)
-            if bpm_jump > 15 and not justified_risk:
+            # A named ratio move (halftime/double/3:4/4:3) is not a jump — it is a locked
+            # tempo relationship, so suppress the raw-BPM warning for those. Straight moves
+            # over the threshold still warn as before.
+            rel, _stretch = tempo_relation(a.bpm, b.bpm)
+            is_ratio_move = rel not in ("straight", "incompatible")
+            bpm_thr, cam_thr = _risk_jump_thresholds(risk, tr)
+            if bpm_jump > bpm_thr and not justified_risk and not is_ratio_move:
                 warnings.append(
                     f"{label} BPM jump {bpm_jump:.1f} between {a.artist} — {a.title} and {b.artist} — {b.title}"
                 )
             cam_dist = camelot_distance(a.camelot_key, b.camelot_key)
-            if cam_dist > 4 and not justified_risk:
+            if cam_dist > cam_thr and not justified_risk:
                 warnings.append(f"{label} Camelot jump {cam_dist} between {a.camelot_key} and {b.camelot_key}")
 
         # Bridge/wildcard tracks used without is_risky flag
@@ -1038,6 +1019,12 @@ def validate_stage2_output(
         if canvas_for_concept is not None:
             warnings.extend(_structural_warnings(concept, canvas_for_concept, tracks_by_id, genre))
 
+        # Arc verification: the declared arc_type must match the actual per-track energy
+        # sequence. trace_arc states facts — no genre softening.
+        arc_message = trace_arc(concept, tracks_by_id)
+        if arc_message is not None:
+            warnings.append(f"{label} arc mismatch: {arc_message}")
+
         # Generic-name distinctiveness regex.
         name_warning = _generic_name_warning(concept)
         if name_warning is not None:
@@ -1060,7 +1047,8 @@ shortlists of tracks that have been pre-screened for technical compatibility. Yo
 narrate — select the best tracks from each shortlist, decide the play order, and write the full mix report.
 
 For each shortlist or sub-pool you carve from it:
-- SELECT the best 8–12 tracks from the pool for a coherent DJ set. Exclude tracks that weaken the journey. \
+- SELECT the best tracks from the pool — each canvas header names its target track-count range; treat it as \
+the default and deviate only when arc quality demands — for a coherent DJ set. Exclude tracks that weaken the journey. \
 Weakness is practical: a track whose intro gives no workable mix point, a vocal that starts on bar one with \
 no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment \
 used so early it makes everything after feel like a comedown.
@@ -1173,6 +1161,9 @@ story; abstract-journey describes a non-linear, impressionistic set. The chosen 
 should be visible in the track sequence and consistent with the energy path you describe \
 in the report.
 
+The "mood" value must be a SHORT phrase — 12 words maximum. It is a character label, not a thesis; \
+the full thesis belongs in the report, not the mood field.
+
 Give each concept a short, evocative name (2–4 words max) — not the pool name from Stage 1. \
 Avoid generic [Adjective][Noun] patterns (e.g. "Warm Gravity", "Committed Floor", "Orbital Descent" are bad). \
 Good names are oblique, specific, or surprising — they suggest a place, a feeling, a moment, or a cultural \
@@ -1212,7 +1203,8 @@ Respond ONLY with the JSON array.\
 # if either drifts from _STAGE2_SYSTEM, the assert fires at import time instead of
 # silently producing a prompt with the old text.
 _STAGE2_SELECT_STANDARD = """For each shortlist or sub-pool you carve from it:
-- SELECT the best 8–12 tracks from the pool for a coherent DJ set. Exclude tracks that weaken the journey. \
+- SELECT the best tracks from the pool — each canvas header names its target track-count range; treat it as \
+the default and deviate only when arc quality demands — for a coherent DJ set. Exclude tracks that weaken the journey. \
 Weakness is practical: a track whose intro gives no workable mix point, a vocal that starts on bar one with \
 no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment \
 used so early it makes everything after feel like a comedown."""
@@ -1494,9 +1486,21 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
 
     for item in data:
         raw_ids = item.get("track_ids")
-        track_ids = [
-            nid for tid in (raw_ids if isinstance(raw_ids, list) else []) if (nid := _normalise_id(tid)) in valid_ids
-        ]
+        raw_id_list = raw_ids if isinstance(raw_ids, list) else []
+        track_ids: list[str] = []
+        dropped_count = 0
+        for tid in raw_id_list:
+            nid = _normalise_id(tid)
+            if nid in valid_ids:
+                track_ids.append(nid)
+            else:
+                dropped_count += 1
+        if dropped_count:
+            title_for_warning = str(item.get("title", ""))
+            print(
+                f"[{title_for_warning}] dropped {dropped_count} track ID(s) outside the offered pool",
+                file=sys.stderr,
+            )
         if len(track_ids) < _MIN_CONCEPT_TRACKS:
             continue
         raw_transitions = item.get("transitions", [])
@@ -1676,6 +1680,28 @@ def _append_practicality_to_report(
     return f"{report.rstrip()}\n\n{_format_practicality_line(score)}"
 
 
+def _append_runtime_to_report(
+    report: str,
+    concept: MixConcept,
+    tracks_by_id: dict[str, Track],
+) -> str:
+    """Append a cumulative runtime annotation to a concept report when duration data exists.
+
+    Sums known ``duration_secs`` across the concept's tracks. Returns the report unchanged
+    when none of the concept's tracks carry duration data.
+    """
+    total = len(concept.track_ids)
+    known_secs: list[int] = []
+    for tid in concept.track_ids:
+        t = tracks_by_id.get(tid)
+        if t is not None and t.duration_secs is not None:
+            known_secs.append(t.duration_secs)
+    if not known_secs:
+        return report
+    total_minutes = round(sum(known_secs) / 60)
+    return f"{report.rstrip()}\n\n**Runtime**: ~{total_minutes}m ({len(known_secs)}/{total} tracks with durations)"
+
+
 def _playlist_retention_stats(
     concept: MixConcept,
     seed_track_ids: list[str],
@@ -1718,12 +1744,21 @@ def _compute_practicality_score(
     track_sequence = [tracks_by_id[tid] for tid in concept.track_ids if tid in tracks_by_id]
     n = len(track_sequence)
 
-    # bpm_smoothness: how even the consecutive BPM steps are
+    # bpm_smoothness: how even the consecutive BPM steps are, measured on the RESIDUAL
+    # stretch after the best tempo relation rather than raw |ΔBPM|. A clean 172→86
+    # halftime lock has ~0 residual, so it no longer reads as an 86-BPM jolt.
     if n < 3:
         bpm_smoothness = 1.0
     else:
-        bpm_deltas = [abs(track_sequence[i + 1].bpm - track_sequence[i].bpm) for i in range(n - 1)]
-        std = statistics.stdev(bpm_deltas)
+        effective_deltas: list[float] = []
+        for i in range(n - 1):
+            a, b = track_sequence[i], track_sequence[i + 1]
+            rel, stretch = tempo_relation(a.bpm, b.bpm)
+            if rel == "incompatible":
+                effective_deltas.append(abs(b.bpm - a.bpm))
+            else:
+                effective_deltas.append(stretch * 100)
+        std = statistics.stdev(effective_deltas)
         bpm_smoothness = max(0.0, 1.0 - std / 10.0)
 
     # harmonic_ratio: fraction of consecutive pairs that are Camelot-compatible (distance ≤ 1)
@@ -1800,13 +1835,53 @@ def _score_variant(
 
 
 _STRATEGY_PRIORITY: dict[str, int] = {"practical": 0, "balanced": 1, "adventurous": 2}
+_STRATEGY_PRIORITY_HIGH_RISK: dict[str, int] = {"adventurous": 0, "balanced": 1, "practical": 2}
+
+# Practicality/adventure-dividend weights per risk tolerance (#54). "low" reduces to
+# today's practicality-only ranking (w_a=0.0) so the default call site is unchanged.
+_RISK_TOLERANCE_WEIGHTS: dict[RiskTolerance, tuple[float, float]] = {
+    "low": (1.0, 0.0),
+    "medium": (0.8, 0.2),
+    "high": (0.6, 0.4),
+}
 
 
-def _select_best_variant(variants: list[CompletionVariant]) -> CompletionVariant:
-    """Return highest-scoring variant; ties broken by practical > balanced > adventurous."""
+def _adventure_dividend(concept: MixConcept) -> float:
+    """Reward justified risk-taking: density of risky transitions carrying a real
+    (non-cut_only) mechanism, scaled: 0 risky -> 0.0; each justified risky transition
+    adds 0.25 up to 1.0; any cut_only/empty-typed risky transition subtracts 0.25
+    (floor 0.0)."""
+    dividend = 0.0
+    for transition in concept.transitions:
+        if not transition.is_risky:
+            continue
+        if transition.risk_type in ("cut_only", ""):
+            dividend -= 0.25
+        else:
+            dividend += 0.25
+    return max(0.0, min(1.0, dividend))
+
+
+def _select_best_variant(variants: list[CompletionVariant], risk_tolerance: RiskTolerance = "low") -> CompletionVariant:
+    """Return the best-fit variant for the given risk tolerance.
+
+    fit = practicality_overall * w_p + _adventure_dividend(concept) * w_a, with weights
+    keyed by risk_tolerance: low (1.0, 0.0) reduces to plain practicality — identical to
+    the pre-#54 behaviour and the default when no tolerance is supplied; medium (0.8, 0.2)
+    and high (0.6, 0.4) increasingly reward justified risk-taking. Ties are broken
+    practical > balanced > adventurous, except at "high" tolerance where the order
+    inverts to adventurous > balanced > practical — a DJ who asked for adventure should
+    get it when variants are otherwise equally fit.
+    """
+    w_practicality, w_adventure = _RISK_TOLERANCE_WEIGHTS[risk_tolerance]
+    tie_break = _STRATEGY_PRIORITY_HIGH_RISK if risk_tolerance == "high" else _STRATEGY_PRIORITY
+
+    def fit(variant: CompletionVariant) -> float:
+        return variant.practicality_score.overall * w_practicality + _adventure_dividend(variant.concept) * w_adventure
+
     return max(
         variants,
-        key=lambda v: (v.score, -_STRATEGY_PRIORITY.get(v.strategy, 99)),
+        key=lambda v: (fit(v), -tie_break.get(v.strategy, 99)),
     )
 
 
@@ -1902,12 +1977,12 @@ async def _call_stage2_raw(
     try:
         return await _call_anthropic_http(
             stage2_key,
-            "claude-sonnet-4-6",
+            _stage2_model(),
             stage2_system,
             prompt,
             max_tokens=max_tokens,
             timeout=600,
-            temperature=0.3,
+            temperature=_stage2_temperature(),
         )
     except Exception as exc:
         raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc
@@ -1927,6 +2002,8 @@ async def _call_stage2_report_single(
         if t is None:
             continue
         extras: list[str] = []
+        if t.duration_secs is not None:
+            extras.append(_format_duration(t.duration_secs))
         if t.year is not None:
             extras.append(str(t.year))
         if t.label:
@@ -1973,7 +2050,12 @@ async def _call_stage2_report_single(
 
     try:
         return await _call_anthropic_http(
-            stage2_key, "claude-sonnet-4-6", _STAGE2_REPORT_SYSTEM, prompt, max_tokens=2048, timeout=120
+            stage2_key,
+            _stage2_model(),
+            _STAGE2_REPORT_SYSTEM,
+            prompt,
+            max_tokens=max(2048, 120 * len(concept.track_ids)),
+            timeout=120,
         )
     except Exception as exc:
         raise RuntimeError(f"Stage 2 report generation failed: {exc}") from exc
@@ -2072,7 +2154,7 @@ async def _call_stage2_critique_single(
 
     try:
         raw = await _call_anthropic_http(
-            stage2_key, "claude-sonnet-4-6", _STAGE2_CRITIQUE_SYSTEM, prompt, max_tokens=1024, timeout=120
+            stage2_key, _stage2_model(), _STAGE2_CRITIQUE_SYSTEM, prompt, max_tokens=1024, timeout=120
         )
     except Exception as exc:
         # Critique failure never aborts a --deep run; surface the issue as a critique note.
@@ -2141,6 +2223,282 @@ async def _call_stage2_reports(
             *[_call_stage2_report_single(c, tracks_by_id, seed_ids, unplayed_ids, stage2_key) for c in concepts]
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 bounded self-revision (#55). One minimal-repair pass per flagged concept.
+# Runs from __main__.run() AFTER validation, acting on the same warnings the user sees.
+# Genre mode only — playlist mode has its own variant-scoring path.
+# ---------------------------------------------------------------------------
+
+# Warning substrings that count as HARD findings — technical/structural problems a
+# minimal track swap/reorder/drop can plausibly resolve. Soft warnings (no wind-down,
+# all-high-energy, generic name, distinctiveness) are excluded: they are advisory and
+# a revision pass cannot reliably fix them without regenerating the concept.
+_HARD_FINDING_MARKERS: tuple[str, ...] = (
+    "not found in library",
+    "is denylisted",
+    "has been played",
+    "BPM jump",
+    "Camelot jump",
+    "arc mismatch",
+    "used without a justified transition",
+)
+
+# Hard-finding marker → short human label used in the report annotation's resolved list.
+_HARD_FINDING_KIND_LABELS: tuple[tuple[str, str], ...] = (
+    ("not found in library", "missing track"),
+    ("is denylisted", "denylist"),
+    ("has been played", "played track"),
+    ("BPM jump", "BPM jump"),
+    ("Camelot jump", "Camelot jump"),
+    ("arc mismatch", "arc mismatch"),
+    ("used without a justified transition", "unjustified transition"),
+)
+
+_STAGE2_REVISION_SYSTEM = """\
+You curated this concept moments ago. It has specific, named findings — BPM jumps, key jumps, an \
+arc that does not match the sequence, played/denylisted/missing tracks, or risky transitions with no \
+justification. Perform a MINIMAL repair. Do NOT regenerate the concept.
+
+Rules:
+- Resolve the named findings by swapping, reordering, or dropping tracks — nothing more.
+- Draw any replacement tracks only from the candidate pool shown below.
+- Preserve the title, the thesis (name_reason), and the overall character/mood. Do not rewrite them.
+- Keep the concept coherent: the opener still opens, the closer still closes, the arc still reads.
+- Prefer the smallest change that resolves the findings. If a finding cannot be fixed without \
+breaking the concept, leave it rather than force a worse sequence.
+- Re-annotate transitions for the new order: one entry per consecutive pair, is_risky/risk_type honest.
+
+Return ONLY a single-element JSON array in this exact schema — no report field, no prose, no fences:
+[{"title": "...", "name_reason": "...", "mood": "...", "track_ids": ["id1", "id2", ...], \
+"transitions": [{"from_id": "id1", "to_id": "id2", "is_risky": false, "risk_type": ""}], "arc_type": "..."}]\
+"""
+
+
+def _concept_warnings(concept: MixConcept, warnings: list[str]) -> list[str]:
+    """Warnings prefixed ``[{concept.title}]`` — i.e. the ones scoped to this concept."""
+    prefix = f"[{concept.title}]"
+    return [w for w in warnings if w.startswith(prefix)]
+
+
+def _hard_findings_for_concept(concept: MixConcept, warnings: list[str]) -> list[str]:
+    """This concept's warnings matching any hard-finding marker (#55)."""
+    return [w for w in _concept_warnings(concept, warnings) if any(m in w for m in _HARD_FINDING_MARKERS)]
+
+
+def _finding_kinds(findings: list[str]) -> set[str]:
+    """Map a list of hard-finding warning strings to their short kind labels."""
+    kinds: set[str] = set()
+    for f in findings:
+        for marker, kind in _HARD_FINDING_KIND_LABELS:
+            if marker in f:
+                kinds.add(kind)
+    return kinds
+
+
+def _critique_triggers_revision(concept: MixConcept) -> bool:
+    """True when the concept's critique alone qualifies it for revision (#55)."""
+    crit = concept.critique
+    if crit is None:
+        return False
+    if crit.verdict == "weak":
+        return True
+    return crit.verdict == "needs_attention" and crit.suggested_substitution is not None
+
+
+def _qualifies_for_revision(concept: MixConcept, warnings: list[str]) -> bool:
+    """Revision trigger (#55): >=2 hard findings, a weak critique, or a needs_attention
+    critique carrying a suggested substitution."""
+    if len(_hard_findings_for_concept(concept, warnings)) >= 2:
+        return True
+    return _critique_triggers_revision(concept)
+
+
+def _revision_findings(concept: MixConcept, warnings: list[str]) -> list[str]:
+    """The findings shown to the revision model: hard warnings, plus critique lines
+    when the concept was (also) triggered by its critique."""
+    findings = list(_hard_findings_for_concept(concept, warnings))
+    crit = concept.critique
+    if _critique_triggers_revision(concept) and crit is not None:
+        if crit.single_weakest_moment:
+            findings.append(f"critique (weakest moment): {crit.single_weakest_moment}")
+        for issue in crit.structural_issues:
+            findings.append(f"critique (structural issue): {issue}")
+        if crit.suggested_substitution:
+            findings.append(f"critique (suggested substitution): {crit.suggested_substitution}")
+    return findings
+
+
+async def _call_stage2_revision_single(
+    concept: MixConcept,
+    canvas: MixCanvas,
+    findings: list[str],
+    tracks_by_id: dict[str, Track],
+    stage2_key: str,
+) -> MixConcept | None:
+    """Run one minimal-repair pass for a single concept. Returns the revised concept,
+    or None when the call fails or parsing yields nothing (caller keeps the original)."""
+    track_lines: list[str] = []
+    for i, tid in enumerate(concept.track_ids, 1):
+        t = tracks_by_id.get(tid)
+        if t is None:
+            continue
+        energy = f"energy:{t.energy}/8" if t.energy is not None else "energy:?"
+        track_lines.append(f"{i}. ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {energy}")
+
+    transition_lines: list[str] = []
+    for tr in concept.transitions:
+        flag = "RISKY" if tr.is_risky else "ok"
+        rtype = tr.risk_type or "—"
+        transition_lines.append(f"  {tr.from_id} → {tr.to_id} [{flag}, risk_type={rtype}]")
+
+    canvas_section = _format_canvas_section(canvas, tracks_by_id)
+    prompt = (
+        f"Concept: {concept.title}\n"
+        f"Thesis (name_reason): {concept.name_reason or '(none)'}\n"
+        f"Mood: {concept.mood}\n"
+        f"arc_type: {concept.arc_type or '(none)'}\n\n"
+        "Track order:\n" + "\n".join(track_lines) + "\n\n"
+        "Transitions:\n" + ("\n".join(transition_lines) if transition_lines else "  (none declared)") + "\n\n"
+        "Findings to resolve:\n" + "\n".join(f"- {f}" for f in findings) + "\n\n" + canvas_section
+    )
+
+    try:
+        raw = await _call_anthropic_http(
+            stage2_key, _stage2_model(), _STAGE2_REVISION_SYSTEM, prompt, max_tokens=4096, timeout=180, temperature=0.3
+        )
+    except Exception as exc:  # noqa: BLE001 — a failed repair never aborts the run
+        print(f"Revision: {concept.title} — call failed ({type(exc).__name__}: {exc})", file=sys.stderr)
+        return None
+
+    valid_ids = (
+        set(canvas.core_track_ids) | set(canvas.bridge_track_ids) | set(canvas.wildcard_track_ids)
+    ) & tracks_by_id.keys()
+    try:
+        curated, _ = _parse_curated_concepts(raw, valid_ids)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return curated[0] if curated else None
+
+
+async def revise_concepts(
+    concepts: list[MixConcept],
+    report: str,
+    warnings: list[str],
+    canvases: list[MixCanvas],
+    tracks_by_id: dict[str, Track],
+    *,
+    played_ids: set[str],
+    allow_played: bool,
+    genre: str,
+    risk: RiskTolerance = "medium",
+) -> tuple[list[MixConcept], str, list[str]]:
+    """One bounded self-revision pass (#55). Returns (possibly-updated concepts,
+    possibly-updated report, final warnings).
+
+    For each qualifying concept (see ``_qualifies_for_revision``) it runs a single
+    minimal-repair call in parallel, accepts the result only when it strictly reduces
+    the concept's hard-finding count, appends a ``**Revised**`` annotation to the report
+    for accepted repairs, and recomputes the warning list over the final concept set.
+    Never a second round — hard cap of one call per concept per run.
+    """
+    stage2_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not stage2_key:
+        print("Revision skipped — ANTHROPIC_API_KEY is not set.", file=sys.stderr)
+        return concepts, report, warnings
+
+    # (index into concepts, concept, matched canvas, findings, hard findings)
+    plans: list[tuple[int, MixConcept, MixCanvas, list[str], list[str]]] = []
+    for idx, concept in enumerate(concepts):
+        if not _qualifies_for_revision(concept, warnings):
+            continue
+        canvas = _match_canvas_for_concept(concept, canvases)
+        if canvas is None:
+            # No pool to draw substitutions from — skip revision for this concept.
+            continue
+        plans.append(
+            (
+                idx,
+                concept,
+                canvas,
+                _revision_findings(concept, warnings),
+                _hard_findings_for_concept(concept, warnings),
+            )
+        )
+
+    if not plans:
+        return concepts, report, warnings
+
+    for _idx, concept, _canvas, _findings, hard in plans:
+        print(
+            f"Revision: {concept.title} — {len(hard)} hard finding(s), requesting minimal repair...",
+            file=sys.stderr,
+        )
+
+    revised_results = await asyncio.gather(
+        *[
+            _call_stage2_revision_single(concept, canvas, findings, tracks_by_id, stage2_key)
+            for _idx, concept, canvas, findings, _hard in plans
+        ]
+    )
+
+    revised_concepts = list(concepts)
+    annotations: list[str] = []
+    for (idx, original, canvas, _findings, hard), revised in zip(plans, revised_results, strict=True):
+        if revised is None:
+            print(f"Revision: {original.title} — no usable repair returned, keeping original", file=sys.stderr)
+            continue
+        # Preserve identity: the repair swaps/reorders tracks, it does not re-theme.
+        revised.title = original.title
+        revised.name_reason = original.name_reason
+        revised.mood = original.mood
+
+        revised_warnings = validate_stage2_output(
+            [revised],
+            [canvas],
+            tracks_by_id,
+            played_ids=played_ids,
+            denylist_ids=set(),
+            allow_played=allow_played,
+            genre=genre,
+            risk=risk,
+        )
+        n_before = len(hard)
+        n_after = len(_hard_findings_for_concept(revised, revised_warnings))
+        if n_after >= n_before:
+            print(f"Revision: {original.title} — revision did not improve — keeping original", file=sys.stderr)
+            continue
+
+        # ACCEPT: swap in the revised tracklist and note it in the report.
+        revised_concepts[idx] = revised
+        before_kinds = _finding_kinds(hard)
+        after_kinds = _finding_kinds(_hard_findings_for_concept(revised, revised_warnings))
+        resolved_kinds = sorted(before_kinds - after_kinds) or sorted(before_kinds)
+        annotations.append(
+            f"**Revised**: {original.title} — resolved {n_before - n_after} of {n_before} findings "
+            f"({', '.join(resolved_kinds)}); track list updated. "
+            f"(prose above reflects the pre-revision sequence; exported playlist uses the revised order)"
+        )
+        print(
+            f"Revision: {original.title} — accepted ({n_before - n_after}/{n_before} finding(s) resolved)",
+            file=sys.stderr,
+        )
+
+    if annotations:
+        report = report.rstrip() + "\n\n" + "\n\n".join(annotations)
+
+    final_warnings = validate_stage2_output(
+        revised_concepts,
+        canvases,
+        tracks_by_id,
+        played_ids=played_ids,
+        denylist_ids=set(),
+        allow_played=allow_played,
+        genre=genre,
+        risk=risk,
+    )
+    return revised_concepts, report, final_warnings
 
 
 def _kw_search(kw: str, text: str, pos: int = 0) -> re.Match[str] | None:
@@ -2280,6 +2638,24 @@ _AUDIENCE_MAP: dict[str, str] = {
     "club": "experienced",
 }
 
+# Risk-tolerance signal (#54): lets --intent override the Stage 0 IntentBrief's
+# risk_tolerance in playlist mode. Keys ordered most-specific first — multi-word
+# phrases before the single words they contain, so "no risks"/"take risks" win
+# over a bare "risk"-adjacent word when both would otherwise match.
+_RISK_MAP: dict[str, str] = {
+    "no risks": "low",
+    "low risk": "low",
+    "take risks": "high",
+    "surprise me": "high",
+    "safe": "low",
+    "cautious": "low",
+    "smooth": "low",
+    "bold": "high",
+    "adventurous": "high",
+    "risky": "high",
+    "weird": "high",
+}
+
 # Max mood keywords to extract into the signal; text-position sorting ensures the
 # user's lead mood ranks first, so the top-N faithfully reflects intent emphasis.
 _MAX_MOOD_SIGNALS: int = 3
@@ -2356,6 +2732,9 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
     if (v := _first_match(_AUDIENCE_MAP, text)) is not None:
         signals["audience"] = v
 
+    if (v := _first_match(_RISK_MAP, text)) is not None:
+        signals["risk"] = v
+
     return signals
 
 
@@ -2374,6 +2753,7 @@ async def stage2_curate_and_report(
     concept_history: ConceptHistory | None = None,
     genre_intent: str | None = None,
     mode: TrackMode | None = None,
+    risk: RiskTolerance = "medium",
     deep: bool = False,
     debug: bool = False,
     mix_length: int | None = None,
@@ -2381,7 +2761,7 @@ async def stage2_curate_and_report(
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
     if not stage2_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set — Stage 2 curation requires Anthropic.")
-    stage2_model_display = "Claude Sonnet 4.6"
+    stage2_model_display = _stage2_model()
 
     sections: list[str] = []
     if canvases is not None:
@@ -2398,6 +2778,8 @@ async def stage2_curate_and_report(
                 if t is None:
                     continue
                 extras: list[str] = []
+                if t.duration_secs is not None:
+                    extras.append(_format_duration(t.duration_secs))
                 if t.year is not None:
                     extras.append(str(t.year))
                 if t.label:
@@ -2432,6 +2814,20 @@ async def stage2_curate_and_report(
     if n == 0:
         raise RuntimeError("Stage 2 received no shortlists with resolvable tracks — nothing to curate.")
 
+    # The full set of track ids actually offered to the model this run — used both to
+    # size the mix_length target and to validate Stage 2's selection output (#50).
+    # Previously valid_ids was the whole library, which let Stage 2 select IDs from
+    # outside the shown pool and have them silently accepted.
+    if canvases is not None:
+        offered_ids: set[str] = {
+            tid
+            for canvas in canvases
+            for tid in (*canvas.source_concept.track_ids, *canvas.bridge_track_ids, *canvas.wildcard_track_ids)
+        }
+    else:
+        offered_ids = {tid for shortlist in shortlists for tid in shortlist.track_ids}
+    offered_ids &= tracks_by_id.keys()
+
     # Recent-concepts block — shown to Stage 2 so it can deliberately diverge from
     # prior runs. Skipped on first-ever run (empty history) or when caller did not
     # provide a history snapshot. See history.format_recent_concepts.
@@ -2441,10 +2837,13 @@ async def stage2_curate_and_report(
         if block:
             recent_concepts_block = block + "\n\n"
 
-    # Genre-mode user intent block (#16). Pure free-text passthrough — no parsing.
-    # Ignored in playlist mode, which has its own Stage 0 intent brief.
+    # User intent block (#16, #54). Pure free-text passthrough — no parsing beyond the
+    # heuristic signal extraction below. Built whenever genre_intent is non-empty, in
+    # BOTH genre mode and playlist mode. In playlist mode it is placed after the Stage 0
+    # DJ INTENT BRIEF and carries an extra sentence establishing it overrides that brief
+    # on conflict — --intent is an explicit user statement, the brief is inferred.
     genre_intent_block = ""
-    if genre_intent is not None and playlist_name is None:
+    if genre_intent is not None:
         intent_text = " ".join(genre_intent.split())  # normalize whitespace including newlines
         if intent_text:
             parsed = _parse_user_intent(intent_text)
@@ -2457,6 +2856,12 @@ async def stage2_curate_and_report(
                     "the quoted intent takes precedence.)\n\n"
                 )
                 if parsed
+                else ""
+            )
+            override_sentence = (
+                "This user intent OVERRIDES the inferred DJ INTENT BRIEF above wherever they conflict; "
+                "note any such conflict in the report's Assumptions.\n\n"
+                if playlist_name is not None
                 else ""
             )
             genre_intent_block = (
@@ -2472,6 +2877,7 @@ async def stage2_curate_and_report(
                 "with your own curatorial judgement. If the pool cannot support what the intent asks for, name "
                 "the specific conflict in the Assumptions section (e.g. 'intent asks for warmth and restraint, "
                 "but the pool is heavily peak-energy — closest viable interpretation chosen').\n\n"
+                f"{override_sentence}"
                 "---\n\n"
             )
 
@@ -2514,6 +2920,7 @@ async def stage2_curate_and_report(
         prompt = (
             f"{recent_concepts_block}"
             f"{intent_section}"
+            f"{genre_intent_block}"
             f"Curate three completion variants from the following {n} BPM zone shortlists. "
             f'This is a playlist completion run seeded from the Rekordbox playlist "{playlist_name}".\n\n'
             "Each shortlist below represents one natural BPM zone from the source playlist. "
@@ -2546,10 +2953,11 @@ async def stage2_curate_and_report(
                 + "\n\n".join(sections)
             )
 
-    if mix_length is not None and playlist_name is not None:
-        target_tracks = max(10, round(mix_length / 4.0))
+    if mix_length is not None:
+        offered_tracks = [tracks_by_id[tid] for tid in offered_ids]
+        target_tracks = _duration_target_tracks(mix_length, offered_tracks)
         prompt += (
-            f"\n\nSet length target: {mix_length} minutes (~{target_tracks} tracks at ~4 min average). "
+            f"\n\nSet length target: {mix_length} minutes (~{target_tracks} tracks). "
             f"Aim for approximately {target_tracks} tracks per concept. "
             f"Maintain arc quality — cut any track that weakens the set rather than padding to hit the number."
         )
@@ -2571,6 +2979,12 @@ async def stage2_curate_and_report(
     # path, so the mode-fragment is genre-mode only.
     if playlist_name is None and mode is not None:
         stage2_system = stage2_system + _STAGE2_MODE_FRAGMENTS[mode]
+    # Risk-tolerance Stage 2 fragment (#42). Genre mode only, appended after the mode
+    # fragment. "medium" appends nothing — byte-stable default.
+    if playlist_name is None and risk == "high":
+        stage2_system = stage2_system + _STAGE2_RISK_FRAGMENT_HIGH
+    elif playlist_name is None and risk == "low":
+        stage2_system = stage2_system + _STAGE2_RISK_FRAGMENT_LOW
     _name_dedup_sentinel = 'The name should make someone curious, not nod in recognition. Add a "name_reason" field'
     if used_mix_names:
         assert _name_dedup_sentinel in stage2_system, (
@@ -2591,8 +3005,7 @@ async def stage2_curate_and_report(
     if os.environ.get("MIXLAB_DEBUG_STAGE2"):
         print(f"[DEBUG] Stage 2 raw response (first 2000 chars):\n{raw[:2000]}", file=sys.stderr)
 
-    valid_ids = set(tracks_by_id.keys())
-    curated, _ = _parse_curated_concepts(raw, valid_ids)
+    curated, _ = _parse_curated_concepts(raw, offered_ids)
     print(
         f"Stage 2 selection pass: {len(curated)} concept(s) returned (moods: {[c.mood for c in curated]})",
         file=sys.stderr,
@@ -2616,7 +3029,11 @@ async def stage2_curate_and_report(
         annotated_reports = [
             _append_critique_to_report(
                 _append_practicality_to_report(
-                    _append_bold_moves_to_report(r, c, canvases, tracks_by_id),
+                    _append_runtime_to_report(
+                        _append_bold_moves_to_report(r, c, canvases, tracks_by_id),
+                        c,
+                        tracks_by_id,
+                    ),
                     c,
                     tracks_by_id,
                 ),
@@ -2651,7 +3068,8 @@ async def stage2_curate_and_report(
         passing = [v for v in variants if _passes_floor(v, intent_brief, playlist_seed_track_ids, minimum_seed_tracks)]
         candidates = passing if passing else variants
 
-        best = _select_best_variant(candidates)
+        risk_tolerance: RiskTolerance = intent_brief.risk_tolerance if intent_brief is not None else "low"
+        best = _select_best_variant(candidates, risk_tolerance)
         concept = best.concept
 
         # Retry only if no variant passed the floor
@@ -2665,7 +3083,7 @@ async def stage2_curate_and_report(
                 "Retry with one concept only. Include as many dropped seeds as possible.\n\n"
             ) + prompt
             raw = await _call_stage2_raw(retry_prompt, stage2_system, stage2_key, max_tokens=32768)
-            curated, _ = _parse_curated_concepts(raw, valid_ids)
+            curated, _ = _parse_curated_concepts(raw, offered_ids)
             if curated:
                 concept = curated[0]
                 retained_ids, _, _ = _playlist_retention_stats(concept, playlist_seed_track_ids)
@@ -2693,6 +3111,7 @@ async def stage2_curate_and_report(
                     for v in rejected
                 ]
                 rejected_summary = "\nAlternative strategies considered: " + "; ".join(parts) + "."
+                rejected_summary += f" Selection tolerance: {risk_tolerance}."
 
             reports = await _call_stage2_reports(
                 [v.concept for v in ordered_variants],
@@ -2715,6 +3134,7 @@ async def stage2_curate_and_report(
                         tracks_by_id,
                         rejected_summary,
                     )
+                base_report = _append_runtime_to_report(base_report, variant.concept, tracks_by_id)
                 ordered_reports.append(
                     _label_playlist_report_section(base_report, variant.strategy, is_winner=is_winner)
                 )
@@ -2727,10 +3147,12 @@ async def stage2_curate_and_report(
             rejected_summary = ""
             retry_reports = await _call_stage2_reports([concept], tracks_by_id, seed_ids, unplayed_ids, stage2_key)
             base_report = retry_reports[0] if retry_reports else ""
+            base_report = _rewrite_playlist_report(
+                base_report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id, rejected_summary
+            )
+            base_report = _append_runtime_to_report(base_report, concept, tracks_by_id)
             report = _label_playlist_report_section(
-                _rewrite_playlist_report(
-                    base_report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id, rejected_summary
-                ),
+                base_report,
                 concept.mood.lower(),
                 is_winner=True,
             )

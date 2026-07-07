@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime
+import difflib
+import io
 import os
 import sys
 import time
 from pathlib import Path
+from typing import cast
 
 from dotenv import load_dotenv
 
@@ -14,6 +17,7 @@ from mixlab.cache import load_genre_cache, save_genre_cache
 from mixlab.client import fetch_mix_names, fetch_played_tracks
 from mixlab.clustering import (
     ABSOLUTE_MIN,
+    MAX_SHORTLIST,
     build_custom_genre_pool,
     build_mix_canvas,
     count_available_by_genre,
@@ -21,24 +25,26 @@ from mixlab.clustering import (
     partition_bpm_pools,
     partition_outliers,
     partition_pool,
+    partition_pool_with_stats,
     resolve_genre_clusters,
     select_canvases,
     sort_by_camelot,
 )
 from mixlab.config import CUSTOM_GENRES, GENRE_MAP, IGNORED_GENRES
+from mixlab.directions import generate_directions
 from mixlab.discord_client import send_report
-from mixlab.history import HistoryEntry, append_run, load_history
+from mixlab.history import ConceptHistory, ConceptRecord, HistoryEntry, append_run, load_history, save_history
 from mixlab.llm import (
-    MAX_STAGE1_POOL_CUSTOM,
+    _parse_user_intent,  # noqa: PLC2701 — reused here for playlist-mode risk override (#54)
+    _qualifies_for_revision,  # noqa: PLC2701 — reused for the revision-gate decision (#55)
     make_cascade_state,
-    select_stage1_window,
+    revise_concepts,
     stage0_intent_brief,
-    stage1_concepts,
     stage2_curate_and_report,
     validate_stage2_output,
 )
 from mixlab.matcher import filter_played, filter_unplayed
-from mixlab.models import MixCanvas, MixConcept, Track, TrackMode
+from mixlab.models import MixCanvas, MixConcept, RiskTolerance, Track, TrackMode
 from mixlab.playlist_exporter import (
     export_merged_xml,
     generate_merged_xml_bytes,
@@ -52,7 +58,9 @@ from mixlab.playlist_mode import (
 from mixlab.reader import apply_bpm_corrections, parse_collection, parse_playlists
 
 _XML_PATH = Path("import/rekordbox.xml")
+_HISTORY_PATH = Path(".mixlab/concept-history.json")
 _DO_NOT_RECOMMEND_PLAYLIST = "DO NOT RECOMMEND"
+_FEEDBACK_VERDICTS = ("played", "played_modified", "rejected", "unused")
 
 
 def _build_tracks_by_id(tracks: list[Track]) -> dict[str, Track]:
@@ -183,6 +191,24 @@ def _format_pipeline_counts(counts: dict[str, int]) -> str:
     return ", ".join(f"{label}={count}" for label, count in counts.items()) if counts else "none"
 
 
+def _report_stage1_window(overflow_counts: list[int]) -> int:
+    """Print a per-shortlist stderr note for each windowed (capped) Stage 1 shortlist.
+
+    Returns the total number of overflow tracks (beyond the windows) across all
+    shortlists so the caller can surface it in the pipeline summary (#48).
+    """
+    total = 0
+    for i, overflow in enumerate(overflow_counts):
+        if overflow > 0:
+            print(
+                f"Stage 1 window: shortlist {i} capped at {MAX_SHORTLIST} tracks "
+                f"({overflow} overflow, rotated by seed)",
+                file=sys.stderr,
+            )
+            total += overflow
+    return total
+
+
 def _print_pipeline_summary(
     *,
     collection_count: int,
@@ -194,6 +220,7 @@ def _print_pipeline_summary(
     same_genre_outlier_count: int,
     stage1_shortlist_count: int,
     stage2_shortlist_count: int,
+    stage1_overflow: int = 0,
 ) -> None:
     print("Pipeline summary:")
     filter_label = pool_label if used_catalog_api else "eligible"
@@ -202,6 +229,8 @@ def _print_pipeline_summary(
     print(f"- Genre scope after BPM filter: {_format_pipeline_counts(bpm_filtered_counts)}")
     print(f"- Same-genre outliers considered: {same_genre_outlier_count}")
     print(f"- Stage 1 shortlists: {stage1_shortlist_count}")
+    if stage1_overflow:
+        print(f"- Stage 1 overflow (tracks beyond windows): {stage1_overflow}")
     print(f"- Stage 2 shortlists sent: {stage2_shortlist_count}")
     print()
 
@@ -263,6 +292,71 @@ def _show_cached_genres() -> None:
     print()
 
 
+def _print_feedback_listing(history: ConceptHistory) -> None:
+    """List the most recent run's concepts with their current feedback state (#52)."""
+    if not history.runs:
+        print("No concept history found — run mixlab first to generate concepts.")
+        return
+    latest = history.runs[-1]
+    if not latest.concepts:
+        print(f"Most recent run ({latest.created_at[:10]}, {latest.genre}) recorded no concepts.")
+        return
+    print(f"Most recent run ({latest.created_at[:10]}, {latest.genre}):")
+    for i, record in enumerate(latest.concepts):
+        feedback_label = record.feedback or "(none)"
+        print(f"  [{i}] {record.title} — feedback: {feedback_label}")
+
+
+def _find_feedback_concept(history: ConceptHistory, query: str) -> tuple[HistoryEntry, ConceptRecord] | None:
+    """Find the most recent run containing a concept matching ``query``.
+
+    Matches case-insensitively on title, or as a prefix of ``concept_id``. Runs are
+    walked newest-first so the first hit is the most recent match.
+    """
+    query_lower = query.lower()
+    for entry in reversed(history.runs):
+        for record in entry.concepts:
+            if record.title.lower() == query_lower or (record.concept_id and record.concept_id.startswith(query)):
+                return entry, record
+    return None
+
+
+def run_feedback(concept: str | None, verdict: str | None, notes: str, history_path: Path) -> int:
+    """Handle ``mixlab --feedback`` (#52). No LLM calls, no network — pure history-file edit.
+
+    Returns the process exit code: 0 for a successful listing or feedback update,
+    1 for a usage error or an unmatched concept title.
+    """
+    history = load_history(history_path)
+
+    if concept is None and verdict is None:
+        _print_feedback_listing(history)
+        return 0
+    if verdict is None:
+        print("ERROR: --verdict is required when --concept is given.", file=sys.stderr)
+        return 1
+    if concept is None:
+        print("ERROR: --concept is required when --verdict is given.", file=sys.stderr)
+        return 1
+
+    match = _find_feedback_concept(history, concept)
+    if match is None:
+        all_titles = [record.title for entry in history.runs for record in entry.concepts]
+        suggestions = difflib.get_close_matches(concept, all_titles, n=3)
+        print(f'No concept found matching "{concept}".', file=sys.stderr)
+        if suggestions:
+            print("Did you mean: " + ", ".join(suggestions), file=sys.stderr)
+        return 1
+
+    entry, record = match
+    record.feedback = verdict
+    record.feedback_notes = notes
+    record.feedback_recorded_at = datetime.datetime.now(datetime.UTC).isoformat()
+    save_history(history, history_path)
+    print(f'Recorded feedback "{verdict}" for concept "{record.title}" (run {entry.created_at[:10]}, {entry.genre}).')
+    return 0
+
+
 async def run_playlist_mode(
     playlist_name: str,
     genre: str | None,
@@ -272,6 +366,7 @@ async def run_playlist_mode(
     max_bpm: float | None = None,
     min_year: int | None = None,
     max_year: int | None = None,
+    intent: str | None = None,
     debug: bool = False,
     mix_length: int | None = None,
     locked: bool = False,
@@ -335,6 +430,16 @@ async def run_playlist_mode(
         f"missing roles: {', '.join(str(r) for r in intent_brief.missing_roles) or 'none'}"
     )
 
+    if intent:
+        parsed_risk = _parse_user_intent(intent).get("risk")
+        if parsed_risk is not None:
+            print(
+                f"--intent risk signal '{parsed_risk}' overrides Stage 0 risk_tolerance "
+                f"'{intent_brief.risk_tolerance}'.",
+                file=sys.stderr,
+            )
+            intent_brief.risk_tolerance = cast("RiskTolerance", parsed_risk)
+
     library_source = tracks
     if genre is not None:
         try:
@@ -371,7 +476,7 @@ async def run_playlist_mode(
 
     # Load concept history so Stage 2 can deliberately diverge from prior runs (#13).
     # Playlist mode does not use canvas selection so history was previously not loaded here.
-    history = load_history(Path(".mixlab/concept-history.json"))
+    history = load_history(_HISTORY_PATH)
 
     all_concepts, report = await stage2_curate_and_report(
         shortlists,
@@ -383,6 +488,7 @@ async def run_playlist_mode(
         intent_brief=intent_brief,
         used_mix_names=mix_names or None,
         concept_history=history,
+        genre_intent=intent,
         debug=debug,
         mix_length=mix_length,
     )
@@ -398,6 +504,7 @@ async def run_playlist_mode(
         playlist_name=playlist_name,
         mode=mode,
         export_dir=export_dir,
+        intent=intent,
         mix_length=mix_length,
         locked=locked,
     )
@@ -430,15 +537,15 @@ async def run_playlist_mode(
 
 
 async def run_export_unplayed() -> None:
-    tracks = parse_collection(_XML_PATH)
-    tracks, denylist_excluded = _apply_do_not_recommend_filter(tracks, _XML_PATH)
-    tracks = apply_bpm_corrections(tracks)
-
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
     catalog_url = os.environ.get("CATALOG_API_URL", "")
     if not catalog_url:
         print("ERROR: CATALOG_API_URL not set — cannot determine unplayed tracks.", file=sys.stderr)
         sys.exit(1)
+
+    tracks = parse_collection(_XML_PATH)
+    tracks, denylist_excluded = _apply_do_not_recommend_filter(tracks, _XML_PATH)
+    tracks = apply_bpm_corrections(tracks)
 
     try:
         played = await fetch_played_tracks(api_key, catalog_url)
@@ -488,6 +595,10 @@ async def run(
     deep: bool = False,
     debug: bool = False,
     stage1_seed: int | None = None,
+    mix_length: int | None = None,
+    directions: str = "mixed",
+    no_revise: bool = False,
+    risk: RiskTolerance = "medium",
 ) -> None:
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
@@ -576,13 +687,19 @@ async def run(
     # 5. Cluster and scope to the requested genre.
     is_custom = genre in CUSTOM_GENRES
     t_start = time.monotonic()
-    cascade_state = make_cascade_state()
     all_shortlists: list[MixConcept] = []
     custom_genre_sub_genres: list[str] | None = None
     genre_unplayed_track_ids_source: list[Track] = []
     genre_cluster_counts: dict[str, int] = {}
     bpm_filtered_counts: dict[str, int] = {}
     same_genre_outlier_count = 0
+    total_stage1_overflow = 0
+
+    # Resolve the effective Stage 1 seed once so every partition_pool call this run
+    # shares it (and the user can reproduce the exact partition). Defaults to today's
+    # date as YYYYMMDD when --stage1-seed is not supplied (#48).
+    effective_seed = stage1_seed if stage1_seed is not None else int(datetime.date.today().strftime("%Y%m%d"))
+    print(f"Stage 1 seed: {effective_seed} (reproduce with --stage1-seed {effective_seed})")
 
     if is_custom:
         pool = build_custom_genre_pool(genre, unplayed, CUSTOM_GENRES, GENRE_MAP)
@@ -596,15 +713,9 @@ async def run(
         bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # precondition filter
         cfg = CUSTOM_GENRES[genre]
         custom_genre_sub_genres = cfg["genres"]
-        if os.environ.get("MIXLAB_STAGE1_LLM"):
-            stage1_pool = select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CUSTOM)
-            if len(stage1_pool) < len(bpm_sorted_pool):
-                print(f"  Selected {len(stage1_pool)}-track window from pool for Stage 1 (randomised per run).")
-            shortlists = await stage1_concepts(stage1_pool, genre, cascade_state, custom=True)
-            stage1_pool_size = len(stage1_pool)
-        else:
-            shortlists = partition_pool(bpm_sorted_pool, seed=stage1_seed)
-            stage1_pool_size = len(bpm_sorted_pool)
+        shortlists, stage1_stats = partition_pool_with_stats(bpm_sorted_pool, seed=effective_seed)
+        total_stage1_overflow += _report_stage1_window(stage1_stats.overflow_counts)
+        stage1_pool_size = len(bpm_sorted_pool)
         if not shortlists:
             print(f"Stage 1: pool too small to partition — skipping {genre} (custom).", file=sys.stderr)
         all_shortlists.extend(shortlists)
@@ -623,16 +734,14 @@ async def run(
             print(f"No tracks found for genre '{genre}'.", file=sys.stderr)
             sys.exit(1)
 
-        # 6a. Stage 1 — deterministic path (or LLM path when MIXLAB_STAGE1_LLM=1).
+        # 6a. Stage 1 — deterministic partitioning.
         for genre_label, cluster_tracks in clusters.items():
             pools = partition_bpm_pools(cluster_tracks)
             sorted_tracks = sort_by_camelot(pools.core)
             sorted_tracks = [t for t in sorted_tracks if t.bpm > 0]  # precondition filter
             bpm_filtered_counts[genre_label] = len(sorted_tracks)
-            if os.environ.get("MIXLAB_STAGE1_LLM"):
-                shortlists = await stage1_concepts(sorted_tracks, genre_label, cascade_state)
-            else:
-                shortlists = partition_pool(sorted_tracks, seed=stage1_seed)
+            shortlists, stage1_stats = partition_pool_with_stats(sorted_tracks, seed=effective_seed)
+            total_stage1_overflow += _report_stage1_window(stage1_stats.overflow_counts)
             if not shortlists:
                 print(f"Stage 1: pool too small to partition — skipping {genre_label}.", file=sys.stderr)
                 continue
@@ -641,17 +750,12 @@ async def run(
         # Outliers within this genre scope — shortlist as Misc.
         genre_outliers = [t for t in outliers if t.genre.lower() == genre.lower()]
         same_genre_outlier_count = len(genre_outliers)
-        if os.environ.get("MIXLAB_STAGE1_LLM"):
-            # LLM path: preserve original threshold exactly
-            if len(genre_outliers) >= 4:
-                all_shortlists.extend(await stage1_concepts(genre_outliers, "Misc", cascade_state))
-        else:
-            # Deterministic path: filter bpm<=0, use ABSOLUTE_MIN threshold.
-            # Use a local variable — do NOT reassign genre_outliers (used later for XML export).
-            bpm_filtered_outliers = [t for t in genre_outliers if t.bpm > 0]
-            if len(bpm_filtered_outliers) >= ABSOLUTE_MIN:
-                shortlists = partition_pool(bpm_filtered_outliers, seed=stage1_seed)
-                all_shortlists.extend(shortlists)
+        # Deterministic path: filter bpm<=0, use ABSOLUTE_MIN threshold.
+        # Use a local variable — do NOT reassign genre_outliers (used later for XML export).
+        bpm_filtered_outliers = [t for t in genre_outliers if t.bpm > 0]
+        if len(bpm_filtered_outliers) >= ABSOLUTE_MIN:
+            shortlists = partition_pool(bpm_filtered_outliers, seed=effective_seed)
+            all_shortlists.extend(shortlists)
 
         genre_unplayed_track_ids_source = [t for cluster_tracks in clusters.values() for t in cluster_tracks]
 
@@ -669,6 +773,7 @@ async def run(
             same_genre_outlier_count=same_genre_outlier_count,
             stage1_shortlist_count=0,
             stage2_shortlist_count=0,
+            stage1_overflow=total_stage1_overflow,
         )
         print("No shortlists generated — all tracks may have been excluded.", file=sys.stderr)
         sys.exit(1)
@@ -679,9 +784,31 @@ async def run(
         )
 
     # Build Mix Canvases and select top candidates for Stage 2 (diversity-aware, deterministic).
-    history = load_history(Path(".mixlab/concept-history.json"))
+    history = load_history(_HISTORY_PATH)
     all_canvases: list[MixCanvas] = [build_mix_canvas(c, tracks_by_id) for c in all_shortlists]
-    selected_canvases = select_canvases(all_canvases, history, mode=mode, debug=debug)
+
+    # Direction source pool (#53): the full genre-scoped pool before BPM-pool partitioning.
+    # For custom genres this is the merged cross-genre pool (genre_unplayed_track_ids_source
+    # == pool, with no outliers); for standard genres it is the flattened genre scope plus
+    # same-genre outliers. Directions are cross-strata by construction, so they draw from
+    # this whole pool rather than any single BPM stratum.
+    direction_pool = genre_unplayed_track_ids_source + genre_outliers
+
+    if directions == "off":
+        selected_canvases = select_canvases(all_canvases, history, mode=mode, risk=risk, debug=debug)
+    elif directions == "only":
+        selected_canvases = generate_directions(direction_pool, tracks_by_id, seed=effective_seed, max_directions=6)
+        if not selected_canvases:
+            print(
+                "--directions only: no feasible directions for this pool — falling back to classic canvas selection.",
+                file=sys.stderr,
+            )
+            selected_canvases = select_canvases(all_canvases, history, mode=mode, risk=risk, debug=debug)
+    else:  # "mixed"
+        direction_canvases = generate_directions(direction_pool, tracks_by_id, seed=effective_seed, max_directions=3)
+        classic_n = max(3, 6 - len(direction_canvases))
+        classic_selected = select_canvases(all_canvases, history, n=classic_n, mode=mode, risk=risk, debug=debug)
+        selected_canvases = classic_selected + direction_canvases
     if not selected_canvases:
         print("No canvases could be built — collection may be out of sync.", file=sys.stderr)
         sys.exit(1)
@@ -695,6 +822,7 @@ async def run(
         same_genre_outlier_count=same_genre_outlier_count,
         stage1_shortlist_count=stage1_shortlist_count,
         stage2_shortlist_count=len(selected_canvases),
+        stage1_overflow=total_stage1_overflow,
     )
 
     # 7. LLM Stage 2 — creative curation + full report (single Anthropic call).
@@ -710,8 +838,10 @@ async def run(
         concept_history=history,
         genre_intent=intent,
         mode=mode,
+        risk=risk,
         deep=deep,
         debug=debug,
+        mix_length=mix_length,
     )
     if not all_concepts:
         print(report, file=sys.stderr)
@@ -726,7 +856,27 @@ async def run(
         denylist_ids=set(),  # tracks filtered before Stage 1; can't appear in output
         allow_played=mode in ("all", "played"),
         genre=genre or "_default",
+        risk=risk,
     )
+
+    # Bounded self-revision pass (#55). Runs when revision is enabled and there is
+    # something to act on — validation findings, or a concept whose critique qualifies
+    # it on its own (weak, or needs_attention with a suggested substitution).
+    if not no_revise and (
+        validation_warnings or any(_qualifies_for_revision(c, validation_warnings) for c in all_concepts)
+    ):
+        all_concepts, report, validation_warnings = await revise_concepts(
+            all_concepts,
+            report,
+            validation_warnings,
+            selected_canvases,
+            tracks_by_id,
+            played_ids=played_track_ids,
+            allow_played=mode in ("all", "played"),
+            genre=genre or "_default",
+            risk=risk,
+        )
+
     if validation_warnings:
         print("\n⚠ Validation Notes:")
         for w in validation_warnings:
@@ -741,7 +891,7 @@ async def run(
             genre=genre or "_default",
             mode={"all": "all-tracks", "played": "played", "unplayed": "standard"}[mode],
         )
-        append_run(history, entry, Path(".mixlab/concept-history.json"))
+        append_run(history, entry, _HISTORY_PATH)
     except Exception as exc:
         print(f"Warning: could not write concept history: {exc}", file=sys.stderr)
     elapsed = time.monotonic() - t_start
@@ -753,6 +903,7 @@ async def run(
         mode=mode,
         export_dir=export_dir,
         intent=intent,
+        mix_length=mix_length,
     )
     report += f"\n⏱ Generated in {elapsed_str}"
 
@@ -864,6 +1015,10 @@ def _warn_intent(intent: str | None) -> None:
 
 
 def main() -> None:
+    # Line-buffer stdout even when piped (tee/log capture) so progress lines interleave
+    # correctly with unbuffered stderr diagnostics instead of flushing in one late block.
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True)
     load_dotenv()
     parser = argparse.ArgumentParser(
         description="MixLab — AI-powered DJ crate assistant",
@@ -879,8 +1034,7 @@ custom genres (merge multiple genres into one cross-genre pool):
   4x4   house + electronica + disco +     no BPM filter (Stage 1 groups by BPM)
         progressive + techno
 
-  Custom genres pick a random 120-track window from the full pool each run,
-  so repeated runs explore different corners of the collection.
+  Custom genre pools are partitioned deterministically by BPM/key/era (see docs/architecture/deterministic-stage1.md).
 
 examples:
   mixlab                              show crate availability table (no LLM)
@@ -894,11 +1048,15 @@ examples:
   mixlab --genre drum_and_bass --min-year 2020       tracks from 2020 onwards only
   mixlab --genre house --intent "warmup, melodic, outdoor afternoon"  creative direction
   mixlab --genre house --deep          opt-in critique pass per concept (2x Stage 2 cost)
+  mixlab --genre house --no-revise     skip the bounded self-revision pass (#55)
+  mixlab --genre house --risk high     promote wildcard/anchor picks, relax jump thresholds (#42)
   mixlab --playlist "Monday Night" --mix-length 60   target ~15 tracks for a 1-hour set
   mixlab --playlist "Monday Night" --mix-length 90   target ~22 tracks for a 90-minute set
   mixlab --playlist "Monday Night" --locked          trim seed playlist only, no library additions
   mixlab --genres                     show cached counts from last run (no API)
   mixlab --export-unplayed            export all unplayed tracks as Rekordbox XML + post to Discord
+  mixlab --feedback                   list most recent run's concepts + feedback state (no LLM)
+  mixlab --feedback --concept "Title" --verdict played --notes "great opener"  record concept feedback
 """,
     )
     parser.add_argument(
@@ -989,7 +1147,8 @@ examples:
             "Example: 'Late-night radio showcase — UKG, UK bass, and breaks played with full conviction. "
             "The journey matters: chapters, not a playlist.' "
             "Aim for 10–50 words. Use positive framing ('dark and driven' not 'not melodic'). "
-            "Ignored in playlist mode, which runs its own Stage 0 intent extraction."
+            "Also works in playlist mode: overrides the inferred DJ intent brief (from Stage 0) "
+            "wherever the two conflict."
         ),
     )
     parser.add_argument(
@@ -999,9 +1158,11 @@ examples:
         metavar="MINUTES",
         dest="mix_length",
         help=(
-            "Target set length in minutes (playlist mode only). "
+            "Target set length in minutes (works in both --genre and --playlist mode). "
             "Scales the number of tracks Stage 2 selects — e.g. 60 targets ~15 tracks, 90 targets ~22. "
-            "Without this flag, playlist mode defaults to 10–14 tracks as before."
+            "When the offered tracks carry real duration data, the target is derived from their "
+            "actual mean length rather than the ~4 min/track estimate. "
+            "Without this flag, runs default to 10–14 tracks as before."
         ),
     )
     parser.add_argument(
@@ -1023,6 +1184,15 @@ examples:
         ),
     )
     parser.add_argument(
+        "--no-revise",
+        action="store_true",
+        dest="no_revise",
+        help=(
+            "Skip the bounded self-revision pass (#55). By default MixLab attempts one minimal "
+            "repair per flagged concept after validation; this disables that pass."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Emit verbose canvas scoring diagnostics to stderr. Also enabled by MIXLAB_DEBUG_SCORE=1.",
@@ -1032,7 +1202,72 @@ examples:
         type=int,
         default=None,
         dest="stage1_seed",
-        help="Seed for deterministic Stage 1 tie-breaking. Default: None (stable sort).",
+        help=(
+            "Seed for the Stage 1 windowing of oversized pools. Same seed reproduces a prior run "
+            "(the effective seed is printed at run start). Default: derived from today's date."
+        ),
+    )
+    parser.add_argument(
+        "--directions",
+        choices=["mixed", "off", "only"],
+        default="mixed",
+        help=(
+            "Concept directions (#53), genre mode only. "
+            "mixed (default) — blend cross-strata creative directions (mood journeys, era "
+            "dialogues, label spotlights, artist threads, energy shapes, fresh crates) with "
+            "classic BPM-stratum canvases; off — classic canvases only; only — directions only "
+            "(falls back to classic when none are feasible). Ignored in playlist mode."
+        ),
+    )
+    parser.add_argument(
+        "--risk",
+        choices=["low", "medium", "high"],
+        default="medium",
+        help=(
+            "Risk knob (#42), genre mode only. Shifts canvas scoring and Stage 2 framing "
+            "toward safety or novelty: high promotes flagged wildcard/concept-anchor tracks "
+            "as featured picks and relaxes the BPM/Camelot jump validator thresholds for "
+            "transitions explicitly annotated as risky (20 BPM / 5 Camelot, vs 15/4 at "
+            "medium — unannotated jumps still use the medium thresholds); low tightens "
+            "scoring toward role coverage and anchor safety and lowers the jump thresholds "
+            "(10 BPM / 3 Camelot); medium (default) is unchanged from prior behaviour. "
+            "Composes with --directions — the risk knob affects canvas scoring and "
+            "validation regardless of which direction mode is active. Ignored in playlist "
+            "mode (playlist mode has its own risk-tolerance path from the Stage 0 intent "
+            "brief, #54)."
+        ),
+    )
+    parser.add_argument(
+        "--feedback",
+        action="store_true",
+        help=(
+            "Record or list feedback for previously generated concepts (#52). No LLM calls, no "
+            "network. Alone, lists the most recent run's concepts and their feedback state. "
+            "Combine with --concept and --verdict to record a verdict."
+        ),
+    )
+    parser.add_argument(
+        "--concept",
+        type=str,
+        default=None,
+        metavar="TEXT",
+        help=(
+            "With --feedback: title (case-insensitive) or concept_id prefix identifying which "
+            "concept to record feedback for. Matches the most recent run containing it."
+        ),
+    )
+    parser.add_argument(
+        "--verdict",
+        choices=list(_FEEDBACK_VERDICTS),
+        default=None,
+        help="With --feedback --concept: the feedback verdict to record.",
+    )
+    parser.add_argument(
+        "--notes",
+        type=str,
+        default="",
+        metavar="TEXT",
+        help="With --feedback --concept --verdict: optional free-text note stored alongside the verdict.",
     )
     args = parser.parse_args()
     _validate_range_args(
@@ -1042,6 +1277,9 @@ examples:
         max_year=args.max_year,
     )
     debug = args.debug or bool(os.environ.get("MIXLAB_DEBUG_SCORE"))
+    if args.feedback:
+        sys.exit(run_feedback(args.concept, args.verdict, args.notes, _HISTORY_PATH))
+
     if args.genres:
         _show_cached_genres()
         return
@@ -1056,15 +1294,23 @@ examples:
     elif args.export_playlists:
         export_dir = Path("output/playlists")
 
+    _warn_intent(args.intent)
+
     if args.playlist:
-        if args.intent is not None:
-            print(
-                "--intent ignored in playlist mode — playlist runs use Stage 0 intent extraction from the seed.",
-                file=sys.stderr,
-            )
         if args.deep:
             print(
                 "--deep ignored in playlist mode — critique pass not yet supported on the variant-scoring path.",
+                file=sys.stderr,
+            )
+        if args.directions != "mixed":
+            print(
+                "--directions ignored in playlist mode — concept directions apply to genre runs only.",
+                file=sys.stderr,
+            )
+        if args.risk != "medium":
+            print(
+                "--risk ignored in playlist mode — playlist mode derives risk tolerance from the "
+                "Stage 0 intent brief (#54) instead.",
                 file=sys.stderr,
             )
         asyncio.run(
@@ -1077,6 +1323,7 @@ examples:
                 max_bpm=args.max_bpm,
                 min_year=args.min_year,
                 max_year=args.max_year,
+                intent=args.intent,
                 debug=debug,
                 mix_length=args.mix_length,
                 locked=args.locked,
@@ -1084,18 +1331,11 @@ examples:
         )
         return
 
-    if args.mix_length is not None:
-        print(
-            "--mix-length is only used in playlist mode (--playlist). Ignored for genre runs.",
-            file=sys.stderr,
-        )
     if args.locked:
         print(
             "--locked is only used in playlist mode (--playlist). Ignored for genre runs.",
             file=sys.stderr,
         )
-
-    _warn_intent(args.intent)
 
     asyncio.run(
         run(
@@ -1110,6 +1350,10 @@ examples:
             deep=args.deep,
             debug=debug,
             stage1_seed=args.stage1_seed,
+            mix_length=args.mix_length,
+            directions=args.directions,
+            no_revise=args.no_revise,
+            risk=cast("RiskTolerance", args.risk),
         )
     )
 

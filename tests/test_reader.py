@@ -191,10 +191,12 @@ _ENRICHED_XML = textwrap.dedent("""\
       <COLLECTION Entries="4">
         <TRACK TrackID="10" Name="Rated High" Artist="Artist A" AverageBpm="136.00" Tonality="8A"
                Genre="Breakbeat" Rating="255" Colour="0xFF0000" Label="Running Back" PlayCount="0"
+               TotalTime="272" DateAdded="2020-05-01"
                Comments="8A - Energy 7 /* Breakbeat / Dark / Aggressive */"
                Location="file://localhost/Users/dj/Music/a.mp3"/>
         <TRACK TrackID="11" Name="Rated Mid" Artist="Artist B" AverageBpm="125.00" Tonality="4A"
                Genre="House" Rating="153" Colour="0xFFA500" Label="" PlayCount="3"
+               TotalTime="198" DateAdded="2019-01-15"
                Comments="4A - Energy 5 /* House / In the Groove */"
                Location="file://localhost/Users/dj/Music/b.mp3"/>
         <TRACK TrackID="12" Name="No Rating" Artist="Artist C" AverageBpm="125.00" Tonality="5A"
@@ -248,6 +250,55 @@ def test_parse_collection_tags_empty_when_no_block(tmp_path: Path) -> None:
     tracks = parse_collection(xml_path)
     by_id = {t.track_id: t for t in tracks}
     assert by_id["12"].tags == []
+
+
+def test_parse_collection_extracts_duration_secs(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _ENRICHED_XML)
+    tracks = parse_collection(xml_path)
+    by_id = {t.track_id: t for t in tracks}
+    assert by_id["10"].duration_secs == 272
+    assert by_id["11"].duration_secs == 198
+
+
+def test_parse_collection_duration_secs_none_when_absent(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _ENRICHED_XML)
+    tracks = parse_collection(xml_path)
+    by_id = {t.track_id: t for t in tracks}
+    assert by_id["12"].duration_secs is None
+    assert by_id["13"].duration_secs is None
+
+
+def test_parse_collection_extracts_date_added(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _ENRICHED_XML)
+    tracks = parse_collection(xml_path)
+    by_id = {t.track_id: t for t in tracks}
+    assert by_id["10"].date_added == "2020-05-01"
+    assert by_id["11"].date_added == "2019-01-15"
+
+
+def test_parse_collection_date_added_empty_when_absent(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _ENRICHED_XML)
+    tracks = parse_collection(xml_path)
+    by_id = {t.track_id: t for t in tracks}
+    assert by_id["12"].date_added == ""
+    assert by_id["13"].date_added == ""
+
+
+def test_parse_collection_extracts_rating_raw_value(tmp_path: Path) -> None:
+    """Rekordbox stores 0/51/102/153/204/255 for 0-5 stars — store the raw int, no conversion."""
+    xml_path = _write_xml(tmp_path, _ENRICHED_XML)
+    tracks = parse_collection(xml_path)
+    by_id = {t.track_id: t for t in tracks}
+    assert by_id["10"].rating == 255
+    assert by_id["11"].rating == 153
+    assert by_id["12"].rating == 0
+
+
+def test_parse_collection_rating_none_when_absent(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _ENRICHED_XML)
+    tracks = parse_collection(xml_path)
+    by_id = {t.track_id: t for t in tracks}
+    assert by_id["13"].rating is None
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +446,9 @@ def test_parse_collection_unenriched_track_is_not_penalised(tmp_path: Path) -> N
     assert t.remixer == ""
     assert t.mix == []
     assert t.enrichment_confidence == ""
+    assert t.duration_secs is None
+    assert t.date_added == ""
+    assert t.rating is None
 
 
 _PLAYLISTS_XML = textwrap.dedent("""\

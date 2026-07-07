@@ -14,11 +14,15 @@ from mixlab.__main__ import (
     _format_report_context,
     _print_availability,
     _print_pipeline_summary,
+    _report_stage1_window,
     _validate_range_args,
     _warn_intent,
+    main,
     run,
     run_export_unplayed,
+    run_feedback,
 )
+from mixlab.history import ConceptHistory, ConceptRecord, HistoryEntry, append_run, load_history
 from mixlab.models import PlayedTrack, Track
 from mixlab.playlist_exporter import build_merged_xml, parse_raw_tracks
 from mixlab.reader import parse_collection
@@ -338,6 +342,39 @@ def test_print_pipeline_summary_outputs_compact_block(capsys: pytest.CaptureFixt
     )
 
 
+def test_print_pipeline_summary_includes_overflow_line_when_nonzero(capsys: pytest.CaptureFixture[str]) -> None:
+    # #48: the overflow line appears only when windowing dropped tracks (default 0 omits it,
+    # keeping the compact-block test above unchanged).
+    _print_pipeline_summary(
+        collection_count=2328,
+        unplayed_count=101,
+        used_catalog_api=True,
+        genre_cluster_counts={"House": 800},
+        bpm_filtered_counts={"House": 800},
+        same_genre_outlier_count=0,
+        stage1_shortlist_count=5,
+        stage2_shortlist_count=5,
+        stage1_overflow=675,
+    )
+    out = capsys.readouterr().out
+    assert "- Stage 1 overflow (tracks beyond windows): 675\n" in out
+    # Ordered between the shortlist count and the stage-2 line.
+    assert out.index("Stage 1 shortlists") < out.index("Stage 1 overflow") < out.index("Stage 2 shortlists sent")
+
+
+def test_report_stage1_window_notes_only_capped_shortlists_and_totals(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # #48: one stderr note per windowed shortlist; zero-overflow shortlists are silent.
+    total = _report_stage1_window([0, 12, 0, 3])
+    assert total == 15
+    err = capsys.readouterr().err
+    assert "shortlist 1 capped at 25 tracks (12 overflow, rotated by seed)" in err
+    assert "shortlist 3 capped at 25 tracks (3 overflow, rotated by seed)" in err
+    assert "shortlist 0" not in err
+    assert "shortlist 2" not in err
+
+
 # ---------------------------------------------------------------------------
 # _validate_range_args
 # ---------------------------------------------------------------------------
@@ -593,3 +630,387 @@ def test_warn_intent_51_words_warns(capsys: pytest.CaptureFixture[str]) -> None:
     err = capsys.readouterr().err
     assert "WARNING" in err
     assert "51" in err
+
+
+# ---------------------------------------------------------------------------
+# _format_report_context — mix_length in genre mode (issue #49)
+# ---------------------------------------------------------------------------
+
+
+def test_format_report_context_genre_mode_shows_mix_length() -> None:
+    result = _format_report_context(
+        genre="house",
+        playlist_name=None,
+        mode="unplayed",
+        export_dir=None,
+        mix_length=60,
+    )
+    assert result == "Report context: House (unplayed tracks, 60min set)"
+
+
+# ---------------------------------------------------------------------------
+# main() — --mix-length accepted in genre mode (issue #49)
+# ---------------------------------------------------------------------------
+
+
+def test_main_accepts_mix_length_in_genre_mode_without_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--mix-length used to warn and be ignored outside --playlist; it now applies in genre mode too."""
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--mix-length", "60"])
+    run_mock = AsyncMock(return_value=None)
+
+    # Real load_dotenv() would pollute os.environ (e.g. CATALOG_API_URL) for the rest of
+    # the test session, so stub it out — irrelevant to what this test verifies.
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+
+    err = capsys.readouterr().err
+    assert "--mix-length is only used in playlist mode" not in err
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["mix_length"] == 60
+
+
+# ---------------------------------------------------------------------------
+# run_feedback / mixlab --feedback (#52)
+# ---------------------------------------------------------------------------
+
+
+def _minimal_entry(run_id: str, genre: str = "house") -> HistoryEntry:
+    return HistoryEntry(
+        run_id=run_id,
+        created_at="2026-01-01T00:00:00+00:00",
+        mode="standard",
+        genre=genre,
+        selected_canvas_ids=[],
+        dominant_bpm_clusters=[],
+        dominant_camelot_keys=[],
+        core_track_ids=[],
+        anchor_track_ids=[],
+        opener_candidates=[],
+        closer_candidates=[],
+        concept_title="",
+        concept_track_ids=[],
+        energy_path="",
+        mood="",
+    )
+
+
+def test_run_feedback_no_flags_lists_most_recent_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    history_path = tmp_path / "history.json"
+    entry = _minimal_entry("r1")
+    entry.concepts = [
+        ConceptRecord(concept_id="c1", title="First", mood="dark", track_ids=["T001"], arc_type=""),
+        ConceptRecord(
+            concept_id="c2", title="Second", mood="light", track_ids=["T002"], arc_type="", feedback="played"
+        ),
+    ]
+    append_run(ConceptHistory(), entry, history_path)
+
+    exit_code = run_feedback(None, None, "", history_path)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "First" in out
+    assert "(none)" in out
+    assert "Second" in out
+    assert "played" in out
+
+
+def test_run_feedback_no_history_file_lists_nothing_and_exits_zero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = run_feedback(None, None, "", tmp_path / "no-such-file.json")
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "No concept history found" in out
+
+
+def test_run_feedback_records_verdict_and_persists_to_file(tmp_path: Path) -> None:
+    history_path = tmp_path / "history.json"
+    entry = _minimal_entry("r1")
+    entry.concepts = [
+        ConceptRecord(concept_id="c1", title="Midnight Run", mood="dark", track_ids=["T001"], arc_type="")
+    ]
+    append_run(ConceptHistory(), entry, history_path)
+
+    exit_code = run_feedback("midnight run", "played", "great opener", history_path)
+
+    assert exit_code == 0
+    reloaded = load_history(history_path)
+    record = reloaded.runs[0].concepts[0]
+    assert record.feedback == "played"
+    assert record.feedback_notes == "great opener"
+    assert record.feedback_recorded_at != ""
+
+
+def test_run_feedback_matches_concept_id_prefix(tmp_path: Path) -> None:
+    history_path = tmp_path / "history.json"
+    entry = _minimal_entry("r1")
+    entry.concepts = [
+        ConceptRecord(concept_id="abcdef12-3456", title="Midnight Run", mood="dark", track_ids=["T001"], arc_type="")
+    ]
+    append_run(ConceptHistory(), entry, history_path)
+
+    exit_code = run_feedback("abcdef12", "rejected", "", history_path)
+
+    assert exit_code == 0
+    reloaded = load_history(history_path)
+    assert reloaded.runs[0].concepts[0].feedback == "rejected"
+
+
+def test_run_feedback_uses_most_recent_run_when_title_repeats(tmp_path: Path) -> None:
+    """Same title generated in two runs — the most recent run's concept is updated."""
+    from mixlab.history import save_history
+
+    history_path = tmp_path / "history.json"
+    older = _minimal_entry("r1")
+    older.created_at = "2026-01-01T00:00:00+00:00"
+    older.concepts = [ConceptRecord(concept_id="old", title="Repeat", mood="dark", track_ids=["T001"], arc_type="")]
+    newer = _minimal_entry("r2")
+    newer.created_at = "2026-02-01T00:00:00+00:00"
+    newer.concepts = [ConceptRecord(concept_id="new", title="Repeat", mood="light", track_ids=["T002"], arc_type="")]
+    save_history(ConceptHistory(runs=[older, newer]), history_path)
+
+    exit_code = run_feedback("repeat", "played", "", history_path)
+
+    assert exit_code == 0
+    reloaded = load_history(history_path)
+    assert reloaded.runs[0].concepts[0].feedback == ""
+    assert reloaded.runs[1].concepts[0].feedback == "played"
+
+
+def test_run_feedback_unknown_title_exits_one_with_suggestions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    history_path = tmp_path / "history.json"
+    entry = _minimal_entry("r1")
+    entry.concepts = [
+        ConceptRecord(concept_id="c1", title="Midnight Run", mood="dark", track_ids=["T001"], arc_type="")
+    ]
+    append_run(ConceptHistory(), entry, history_path)
+
+    exit_code = run_feedback("Midnigth Run", "played", "", history_path)
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "No concept found" in err
+    assert "Midnight Run" in err
+
+
+def test_run_feedback_verdict_without_concept_errors(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = run_feedback(None, "played", "", tmp_path / "history.json")
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "--concept" in err
+
+
+def test_run_feedback_concept_without_verdict_errors(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = run_feedback("Some Title", None, "", tmp_path / "history.json")
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "--verdict" in err
+
+
+def test_main_feedback_flag_lists_concepts_via_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    history_path = tmp_path / "history.json"
+    entry = _minimal_entry("r1")
+    entry.concepts = [ConceptRecord(concept_id="c1", title="First", mood="dark", track_ids=["T001"], arc_type="")]
+    append_run(ConceptHistory(), entry, history_path)
+
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", history_path)
+    monkeypatch.setattr("sys.argv", ["mixlab", "--feedback"])
+    with patch("mixlab.__main__.load_dotenv"), pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 0
+    assert "First" in capsys.readouterr().out
+
+
+def test_main_feedback_flag_records_verdict_via_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history_path = tmp_path / "history.json"
+    entry = _minimal_entry("r1")
+    entry.concepts = [ConceptRecord(concept_id="c1", title="First", mood="dark", track_ids=["T001"], arc_type="")]
+    append_run(ConceptHistory(), entry, history_path)
+
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", history_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["mixlab", "--feedback", "--concept", "First", "--verdict", "played", "--notes", "great"],
+    )
+    with patch("mixlab.__main__.load_dotenv"), pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 0
+    reloaded = load_history(history_path)
+    assert reloaded.runs[0].concepts[0].feedback == "played"
+    assert reloaded.runs[0].concepts[0].feedback_notes == "great"
+
+
+# ---------------------------------------------------------------------------
+# main() — --directions flag parsing (#53)
+# ---------------------------------------------------------------------------
+
+
+def test_main_directions_defaults_to_mixed_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["directions"] == "mixed"
+
+
+def test_main_no_revise_defaults_false_and_threaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["no_revise"] is False
+
+
+def test_main_no_revise_flag_sets_kwarg_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--no-revise"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["no_revise"] is True
+
+
+def test_main_directions_off_accepted_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--directions", "off"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["directions"] == "off"
+
+
+def test_main_directions_only_accepted_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--directions", "only"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["directions"] == "only"
+
+
+def test_main_directions_ignored_in_playlist_mode_with_note(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--playlist", "Monday", "--directions", "only"])
+    playlist_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run_playlist_mode", playlist_mock):
+        main()
+    err = capsys.readouterr().err
+    assert "--directions ignored in playlist mode" in err
+    assert playlist_mock.await_args is not None
+
+
+# ---------------------------------------------------------------------------
+# main() — --risk flag parsing (#42)
+# ---------------------------------------------------------------------------
+
+
+def test_main_risk_defaults_to_medium_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["risk"] == "medium"
+
+
+def test_main_risk_high_accepted_and_threaded_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--risk", "high"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["risk"] == "high"
+
+
+def test_main_risk_low_accepted_and_threaded_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--risk", "low"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["risk"] == "low"
+
+
+def test_main_risk_high_ignored_in_playlist_mode_with_note(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--playlist", "Monday", "--risk", "high"])
+    playlist_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run_playlist_mode", playlist_mock):
+        main()
+    err = capsys.readouterr().err
+    assert "--risk ignored in playlist mode" in err
+    assert playlist_mock.await_args is not None
+
+
+def test_main_risk_medium_no_note_in_playlist_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Default risk (medium) must not trigger the playlist-mode ignore note."""
+    monkeypatch.setattr("sys.argv", ["mixlab", "--playlist", "Monday"])
+    playlist_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run_playlist_mode", playlist_mock):
+        main()
+    err = capsys.readouterr().err
+    assert "--risk ignored in playlist mode" not in err
+
+
+# ---------------------------------------------------------------------------
+# main() — --intent works in playlist mode too (#54)
+# ---------------------------------------------------------------------------
+
+
+def test_main_playlist_mode_intent_no_longer_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--playlist combined with --intent must no longer print an 'ignored' warning,
+    and the intent text must be threaded through to run_playlist_mode."""
+    monkeypatch.setattr(
+        "sys.argv",
+        ["mixlab", "--playlist", "Monday", "--intent", "dark hypnotic late night warmup"],
+    )
+    playlist_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run_playlist_mode", playlist_mock):
+        main()
+    err = capsys.readouterr().err
+    assert "--intent ignored in playlist mode" not in err
+    assert playlist_mock.await_args is not None
+    assert playlist_mock.await_args.kwargs["intent"] == "dark hypnotic late night warmup"

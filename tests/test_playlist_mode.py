@@ -9,7 +9,6 @@ import pytest
 from mixlab.models import IntentBrief, MixConcept, Track
 from mixlab.playlist_mode import (
     _score_candidate,  # noqa: PLC2701
-    build_playlist_pool,
     build_zone_shortlists,
     cluster_seed_zones,
     compute_deterministic_intent,
@@ -71,122 +70,6 @@ def test_resolve_playlist_no_suggestions_when_nothing_close() -> None:
     playlists = {"Sets/Warm Up": ["1"]}
     with pytest.raises(ValueError, match='Playlist "Techno Tools" not found\\.'):
         resolve_playlist("Techno Tools", playlists)
-
-
-def test_build_playlist_pool_includes_all_seed_tracks() -> None:
-    tracks = [
-        _make_track("1", bpm=122.0),
-        _make_track("2", bpm=124.0),
-        _make_track("3", bpm=126.0),
-        _make_track("4", bpm=128.0),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, {"1", "2", "3", "4"})
-    assert [track.track_id for track in pool[:4]] == ["1", "2", "3", "4"]
-
-
-def test_build_playlist_pool_expands_with_bpm_range() -> None:
-    tracks = [
-        _make_track("1", bpm=120.0),
-        _make_track("2", bpm=122.0),
-        _make_track("3", bpm=124.0),
-        _make_track("4", bpm=126.0),
-        _make_track("5", bpm=139.0),
-        _make_track("6", bpm=145.5),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, {"1", "2", "3", "4", "5"})
-    assert "5" in [track.track_id for track in pool]
-    assert "6" not in [track.track_id for track in pool]
-
-
-def test_build_playlist_pool_too_few_seed_tracks_raises() -> None:
-    tracks = [_make_track("1"), _make_track("2"), _make_track("3")]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    with pytest.raises(ValueError, match="requires at least 4 valid seed tracks"):
-        build_playlist_pool(["1", "2", "3"], tracks, tracks_by_id, {"1", "2", "3"})
-
-
-def test_build_playlist_pool_unplayed_ids_ranked_above_played() -> None:
-    tracks = [
-        _make_track("1", bpm=122.0),
-        _make_track("2", bpm=124.0),
-        _make_track("3", bpm=126.0),
-        _make_track("4", bpm=128.0),
-        _make_track("5", bpm=123.0, play_count=1),
-        _make_track("6", bpm=123.5, play_count=1),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, {"1", "2", "3", "4", "6"})
-    ids = [track.track_id for track in pool]
-    assert ids.index("6") < ids.index("5")
-
-
-def test_build_playlist_pool_play_count_fallback_when_unplayed_ids_none() -> None:
-    tracks = [
-        _make_track("1", bpm=122.0),
-        _make_track("2", bpm=124.0),
-        _make_track("3", bpm=126.0),
-        _make_track("4", bpm=128.0),
-        _make_track("5", bpm=123.0, play_count=1),
-        _make_track("6", bpm=123.5, play_count=0),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, None)
-    ids = [track.track_id for track in pool]
-    assert ids.index("6") < ids.index("5")
-
-
-def test_build_playlist_pool_played_tracks_remain_in_pool() -> None:
-    tracks = [
-        _make_track("1", bpm=122.0),
-        _make_track("2", bpm=124.0),
-        _make_track("3", bpm=126.0),
-        _make_track("4", bpm=128.0),
-        _make_track("5", bpm=123.0, play_count=3),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, {"1", "2", "3", "4"})
-    assert "5" in [track.track_id for track in pool]
-
-
-def test_build_playlist_pool_all_tracks_flag_disables_unplayed_bonus() -> None:
-    tracks = [
-        _make_track("1", bpm=122.0),
-        _make_track("2", bpm=124.0),
-        _make_track("3", bpm=126.0),
-        _make_track("4", bpm=128.0),
-        _make_track("5", bpm=123.0, play_count=1, artist="Z Artist"),
-        _make_track("6", bpm=129.8, play_count=0, artist="A Artist"),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(
-        ["1", "2", "3", "4"], tracks, tracks_by_id, {"1", "2", "3", "4", "6"}, all_tracks_flag=True
-    )
-    ids = [track.track_id for track in pool]
-    assert ids.index("5") < ids.index("6")
-
-
-def test_build_playlist_pool_capped_at_max_with_seed_guaranteed() -> None:
-    seed_tracks = [_make_track(str(index), bpm=120.0 + index) for index in range(1, 5)]
-    extras = [_make_track(str(index), bpm=123.0) for index in range(5, 140)]
-    tracks = seed_tracks + extras
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, None)
-    assert len(pool) == 120
-    assert [track.track_id for track in pool[:4]] == ["1", "2", "3", "4"]
-
-
-def test_build_playlist_pool_deduplicates_seed_from_library() -> None:
-    tracks = [
-        _make_track("1", bpm=122.0),
-        _make_track("2", bpm=124.0),
-        _make_track("3", bpm=126.0),
-        _make_track("4", bpm=128.0),
-    ]
-    tracks_by_id = {track.track_id: track for track in tracks}
-    pool = build_playlist_pool(["1", "2", "3", "4"], tracks, tracks_by_id, None)
-    assert [track.track_id for track in pool].count("1") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +243,7 @@ def test_run_playlist_mode_happy_path(
         used_mix_names: list[str] | None = None,
         canvases: object = None,
         concept_history: object = None,
+        genre_intent: str | None = None,
         debug: bool = False,
         mix_length: int | None = None,
     ) -> tuple[list[MixConcept], str]:
@@ -381,6 +265,63 @@ def test_run_playlist_mode_happy_path(
     asyncio.run(main_mod.run_playlist_mode("Monday Night", None, None, "unplayed"))
     captured = capsys.readouterr()
     assert "Playlist report" in captured.out
+
+
+def test_run_playlist_mode_intent_risk_signal_overrides_stage0_brief(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--intent "surprise me" (#54) must override the deterministic Stage 0
+    risk_tolerance ("low" for this tight-BPM seed set) to "high", noting the
+    override on stderr, and the intent text must reach stage2_curate_and_report."""
+    import mixlab.__main__ as main_mod
+
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_PLAYLIST_XML)
+    monkeypatch.setattr(main_mod, "_XML_PATH", xml_path)
+
+    received_genre_intent: list[str | None] = []
+    received_risk_tolerance: list[str] = []
+
+    async def fake_stage2(
+        shortlists: list[MixConcept],
+        tracks_by_id: dict[str, Track],
+        custom_genre_label: str | None = None,
+        custom_genre_sub_genres: list[str] | None = None,
+        playlist_name: str | None = None,
+        seed_ids: frozenset[str] | None = None,
+        seed_track_ids: list[str] | None = None,
+        unplayed_ids: set[str] | None = None,
+        intent_brief: IntentBrief | None = None,
+        used_mix_names: list[str] | None = None,
+        canvases: object = None,
+        concept_history: object = None,
+        genre_intent: str | None = None,
+        debug: bool = False,
+        mix_length: int | None = None,
+    ) -> tuple[list[MixConcept], str]:
+        del shortlists, tracks_by_id, custom_genre_label, custom_genre_sub_genres
+        del playlist_name, seed_ids, seed_track_ids, unplayed_ids, used_mix_names, canvases, debug, mix_length
+        received_genre_intent.append(genre_intent)
+        assert intent_brief is not None
+        received_risk_tolerance.append(intent_brief.risk_tolerance)
+        return ([MixConcept(title="Completed Set", mood="warm", track_ids=["1", "2", "3", "4"])], "Playlist report")
+
+    async def fake_send_report(*args: object, **kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(main_mod, "stage2_curate_and_report", fake_stage2)
+    monkeypatch.setattr(main_mod, "send_report", fake_send_report)
+
+    asyncio.run(
+        main_mod.run_playlist_mode("Monday Night", None, None, "unplayed", intent="surprise me with something bold")
+    )
+
+    captured = capsys.readouterr()
+    assert "--intent risk signal 'high' overrides Stage 0 risk_tolerance 'low'." in captured.err
+    assert received_genre_intent == ["surprise me with something bold"]
+    assert received_risk_tolerance == ["high"]
 
 
 _PLAYLIST_XML_WITH_EXTRA = textwrap.dedent("""\
@@ -451,6 +392,7 @@ def test_run_playlist_mode_with_genre_filter_limits_library(monkeypatch: pytest.
         used_mix_names: list[str] | None = None,
         canvases: object = None,
         concept_history: object = None,
+        genre_intent: str | None = None,
         debug: bool = False,
         mix_length: int | None = None,
     ) -> tuple[list[MixConcept], str]:
@@ -492,6 +434,7 @@ def test_run_playlist_mode_exports_all_ranked_variants(monkeypatch: pytest.Monke
         used_mix_names: list[str] | None = None,
         canvases: object = None,
         concept_history: object = None,
+        genre_intent: str | None = None,
         debug: bool = False,
         mix_length: int | None = None,
     ) -> tuple[list[MixConcept], str]:

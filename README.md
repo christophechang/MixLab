@@ -36,7 +36,7 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY + at least one Stage 1 key
 1. Parses your exported Rekordbox XML collection
 2. If `CATALOG_API_URL` is set, fetches your play history and applies `--mode` filtering (`unplayed` by default, or `played` to restrict to battle-tested tracks); without the catalog API the full collection is used
 3. Prints a crate availability table (no LLM cost)
-4. If `--genre` is specified, scopes the collection to that genre (or custom cross-genre pool), runs Stage 1 shortlisting, wraps each shortlist into a Mix Canvas (BPM tiers, role candidates, contrast assets, anchors, era/label coherence, risk notes), then writes a full Stage 2 mix planning report — optionally steered with `--intent "..."`
+4. If `--genre` is specified, scopes the collection to that genre (or custom cross-genre pool), runs Stage 1 shortlisting, wraps each shortlist into a Mix Canvas (BPM tiers, role candidates, contrast assets, anchors, era/label coherence, risk notes), optionally blends in cross-strata concept directions (`--directions`), then writes a full Stage 2 mix planning report — optionally steered with `--intent "..."`
 5. If `--playlist` is specified, uses that Rekordbox playlist as the seed, infers the set's intent, builds natural BPM-zone shortlists around the seed tracks, generates three completion variants, then writes the best playlist-completion report
 6. Optionally exports a Rekordbox-compatible merged XML file
 7. Sends the report and any XML attachment to a Discord channel
@@ -86,8 +86,10 @@ cp .env.example .env
 | `DISCORD_GUILD_ID` | No | Discord server ID |
 | `MIXLAB_DISCORD_CHANNEL_ID` | No | Target channel ID (preferred over name) |
 | `MIXLAB_DISCORD_CHANNEL` | No | Target channel name (default: `mix-lab`) |
+| `MIXLAB_STAGE2_MODEL` | No | Override the Stage 2 Anthropic model id (default: `claude-sonnet-4-6`) |
+| `MIXLAB_STAGE2_TEMPERATURE` | No | Override the Stage 2 selection-pass temperature (default: `0.5`) |
 
-`ANTHROPIC_API_KEY` is required for Stage 2 report generation. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only.
+`ANTHROPIC_API_KEY` is required for Stage 2 report generation. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only. `MIXLAB_STAGE2_MODEL` and `MIXLAB_STAGE2_TEMPERATURE` let you point Stage 2 at a different Anthropic model or tune selection-pass creativity without editing code — both fall back to the current defaults when unset or invalid.
 
 #### Catalog API (optional)
 
@@ -232,9 +234,45 @@ For standard and custom genre runs, a Rekordbox-compatible merged XML file can b
 ./mixlab --genre techno --mode played --intent "tools-only set, no melody, sustained pressure"
 ```
 
-`--intent` accepts a free-text creative direction that is injected verbatim into the Stage 2 prompt for genre mode. There is no parsing or LLM extraction — the model reads it as guidance and fills in everything you did not specify. If the intent conflicts with the candidate pool, Stage 2 picks the closest viable interpretation and notes the gap.
+`--intent` accepts a free-text creative direction that is injected verbatim into the Stage 2 prompt. There is no parsing or LLM extraction beyond a light heuristic signal pass — the model reads it as guidance and fills in everything you did not specify. If the intent conflicts with the candidate pool, Stage 2 picks the closest viable interpretation and notes the gap.
 
-`--intent` is ignored in playlist mode (`--playlist`), which already runs its own Stage 0 intent-extraction pass over the seed playlist.
+`--intent` also works in playlist mode (`--playlist`), which already runs its own Stage 0 intent-extraction pass over the seed playlist. There, `--intent` is layered on top of the inferred DJ intent brief and overrides it wherever the two conflict — the report's Assumptions section names any such conflict. If the intent text contains a risk-tolerance cue (e.g. "safe and cautious" or "surprise me, go bold"), it also overrides the Stage 0-inferred `risk_tolerance` used for winner selection (see below), and MixLab prints a note on stderr when this happens.
+
+### Concept directions (`--directions`)
+
+Classic Stage 1 slices a genre pool into BPM strata, so tempo is the only axis a concept can be built around. Concept directions add a second, cross-strata axis: deterministic creative briefs that deliberately span BPM tiers. Six direction types are enumerated over the whole genre-scoped pool, and only the ones the material actually supports are proposed:
+
+- **mood_journey** — travels between contrasting mood-tag poles (e.g. dark → euphoric), bridged by neutral tracks
+- **era_dialogue** — old-vs-new conversation across a year gap, eras alternated deliberately
+- **label_spotlight** — one label's scene DNA, optionally braced by a few harmonically-adjacent outsiders
+- **artist_thread** — one artist/remixer (2–3 tracks) as the structural spine; their tracks are chapter markers
+- **energy_shape_first** — the pool is balanced across energy bands to realise a declared arc (wave, double-peak, dark-to-light)
+- **fresh_crate** — a debut showcase of the newest additions, grounded by a couple of anchor tracks
+
+Each proposed direction is feasibility-scored (pool fill, BPM-path viability, and a type-specific signal strength). Every direction requires a BPM-feasible path, so briefs that cannot actually be mixed are dropped. Feasible directions are then seed-rotated: the same seed reproduces the same picks, but different days (the seed defaults to the date, reproducible via `--stage1-seed`) surface different angles while the strongest directions still appear often. Each surviving direction becomes a Mix Canvas carrying a DIRECTION BRIEF that Stage 2 must honour as the concept's thesis.
+
+```sh
+./mixlab --genre house                    # mixed (default): directions blended with classic canvases
+./mixlab --genre house --directions off   # classic BPM-stratum canvases only
+./mixlab --genre house --directions only  # directions only (falls back to classic if none are feasible)
+```
+
+`--directions` is genre mode only and is ignored (with a stderr note) in playlist mode.
+
+### Risk knob (`--risk`)
+
+`--risk {low,medium,high}` (default `medium`) trades safety for novelty in genre-mode runs, on top of whatever `--directions` picks. It shifts both canvas scoring and the Stage 2 prompt framing:
+
+- `high` reweights canvas selection toward `contrast_potential` and `novelty` (away from `role_coverage`/`anchor_strength`), nudges Stage 2 to feature flagged wildcard/concept-anchor tracks rather than treat them as exceptions, and relaxes the post-Stage-2 validator's jump thresholds to 20 BPM / 5 Camelot positions — but only for transitions the model has explicitly annotated `is_risky`; an unannotated jump is still held to the medium thresholds, so a bold move still requires Stage 2 to name the mechanism that makes it survivable.
+- `low` reweights canvas selection toward `role_coverage` and `anchor_strength` (away from `contrast_potential`/`novelty`), nudges Stage 2 toward core tracks and gentle moves, and tightens the validator thresholds to 10 BPM / 3 Camelot positions.
+- `medium` (default) is unchanged from prior behaviour — same weights, same prompt, same 15 BPM / 4 Camelot thresholds.
+
+```sh
+./mixlab --genre house --risk high   # promote wildcards/anchors, relax annotated-jump thresholds
+./mixlab --genre house --risk low    # favour role-complete, low-risk canvases
+```
+
+`--risk` composes with `--directions`: it changes how canvases are scored and validated regardless of whether they came from classic BPM strata or a concept direction. It is genre mode only — playlist mode derives its own risk tolerance from the Stage 0 intent brief (see `--intent` above) and prints a stderr note if `--risk` is passed alongside `--playlist`.
 
 ### Complete a mix from an existing Rekordbox playlist
 
@@ -257,7 +295,7 @@ Playlist mode is a different workflow from genre mode:
 - Stage 2 generates exactly three completion variants (`practical`, `balanced`, and `adventurous`) and MixLab auto-selects the strongest one
 - The final report explains which seed tracks were retained, which were dropped, which library tracks were added, and which alternative strategy was rejected
 
-`--mix-length <minutes>` scales the number of tracks Stage 2 selects for each playlist completion variant. Without it, playlist mode targets 10–14 tracks. With it, the target is derived as `max(10, round(minutes / 4))` — for example 60 minutes → ~15 tracks, 90 minutes → ~22 tracks. Arc quality takes priority: Stage 2 will cut weak tracks rather than padding to hit the count.
+`--mix-length <minutes>` works in **both genre and playlist mode** and scales the number of tracks Stage 2 selects. The target is derived from the real durations of the candidate pool (`TotalTime` from the Rekordbox XML) — 60 minutes of ~4-minute house targets ~15 tracks, 60 minutes of ~6-minute progressive targets ~10. When no track in the pool carries a duration, it falls back to the old `max(10, round(minutes / 4))` heuristic. Without the flag, playlist mode targets 10–14 tracks and genre mode uses per-genre targets. Arc quality takes priority: Stage 2 will cut weak tracks rather than padding to hit the count. Reports show per-track durations and a `Runtime: ~NNm` footer whenever duration data exists.
 
 Important playlist-mode rules:
 
@@ -266,6 +304,8 @@ Important playlist-mode rules:
 - Playlist names are matched case-insensitively
 - If the same playlist name exists in multiple folders, pass the full path such as `Sets/Monday Night`
 - Playlist mode requires at least 4 valid seed tracks with BPM and Camelot key after parsing
+
+Winner selection is tolerance-aware: each variant's `fit` score blends its DJ Practicality Score with an "adventure dividend" that rewards a high density of justified risky transitions (a real mechanism named, not a bare cut), weighted by the run's `risk_tolerance` (`low` → 100% practicality / 0% adventure, `medium` → 80/20, `high` → 60/40). At `low` tolerance this reduces to plain practicality — the same ranking as before. At `high` tolerance the tie-break order also inverts (`adventurous` > `balanced` > `practical`), so a DJ who explicitly asked for adventure gets it when variants are otherwise close. The report's rejected-alternatives line records which tolerance was used for the run, e.g. `Selection tolerance: medium.`
 
 Playlist runs use the same report context header as genre runs, for example:
 
@@ -327,6 +367,16 @@ Compares your full Rekordbox collection against your play history and exports ev
 
 Emits per-canvas scoring diagnostics to stderr: every weighted component, weakness penalty, floor multiplier, overlap penalty against already-picked canvases, novelty breakdown (track-overlap component + shape-similarity component + closest history match), era/label coherence values, and risk notes. Normal stdout output and Discord delivery are unchanged.
 
+### Record feedback on generated concepts
+
+```bash
+./mixlab --feedback                                              # list the most recent run's concepts
+./mixlab --feedback --concept "Ladbroke to Kaoz" --verdict played
+./mixlab --feedback --concept "Glass Crate" --verdict rejected --notes "peak section didn't land"
+```
+
+Every run stores its concepts in `.mixlab/concept-history.json`. `--feedback` lets you tell MixLab what actually happened to them: `played`, `played_modified`, `rejected`, or `unused`. Verdicts feed straight into novelty scoring on future runs — a concept you **played** penalises similar candidates ~1.5× harder (you've used that idea), while a **rejected** concept's penalty is muted to 0.25× (you said no; don't let it block fresh attempts). Concepts are matched by case-insensitive title or ID prefix against the most recent run containing them; no LLM or network calls.
+
 ### View cached genre counts from the last run (no API calls at all)
 
 ```bash
@@ -379,17 +429,9 @@ Custom genres behave differently from standard genres in two key ways:
 
 **2. Stage 2 cross-genre guidance.** The Stage 2 prompt is given the list of sub-genres and instructed to justify any move across genre boundaries — naming the specific mechanism that makes the transition work (BPM alignment, rhythmic character, harmonic relationship, or the energy state of the room). Cross-genre moves are not avoided; they are the point of using a custom genre. But every such move must be defensible.
 
-#### Why random selection?
+#### How large pools are handled
 
-Custom genre pools are large — `4x4` alone is ~800 tracks. Sending the whole pool to Stage 1 would mean 10–15 sequential API calls to a free-tier LLM provider, which hits rate limits on every run and produces the same output every time.
-
-Instead, MixLab picks a **random 120-track window** from the BPM-sorted pool on each run:
-
-- The pool is sorted by BPM, so adjacent tracks in the sorted list are in the same tempo zone. The window always lands on a BPM-coherent slice — house tracks at 120–125 one run, progressive/techno at 128–133 the next.
-- Only 2 Stage 1 API calls are made per run (120 tracks / 60 per call), keeping the LLM load light and the rate limits safe.
-- Each run explores a different section of the collection, so you get different concepts each time without manually curating which tracks to send.
-
-Run the same custom genre multiple times. Each run will focus on a different corner of the pool and produce different concepts.
+Custom genre pools are large — `4x4` alone is ~800 tracks. Stage 1 partitions the pool deterministically by BPM peaks, Camelot connectivity, and era, then enforces the 15–25 track shortlist contract with **seeded windowing**: any oversized shortlist keeps its 15 most-central tracks as a fixed spine and fills the remaining 10 slots by sampling rotated by the run seed. The seed defaults to today's date and is printed at run start (`Stage 1 seed: 20260707 (reproduce with --stage1-seed 20260707)`) — so the same seed reproduces a run exactly, while different days explore different corners of a big pool. Tracks beyond the windows are reported per-shortlist on stderr and as a `Stage 1 overflow` line in the pipeline summary, never silently dropped. See `docs/architecture/deterministic-stage1.md` for the full algorithm.
 
 ---
 
@@ -401,7 +443,7 @@ Run the same custom genre multiple times. Each run will focus on a different cor
 - Tracks missing BPM or Camelot key are excluded with a warning printed to stderr
 - SoundCloud tracks (Location starting with `file://localhostsoundcloud`) are excluded silently
 - Tracks in a Rekordbox playlist named `DO NOT RECOMMEND` are excluded from every run; the crate snapshot shows how many were excluded, and a warning fires if the playlist is missing from the XML
-- If `CATALOG_API_URL` is set, tracks in your catalog play history are excluded — fuzzy-matched on artist + title with unicode normalisation, dash normalisation, and feat. stripping; otherwise all tracks are treated as unplayed
+- If `CATALOG_API_URL` is set, tracks in your catalog play history are excluded — matched on normalised artist + title keys (unicode/dash normalisation, feat. stripping, version-suffix stripping); otherwise all tracks are treated as unplayed
 
 ### BPM correction
 
@@ -429,7 +471,7 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 - Provider cascade tried in order, falling through on error or missing key:
   **Groq → Gemini → Mistral**
 - **Standard genres:** clusters larger than 40 tracks are chunked; each chunk is called independently and concepts merged
-- **Custom genres:** a random 120-track window is selected from the BPM-sorted pool each run (see [Why random selection?](#why-random-selection)); 60 tracks per call, 2 calls maximum; shortlist target is 20–25 tracks per concept (vs 15–25 for standard)
+- **Custom genres:** the pool is partitioned deterministically by BPM peaks, Camelot connectivity, and era (see `docs/architecture/deterministic-stage1.md`) — same shortlist algorithm as standard genres, applied to the merged cross-genre pool
 - Track IDs are aliased to short positional keys (`T001`, `T002`, …) in the prompt; hallucinated IDs are structurally impossible and concepts with fewer than 4 resolvable aliases are discarded
 - Stage 1 concepts are wrapped into **Mix Canvases** — structured objects that add role candidates (opener, groove-locker, builder, pivot, peak, closer), contrast assets (vocal moments, texture changes, darker/brighter turns), deterministic risk notes (weak opener/closer pool, BPM spread, artist repetition), an era window and dominant label when the core pool supports them, identity-defining `Anchors` from the core pool (provenance + library rarity + pool centrality), and `Concept anchors` tagging bridge/wildcard tracks as `peak`, `identity`, or `structural-exception`. Up to 6 canvases are forwarded to Stage 2, selected by a weighted scoring model covering technical viability, role coverage, anchor strength, contrast potential, cross-canvas distinctiveness, era coherence, label coherence, and novelty against recent run history. Weights are mode-aware — `unplayed` mode prioritises novelty, `played` mode prioritises anchor strength, `all` mode prioritises cross-canvas distinctiveness. Selection is deterministic given the same input — no random sampling.
 
@@ -440,11 +482,15 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 - Assigns each track a role from a focused 10-role vocabulary: opener, groove, hook, pivot, lift, vocal-moment, texture-change, peak, resolution, closer (a track may carry more than one)
 - Each report includes: named energy path, structured `arc_type` field, section breakdown with track numbers, per-track role and transition risk, dedicated opener and closer rationale, excluded tracks with reasons, a `Bold moves:` summary of bridge/wildcard usage with the mechanism that justified each pick, and a one-line `Practicality:` score (bpm_smoothness, harmonic_ratio, risk_justified, overall) for triage
 - If the catalog API returns existing mix names, Stage 2 is instructed to avoid reusing any words, tropes, or phrasing from them; each concept also includes a `name_reason` tying the name to the set's thesis
-- Playlist mode generates three variants (`practical`, `balanced`, `adventurous`) and auto-selects the strongest; seed retention is enforced with a floor of 75% of anchor tracks and 40% of supporting tracks
+- Playlist mode generates three variants (`practical`, `balanced`, `adventurous`) and auto-selects the strongest by a tolerance-aware `fit` score (practicality blended with an adventure dividend for justified risk-taking, weighted by `risk_tolerance` — see "Complete a mix from an existing Rekordbox playlist" below); seed retention is enforced with a floor of 75% of anchor tracks and 40% of supporting tracks
 - Appends shortfall warnings for concepts significantly below the recommended track count for their genre
 - Appends the active report context and elapsed generation time to the final output
 - After each successful run, concept history is written to `.mixlab/concept-history.json`. On subsequent runs, canvases are penalised on a combined novelty score: 65% track-overlap Jaccard plus 35% concept-shape similarity (BPM band, dominant Camelot zone, role pattern, `arc_type`). Both components decay at 0.8^age across a 10-run recency window. Catches "different tracks, same shape" repetition the old track-only signal missed. Stage 2 also sees a `RECENT CONCEPTS` block listing recent titles/arcs/moods so it can deliberately diverge.
 - Post-Stage-2 validation is warn-only. Strong-tier checks (always fire): track IDs not found in the library, denylist or played-track violations, Camelot jumps greater than 4, BPM jumps greater than 15, artist repeats of 3 or more, opener/closer absent in expected positions, bridge/wildcard tracks used without a justified `risk_type`, and wildcard tracks used outside the canvas's concept-anchor list. Soft-tier checks (softened by genre family and `arc_type`): no peak in sequence, no wind-down before closer, three-or-more consecutive same-role-family tracks, all tracks high-energy, cross-concept track overlap above 50%, generic `[Adjective][Noun]` concept titles. Warnings appear under **⚠ Validation Notes** and never abort the run.
+
+### Bounded self-revision (genre mode)
+
+After validation, MixLab attempts one minimal repair per flagged concept. A concept is flagged when it has two or more *hard* findings (track not found, denylisted, played, BPM jump, Camelot jump, arc mismatch, or a bridge/wildcard track used without a justified transition), or — under `--deep` — when its critique verdict is `weak`, or `needs_attention` with a concrete suggested substitution. The revision call is a targeted repair, not a regeneration: the model may only swap, reorder, or drop tracks from the same canvas pool, and must preserve the title, thesis, and character. The result is accepted only if it strictly reduces the concept's hard-finding count; otherwise the original is kept. This is a hard one-pass cap — never a second round. Accepted repairs add a **Revised** annotation to the report noting how many findings were resolved (the prose still describes the pre-revision sequence; the exported playlist uses the revised order), and the **⚠ Validation Notes** section reflects the post-revision state. Pass `--no-revise` to skip the pass entirely. Cost: roughly one extra small Stage 2 call per flagged concept; combined with `--deep` the worst case is about 3× baseline Stage 2 cost.
 
 ### Shortfall thresholds (tracks per set)
 
