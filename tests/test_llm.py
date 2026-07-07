@@ -3002,6 +3002,21 @@ def test_naming_lenses_block_different_seeds_rotate() -> None:
                 assert line[2:] in _NAMING_LENSES
 
 
+def test_naming_lenses_block_samples_at_most_one_pool_drawing_lens() -> None:
+    """Two+ pool-drawing lenses would force the model to violate the anchor-lift cap
+    (live finding: four anchor-lifted names in one run)."""
+    from mixlab.llm import _POOL_DRAWING_LENSES, _naming_lenses_block
+
+    assert len(_POOL_DRAWING_LENSES) == 3
+    for seed in range(500):
+        block = _naming_lenses_block(seed)
+        lens_lines = [line[2:] for line in block.splitlines() if line.startswith("- ")]
+        assert len(lens_lines) == 3
+        pool_count = sum(1 for lens in lens_lines if lens in _POOL_DRAWING_LENSES)
+        assert pool_count <= 1, f"seed {seed} sampled {pool_count} pool-drawing lenses"
+    assert "At most ONE name in the whole response may lift words" in _naming_lenses_block(1)
+
+
 @respx.mock
 async def test_stage2_curate_naming_seed_injects_lenses_genre_mode_only(
     monkeypatch: pytest.MonkeyPatch,
@@ -5005,6 +5020,60 @@ async def test_revise_concepts_happy_path_accepts_and_annotates(
     assert "Main brain: test-model" in report  # trailing section untouched
     assert not any("Camelot jump" in w for w in final_warnings)
     assert len(final_warnings) < len(warnings)
+
+
+@respx.mock
+async def test_revise_concepts_final_warnings_keep_history_echo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final revalidation must carry used_mix_names — without it, any run that
+    revises a concept silently drops every history-echo warning (live finding:
+    'Heist at 4AM' vs 'Heist Recordings' went unflagged after a revision)."""
+    from mixlab.llm import revise_concepts, validate_stage2_output
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    pool = [str(i) for i in range(1, 10)]
+    lib = _revision_lib({i: ("2A" if i == "3" else "8A") for i in pool})
+    canvas = _revision_canvas(pool)
+    original = MixConcept(title="Jump Fix", mood="steady", track_ids=[str(i) for i in range(1, 9)])
+    used = ["Jump Season"]
+
+    warnings = validate_stage2_output(
+        [original], [canvas], lib, played_ids=set(), denylist_ids=set(), genre="house", used_mix_names=used
+    )
+    assert any("echoes existing mix name" in w for w in warnings)
+
+    revision_payload = json.dumps(
+        [
+            {
+                "title": "Jump Fix",
+                "name_reason": "steady",
+                "mood": "steady",
+                "track_ids": ["1", "2", "9", "4", "5", "6", "7", "8"],
+                "transitions": [],
+            }
+        ]
+    )
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(revision_payload)),
+            Response(200, json=_anthropic_response("FRESH PROSE")),
+        ]
+    )
+
+    _concepts, _report, final_warnings = await revise_concepts(
+        [original],
+        "PROSE REPORT\n\n---\n\nMain brain: test-model",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+        used_mix_names=used,
+    )
+
+    assert any("echoes existing mix name 'Jump Season'" in w for w in final_warnings)
 
 
 @respx.mock
