@@ -17,6 +17,7 @@ from mixlab.models import (
     DJPracticalityScore,
     MixCanvas,
     MixConcept,
+    MixPoints,
     Track,
     Transition,
 )
@@ -4221,6 +4222,44 @@ def test_format_canvas_section_renders_strong_transitions_line_with_mechanism() 
     assert "Strong transitions:" in section
     assert "halftime lock 172→86" in section
     assert "ID:1→ID:2" in section
+
+
+def test_format_canvas_section_strong_transitions_includes_blend_label_when_mix_points_present() -> None:
+    # #59: when both tracks carry mix_points, the Strong transitions line appends the
+    # blend-headroom label (e.g. "29 bars out / 32 in — tight") after the mechanism.
+    from mixlab.llm import _format_canvas_section
+
+    # Both directions need mix_points so blend_headroom is defined both ways; the
+    # reverse direction (2→1) is deliberately given a much lower blend headroom so it
+    # loses the symmetric-pair dedup and the kept edge is the 1→2 halftime one.
+    tracks_by_id = {
+        "1": Track(
+            track_id="1",
+            artist="A",
+            title="T1",
+            bpm=172.0,
+            camelot_key="8A",
+            genre="Drum & Bass",
+            mix_points=MixPoints(mix_in_secs=0.0, outro_bars=29.0, intro_bars=40.0),
+        ),
+        "2": Track(
+            track_id="2",
+            artist="B",
+            title="T2",
+            bpm=86.0,
+            camelot_key="8A",
+            genre="Drum & Bass",
+            mix_points=MixPoints(mix_in_secs=0.0, outro_bars=2.0, intro_bars=32.0),
+        ),
+    }
+    roles = CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[])
+    canvas = _canvas_with_role_candidates(["1", "2"], roles)
+
+    section = _format_canvas_section(canvas, tracks_by_id)
+
+    assert "Strong transitions:" in section
+    assert "halftime lock 172→86" in section
+    assert "29 bars out / 32 in — tight" in section
 
 
 def test_format_canvas_section_keeps_opener_closer_drops_other_role_hints() -> None:

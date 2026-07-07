@@ -57,6 +57,10 @@ class TransitionEdge:
     energy_delta: int | None  # b.energy - a.energy when both present
     tag_overlap: float  # Jaccard over lowercased tag sets; 0.0 when either side has no tags
     score: float  # 0..1 composite mixability
+    # Mix-point headroom (#59). None when either track lacks the cue data needed to
+    # compute it — the composite score then falls back to the pre-#59 weights exactly.
+    blend_headroom: float | None = None
+    blend_label: str = ""
 
 
 def _parse_camelot(key: str) -> tuple[int, str] | None:
@@ -137,6 +141,58 @@ def _tag_overlap(a_tags: list[str], b_tags: list[str]) -> float:
     return len(a_set & b_set) / len(union)
 
 
+def blend_headroom(a: Track, b: Track) -> tuple[float | None, str]:
+    """Score how much runway the outgoing track's outro gives the incoming track's intro.
+
+    ``a`` is the outgoing track (its outro bars are the supply), ``b`` is the incoming
+    track (its intro bars are the demand). Returns ``(None, "")`` whenever either track
+    lacks the mix-point data needed to compute a ratio — callers then fall back to the
+    pre-#59 scoring weights untouched.
+
+    A short outro is not a dead transition, just a tighter one — the label always
+    frames it as something a DJ can work around (a manual loop or a cut), never as
+    "unmixable".
+    """
+    if a.mix_points is None or b.mix_points is None:
+        return None, ""
+    outro = a.mix_points.outro_bars
+    intro = b.mix_points.intro_bars
+    if outro is None or intro is None:
+        return None, ""
+
+    ratio = outro / max(intro, 1.0)
+    if ratio >= 1.5:
+        score = 1.0
+    elif ratio >= 1.0:
+        score = 0.7 + (ratio - 1.0) / 0.5 * 0.3
+    elif ratio >= 0.5:
+        score = 0.3 + (ratio - 0.5) / 0.5 * 0.4
+    else:
+        score = 0.15
+
+    loop_bonus = False
+    if a.duration_secs is not None and a.mix_points.loops:
+        final_third_start = a.duration_secs * (2.0 / 3.0)
+        loop_bonus = any(loop_start >= final_third_start for loop_start, _loop_end in a.mix_points.loops)
+    if loop_bonus:
+        score = min(1.0, score + 0.15)
+
+    score = round(score, 4)
+
+    if score >= 0.7:
+        suffix = ""
+    elif score >= 0.3:
+        suffix = " — tight"
+    else:
+        suffix = " — cut or manual loop likely"
+
+    label = f"{outro:.0f} bars out / {intro:.0f} in{suffix}"
+    if loop_bonus:
+        label += " (loop zone available)"
+
+    return score, label
+
+
 def _is_energy_lift(a_key: str, b_key: str) -> bool:
     """Same-ring +1 Camelot move (wrapping 12→1) — the classic energy-boost blend."""
     pa = _parse_camelot(a_key)
@@ -161,10 +217,20 @@ def score_transition(a: Track, b: Track) -> TransitionEdge:
     harmonic = _harmonic_component(cam_dist)
     energy = _energy_component(energy_delta)
     tags = _tag_component(a.tags, b.tags, overlap)
+    headroom, blend_label = blend_headroom(a, b)
 
     # Hard zero when tempo is incompatible — no amount of harmonic/energy fit rescues
     # a transition that cannot actually be beat-matched.
-    score = 0.0 if relation == "incompatible" else tempo * 0.4 + harmonic * 0.3 + energy * 0.15 + tags * 0.15
+    if relation == "incompatible":
+        score = 0.0
+    elif headroom is not None:
+        # Mix-point data available (#59): fold blend headroom into the composite and
+        # rebalance weights to make room for it.
+        score = tempo * 0.35 + harmonic * 0.25 + headroom * 0.20 + energy * 0.10 + tags * 0.10
+    else:
+        # No mix-point data on one or both sides — keep the pre-#59 weights byte-stable
+        # for cueless libraries.
+        score = tempo * 0.4 + harmonic * 0.3 + energy * 0.15 + tags * 0.15
 
     return TransitionEdge(
         from_id=a.track_id,
@@ -176,6 +242,8 @@ def score_transition(a: Track, b: Track) -> TransitionEdge:
         energy_delta=energy_delta,
         tag_overlap=round(overlap, 4),
         score=round(score, 4),
+        blend_headroom=headroom,
+        blend_label=blend_label,
     )
 
 

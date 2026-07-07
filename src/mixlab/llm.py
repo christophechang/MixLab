@@ -56,7 +56,7 @@ from mixlab.models import (
     TrackMode,
     Transition,
 )
-from mixlab.transitions import relation_label, strong_edges, tempo_relation, trace_arc
+from mixlab.transitions import TransitionEdge, relation_label, strong_edges, tempo_relation, trace_arc
 
 _ARC_TYPE_VALUES: frozenset[str] = frozenset(get_args(ArcType))
 
@@ -629,11 +629,13 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
     edges = strong_edges(canvas_tracks, top_n=6)
     if edges:
         tracks_lookup = {t.track_id: t for t in canvas_tracks}
-        edge_parts = [
-            f"ID:{e.from_id}→ID:{e.to_id} "
-            f"({relation_label(e, tracks_lookup[e.from_id], tracks_lookup[e.to_id])}, score {e.score:.2f})"
-            for e in edges
-        ]
+
+        def _edge_part(e: TransitionEdge) -> str:
+            mechanism = relation_label(e, tracks_lookup[e.from_id], tracks_lookup[e.to_id])
+            blend_suffix = f", {e.blend_label}" if e.blend_label else ""
+            return f"ID:{e.from_id}→ID:{e.to_id} ({mechanism}{blend_suffix}, score {e.score:.2f})"
+
+        edge_parts = [_edge_part(e) for e in edges]
         lines.append("Strong transitions: " + " | ".join(edge_parts))
 
     if canvas.core_anchor_ids:
