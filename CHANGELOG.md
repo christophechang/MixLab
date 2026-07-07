@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.4.0 — 2026-07-07
+
+**The Mix Engine** (epic #58, sub-issues #41/#59/#60/#61): cue-aware blends and optimal sequencing. The beat grids and cue points already in the Rekordbox XML now inform transitions and play order — turning transition intelligence from prompt hints into deterministic guarantees.
+
+- **Cue/grid parsing → MixPoints (#41).** `<TEMPO>` anchors and `<POSITION_MARK>` cues are parsed per track; the owner's cue conventions are encoded directly: first cue by position = mix-in, last cue = mix-out (only with ≥2 cues landing in the back half — a single-cue track is partially prepped), loops recorded as zones, cueless tracks neutral. Intro/outro lengths derived in **bars** via piecewise integration across multi-anchor beat grids.
+- **Blend-aware transition edges (#59).** Edges gain a headroom score from outgoing outro bars vs incoming intro bars, with a loop-zone bonus, labelled in booth language (`29 bars out / 32 in — tight`, `cut or manual loop likely` — short outros are never called unmixable, since they get looped live). Composite edge weights rebalance only when both sides carry data; cueless scoring is byte-identical to v1.3.0.
+- **Beam-search sequencer (#60).** New pure `sequencer.py`: `optimal_order` finds the best play order for any track set (deterministic beam search over the transition-edge matrix, pinned opener/closer support); `score_order` judges any existing order on the identical scale (edge quality + arc fit + endpoint fit); `suggest_swaps` proposes bounded interior-only improvements with human-readable reasons.
+- **Pipeline integration (#61).** Warn-only `blend risk` validation findings (feeding the self-revision trigger); practicality gains a `blend_feasibility` component when at least half the pairs carry data; after Stage 2 the sequencer checks every concept's order and suggests improvements clearing a 10% score bar — suggestion-only by default, `--resequence` applies them (rebuilding transition annotations); Stage 2 prompts carry per-track `intro:16b/outro:32b` tokens.
+
+Live spot-check for at home: confirm derived intro/outro bars match booth reality on a few well-known tracks (`docs/exploration/h3-cue-grid-prep.md` has the schema background).
+
+---
+
 ## v1.3.0 — 2026-07-07
 
 Creativity wave from the 2026-07-06 audit (`docs/audit/2026-07-06-mixlab-audit.md` + plan). Eleven issues (#42, #46–#55) shipped; live-validated on the real collection (house + 4x4 smoke runs).

@@ -274,6 +274,20 @@ Each proposed direction is feasibility-scored (pool fill, BPM-path viability, an
 
 `--risk` composes with `--directions`: it changes how canvases are scored and validated regardless of whether they came from classic BPM strata or a concept direction. It is genre mode only — playlist mode derives its own risk tolerance from the Stage 0 intent brief (see `--intent` above) and prints a stderr note if `--risk` is passed alongside `--playlist`.
 
+### Mix Engine (genre mode)
+
+When your Rekordbox export carries a beat grid and memory/hot cues, MixLab parses each track's structure into mix points (intro/outro bar counts, loop zones, cue count) and uses them across genre mode:
+
+- **Owner cue conventions.** The first cue is read as the mix-in; the last cue is read as the mix-out when a track has at least two cues in the back half of the arrangement. Tracks with short outros get manual-loop language ("cut or manual loop likely") rather than being called unmixable, and cueless tracks stay neutral — absence of cue data never penalises a track.
+- **Blend warnings.** The post-Stage-2 validator flags any consecutive pair whose outro/intro headroom is too tight to ride (unless the transition is already annotated as a justified risk). These count as hard findings and can trigger the self-revision pass.
+- **Practicality blend component.** When enough of a concept's transitions carry cue data, the per-concept practicality line gains a `blend_feasibility` term and rebalances its weights to include it; cueless concepts keep the original formula unchanged.
+- **Intro/outro prompt tokens.** Stage 2 candidate and report lines show `intro:16b/outro:32b` tokens so the model can reason about workable mix windows directly.
+- **`--resequence`.** By default the deterministic sequencer only *suggests* order improvements in a `**Sequencer**` report block and leaves the exported order untouched. Pass `--resequence` to apply the suggested swaps to the exported concepts (opener and closer are never moved).
+
+```sh
+./mixlab --genre house --resequence   # apply the sequencer's suggested order swaps
+```
+
 ### Complete a mix from an existing Rekordbox playlist
 
 ```bash

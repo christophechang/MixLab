@@ -8,6 +8,22 @@ from pydantic import BaseModel, Field
 TrackMode = Literal["unplayed", "all", "played"]
 
 
+class GridAnchor(BaseModel):
+    inizio: float  # seconds
+    bpm: float
+    metro: str = "4/4"
+    battito: int = 1
+
+
+class MixPoints(BaseModel):
+    mix_in_secs: float
+    mix_out_secs: float | None = None
+    intro_bars: float | None = None  # bars from 0:00 to mix-in (grid required)
+    outro_bars: float | None = None  # bars from mix-out to track end (grid + duration required)
+    loops: list[tuple[float, float]] = Field(default_factory=list)
+    cue_count: int = 0
+
+
 class Track(BaseModel):
     track_id: str
     artist: str
@@ -27,6 +43,8 @@ class Track(BaseModel):
     duration_secs: int | None = None
     date_added: str = ""
     rating: int | None = None
+    grid: list[GridAnchor] = Field(default_factory=list)
+    mix_points: MixPoints | None = None
 
 
 class PlayedTrack(BaseModel):
@@ -304,9 +322,21 @@ class DJPracticalityScore:
     harmonic_ratio: float  # 0.0–1.0
     risk_justified: float  # 0.0–1.0
     fragment_preserved: float  # 0.0–1.0
+    blend_feasibility: float = 1.0  # 0.0–1.0 — mix-point outro/intro headroom (#61)
+    has_blend_data: bool = False  # True only when enough pairs carry mix-point data
 
     @property
     def overall(self) -> float:
+        # With blend data (#61): fold blend feasibility in and rebalance weights.
+        if self.has_blend_data:
+            return (
+                self.bpm_smoothness * 0.25
+                + self.harmonic_ratio * 0.25
+                + self.risk_justified * 0.20
+                + self.fragment_preserved * 0.10
+                + self.blend_feasibility * 0.20
+            )
+        # No blend data — keep the pre-#61 formula byte-stable for cueless libraries.
         return (
             self.bpm_smoothness * 0.30
             + self.harmonic_ratio * 0.30

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from mixlab.models import MixConcept, Track
+from mixlab.models import MixConcept, MixPoints, Track
 from mixlab.transitions import (
     TransitionEdge,
+    blend_headroom,
     relation_label,
     score_transition,
     strong_edges,
@@ -30,6 +31,33 @@ def _track(
         genre="Drum & Bass",
         energy=energy,
         tags=tags or [],
+    )
+
+
+def _track_with_mix_points(
+    track_id: str,
+    *,
+    bpm: float = 128.0,
+    key: str = "8A",
+    outro_bars: float | None = None,
+    intro_bars: float | None = None,
+    loops: list[tuple[float, float]] | None = None,
+    duration_secs: int | None = None,
+) -> Track:
+    return Track(
+        track_id=track_id,
+        artist=f"Artist_{track_id}",
+        title=f"Title_{track_id}",
+        bpm=bpm,
+        camelot_key=key,
+        genre="Drum & Bass",
+        duration_secs=duration_secs,
+        mix_points=MixPoints(
+            mix_in_secs=0.0,
+            outro_bars=outro_bars,
+            intro_bars=intro_bars,
+            loops=loops or [],
+        ),
     )
 
 
@@ -148,9 +176,154 @@ def test_score_transition_tag_overlap_jaccard() -> None:
     assert edge.tag_overlap == pytest.approx(round(1 / 3, 4))
 
 
+def test_score_transition_without_mix_points_matches_legacy_weights_regression() -> None:
+    # Regression guard (#59): tracks without mix_points must be byte-identical to the
+    # pre-blend-headroom formula (tempo 0.4 / harmonic 0.3 / energy 0.15 / tags 0.15).
+    edge = score_transition(_track("a", key="???"), _track("b", key="8A"))
+    expected = 1.0 * 0.4 + 0.3 * 0.3 + 0.7 * 0.15 + 0.7 * 0.15
+    assert edge.score == pytest.approx(round(expected, 4))
+    assert edge.blend_headroom is None
+    assert edge.blend_label == ""
+
+
+def test_score_transition_with_mix_points_uses_rebalanced_blend_weights() -> None:
+    # a: halftime 172→86 same key, no tags/energy. outro 32 bars / intro 16 bars →
+    # ratio 2.0 → headroom 1.0.
+    a = _track_with_mix_points("a", bpm=172.0, key="8A", outro_bars=32.0)
+    b = _track_with_mix_points("b", bpm=86.0, key="8A", intro_bars=16.0)
+    edge = score_transition(a, b)
+
+    assert edge.blend_headroom == pytest.approx(1.0)
+    assert edge.blend_label == "32 bars out / 16 in"
+
+    # tempo: halftime, zero stretch → 1.0 * 0.9 = 0.9 (non-straight ratio penalty)
+    # harmonic: same key → 1.0
+    # energy: both None → 0.7
+    # tags: both empty → 0.7
+    expected = 0.9 * 0.35 + 1.0 * 0.25 + 1.0 * 0.20 + 0.7 * 0.10 + 0.7 * 0.10
+    assert edge.score == pytest.approx(round(expected, 4))
+
+
+def test_score_transition_incompatible_still_zero_with_mix_points() -> None:
+    a = _track_with_mix_points("a", bpm=128.0, outro_bars=32.0)
+    b = _track_with_mix_points("b", bpm=150.0, intro_bars=16.0)
+    edge = score_transition(a, b)
+    assert edge.tempo_relation == "incompatible"
+    assert edge.score == 0.0
+
+
+# ---------------------------------------------------------------------------
+# blend_headroom
+# ---------------------------------------------------------------------------
+
+
+def test_blend_headroom_comfortable_ratio_scores_one() -> None:
+    a = _track_with_mix_points("a", outro_bars=48.0)
+    b = _track_with_mix_points("b", intro_bars=16.0)
+    score, label = blend_headroom(a, b)
+    assert score == pytest.approx(1.0)
+    assert label == "48 bars out / 16 in"
+
+
+def test_blend_headroom_exact_one_point_five_boundary_scores_one() -> None:
+    a = _track_with_mix_points("a", outro_bars=24.0)
+    b = _track_with_mix_points("b", intro_bars=16.0)
+    score, label = blend_headroom(a, b)
+    assert score == pytest.approx(1.0)
+    assert label == "24 bars out / 16 in"
+
+
+def test_blend_headroom_ratio_one_point_two_linear_value() -> None:
+    a = _track_with_mix_points("a", outro_bars=24.0)
+    b = _track_with_mix_points("b", intro_bars=20.0)
+    score, label = blend_headroom(a, b)
+    # ratio 1.2 → 0.7 + (1.2 - 1.0) / 0.5 * 0.3 = 0.82
+    assert score == pytest.approx(0.82)
+    assert label == "24 bars out / 20 in"
+
+
+def test_blend_headroom_ratio_zero_point_seven_is_tight() -> None:
+    a = _track_with_mix_points("a", outro_bars=14.0)
+    b = _track_with_mix_points("b", intro_bars=20.0)
+    score, label = blend_headroom(a, b)
+    # ratio 0.7 → 0.3 + (0.7 - 0.5) / 0.5 * 0.4 = 0.46
+    assert score == pytest.approx(0.46)
+    assert label == "14 bars out / 20 in — tight"
+
+
+def test_blend_headroom_ratio_zero_point_three_is_lowest_tier() -> None:
+    a = _track_with_mix_points("a", outro_bars=6.0)
+    b = _track_with_mix_points("b", intro_bars=20.0)
+    score, label = blend_headroom(a, b)
+    # ratio 0.3 < 0.5 → flat 0.15 tier
+    assert score == pytest.approx(0.15)
+    assert label == "6 bars out / 20 in — cut or manual loop likely"
+
+
+def test_blend_headroom_none_when_either_track_lacks_mix_points() -> None:
+    a = _track("a")
+    b = _track_with_mix_points("b", intro_bars=16.0)
+    assert blend_headroom(a, b) == (None, "")
+    assert blend_headroom(b, a) == (None, "")
+
+
+def test_blend_headroom_none_when_outro_bars_missing() -> None:
+    a = _track_with_mix_points("a", outro_bars=None)
+    b = _track_with_mix_points("b", intro_bars=16.0)
+    assert blend_headroom(a, b) == (None, "")
+
+
+def test_blend_headroom_none_when_intro_bars_missing() -> None:
+    a = _track_with_mix_points("a", outro_bars=32.0)
+    b = _track_with_mix_points("b", intro_bars=None)
+    assert blend_headroom(a, b) == (None, "")
+
+
+def test_blend_headroom_loop_bonus_fires_when_loop_in_final_third_and_duration_known() -> None:
+    # Base ratio 0.3 → 0.15 tier; loop in final third + known duration → +0.15 → 0.30,
+    # which crosses the tier boundary into "tight".
+    a = _track_with_mix_points("a", outro_bars=6.0, loops=[(250.0, 260.0)], duration_secs=300)
+    b = _track_with_mix_points("b", intro_bars=20.0)
+    score, label = blend_headroom(a, b)
+    assert score == pytest.approx(0.30)
+    assert label == "6 bars out / 20 in — tight (loop zone available)"
+
+
+def test_blend_headroom_loop_bonus_skipped_when_loop_not_in_final_third() -> None:
+    a = _track_with_mix_points("a", outro_bars=6.0, loops=[(10.0, 20.0)], duration_secs=300)
+    b = _track_with_mix_points("b", intro_bars=20.0)
+    score, label = blend_headroom(a, b)
+    assert score == pytest.approx(0.15)
+    assert "loop zone available" not in label
+
+
+def test_blend_headroom_loop_bonus_skipped_when_duration_unknown() -> None:
+    a = _track_with_mix_points("a", outro_bars=6.0, loops=[(250.0, 260.0)], duration_secs=None)
+    b = _track_with_mix_points("b", intro_bars=20.0)
+    score, label = blend_headroom(a, b)
+    assert score == pytest.approx(0.15)
+    assert "loop zone available" not in label
+
+
+def test_blend_headroom_loop_bonus_capped_at_one() -> None:
+    a = _track_with_mix_points("a", outro_bars=48.0, loops=[(250.0, 260.0)], duration_secs=300)
+    b = _track_with_mix_points("b", intro_bars=16.0)
+    score, _label = blend_headroom(a, b)
+    assert score == pytest.approx(1.0)
+
+
 # ---------------------------------------------------------------------------
 # strong_edges
 # ---------------------------------------------------------------------------
+
+
+def test_strong_edges_deterministic_with_mixed_cued_and_cueless_tracks() -> None:
+    tracks = [
+        _track_with_mix_points("a", bpm=172.0, key="8A", outro_bars=32.0),
+        _track("b", bpm=86.0, key="8A"),
+        _track_with_mix_points("c", bpm=128.0, key="9A", intro_bars=16.0),
+    ]
+    assert strong_edges(tracks) == strong_edges(tracks)
 
 
 def test_strong_edges_is_deterministic() -> None:

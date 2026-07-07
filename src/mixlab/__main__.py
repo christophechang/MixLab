@@ -38,6 +38,7 @@ from mixlab.llm import (
     _parse_user_intent,  # noqa: PLC2701 — reused here for playlist-mode risk override (#54)
     _qualifies_for_revision,  # noqa: PLC2701 — reused for the revision-gate decision (#55)
     make_cascade_state,
+    resequence_suggestions,
     revise_concepts,
     stage0_intent_brief,
     stage2_curate_and_report,
@@ -599,6 +600,7 @@ async def run(
     directions: str = "mixed",
     no_revise: bool = False,
     risk: RiskTolerance = "medium",
+    resequence: bool = False,
 ) -> None:
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
@@ -877,6 +879,15 @@ async def run(
             risk=risk,
         )
 
+    # Deterministic sequencer pass (#61). Runs after revision so suggestions reflect the
+    # final track lists. Suggest-only by default; --resequence applies the swaps.
+    all_concepts, resequence_notes = resequence_suggestions(all_concepts, tracks_by_id, apply=resequence)
+    if resequence_notes:
+        print("\n🎚 Sequencer:")
+        for note in resequence_notes:
+            print(f"  {note}")
+        report += "\n\n**Sequencer**\n" + "\n".join(f"- {note}" for note in resequence_notes)
+
     if validation_warnings:
         print("\n⚠ Validation Notes:")
         for w in validation_warnings:
@@ -1049,6 +1060,7 @@ examples:
   mixlab --genre house --intent "warmup, melodic, outdoor afternoon"  creative direction
   mixlab --genre house --deep          opt-in critique pass per concept (2x Stage 2 cost)
   mixlab --genre house --no-revise     skip the bounded self-revision pass (#55)
+  mixlab --genre house --resequence    apply the sequencer's suggested order swaps (#61)
   mixlab --genre house --risk high     promote wildcard/anchor picks, relax jump thresholds (#42)
   mixlab --playlist "Monday Night" --mix-length 60   target ~15 tracks for a 1-hour set
   mixlab --playlist "Monday Night" --mix-length 90   target ~22 tracks for a 90-minute set
@@ -1190,6 +1202,15 @@ examples:
         help=(
             "Skip the bounded self-revision pass (#55). By default MixLab attempts one minimal "
             "repair per flagged concept after validation; this disables that pass."
+        ),
+    )
+    parser.add_argument(
+        "--resequence",
+        action="store_true",
+        help=(
+            "Apply the sequencer's suggested order improvements to exported concepts (#61). "
+            "By default the sequencer only suggests swaps in the report and leaves the exported "
+            "order unchanged; this flag applies them."
         ),
     )
     parser.add_argument(
@@ -1354,6 +1375,7 @@ examples:
             directions=args.directions,
             no_revise=args.no_revise,
             risk=cast("RiskTolerance", args.risk),
+            resequence=args.resequence,
         )
     )
 
