@@ -405,6 +405,26 @@ Every run stores its concepts in `.mixlab/concept-history.json`. `--feedback` le
 ./mixlab --genres
 ```
 
+### Rank cue-prep targets (Cue-Prep Assistant)
+
+```bash
+./mixlab --prep
+./mixlab --prep --genre house --top 10
+```
+
+Ranks every track with missing or partial cue-point data (no `mix_points` at all, or missing its mix-out point) by how much cueing it would pay off. The score blends: demand (how often concept history has already programmed the track), harmonic centrality (how well-connected it is to its genre-bucket peers via transition scoring), unplayed status, and gap severity (a fully uncued track outweighs one that's only missing its mix-out point). `--genre <label>` scopes to one standard genre label (custom pools like `170`/`140`/`4x4` and raw Rekordbox tags are rejected — standard `GENRE_MAP` labels only); `--top N` caps the number of rows shown (default 20). Fully offline: no API calls, no LLM, no Discord post.
+
+```text
+    #  Track                                      Bucket            BPM  Key  Gap          Score  Reason
+    1  Overmono — So U Kno                         house          126.0  8A   uncued         5.50  in 2 planned concepts · unplayed · fully uncued
+    2  Or:la — Rebound                              house          124.0  9A   no-mix-out     3.20  harmonically central · missing mix-out cue
+    3  Peach — Fabric 92 Intro                      house          122.0  8B   uncued         2.50  unplayed · fully uncued
+
+  house: 128 of 370 tracks lack cue data
+
+Cue up the top entries in Rekordbox, re-export, and booth sheets gain clock times.
+```
+
 ---
 
 ## Available genres

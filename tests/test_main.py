@@ -21,6 +21,7 @@ from mixlab.__main__ import (
     run,
     run_export_unplayed,
     run_feedback,
+    run_prep,
 )
 from mixlab.history import ConceptHistory, ConceptRecord, HistoryEntry, append_run, load_history
 from mixlab.models import MixConcept, PlayedTrack, Track
@@ -1098,3 +1099,164 @@ async def test_run_genre_mode_attaches_html_report(
     written = list(report_dir.glob("*.html"))
     assert len(written) == 1
     assert written[0].name.startswith("mixlab-house-")
+
+
+# ---------------------------------------------------------------------------
+# run_prep / mixlab --prep (#74) — Cue-Prep Assistant
+# ---------------------------------------------------------------------------
+
+# House bucket: track 1 fully cued (excluded), 2 and 4 uncued, 3 half-cued (no mix-out)
+# -> 3 of 4 gapped. Techno bucket: 5 and 6 both uncued -> 2 of 2 gapped. House has the
+# higher gap count so its footer line sorts first.
+_PREP_XML = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <DJ_PLAYLISTS Version="1.0.0">
+      <COLLECTION Entries="6">
+        <TRACK TrackID="1" Name="Full Cue" Artist="Artist A" AverageBpm="124.00" Tonality="8A"
+               Genre="House" TotalTime="300">
+          <POSITION_MARK Name="" Type="0" Start="20.0" Num="0"/>
+          <POSITION_MARK Name="" Type="0" Start="250.0" Num="1"/>
+        </TRACK>
+        <TRACK TrackID="2" Name="No Cue" Artist="Artist B" AverageBpm="124.00" Tonality="8A"
+               Genre="House" TotalTime="300"/>
+        <TRACK TrackID="3" Name="Half Cue" Artist="Artist C" AverageBpm="124.00" Tonality="8A"
+               Genre="House" TotalTime="300">
+          <POSITION_MARK Name="" Type="0" Start="20.0" Num="0"/>
+        </TRACK>
+        <TRACK TrackID="4" Name="No Cue Too" Artist="Artist D" AverageBpm="125.00" Tonality="9A"
+               Genre="House" TotalTime="300"/>
+        <TRACK TrackID="5" Name="Techno No Cue" Artist="Artist E" AverageBpm="128.00" Tonality="8A"
+               Genre="Techno" TotalTime="300"/>
+        <TRACK TrackID="6" Name="Techno No Cue Too" Artist="Artist F" AverageBpm="128.00" Tonality="8A"
+               Genre="Techno" TotalTime="300"/>
+      </COLLECTION>
+    </DJ_PLAYLISTS>
+""")
+
+# Every track fully cued (two marks, second past the midpoint) -> nothing to prep.
+_PREP_ALL_CUED_XML = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <DJ_PLAYLISTS Version="1.0.0">
+      <COLLECTION Entries="2">
+        <TRACK TrackID="1" Name="Full Cue A" Artist="Artist A" AverageBpm="124.00" Tonality="8A"
+               Genre="House" TotalTime="300">
+          <POSITION_MARK Name="" Type="0" Start="20.0" Num="0"/>
+          <POSITION_MARK Name="" Type="0" Start="250.0" Num="1"/>
+        </TRACK>
+        <TRACK TrackID="2" Name="Full Cue B" Artist="Artist B" AverageBpm="128.00" Tonality="9A"
+               Genre="Techno" TotalTime="300">
+          <POSITION_MARK Name="" Type="0" Start="20.0" Num="0"/>
+          <POSITION_MARK Name="" Type="0" Start="260.0" Num="1"/>
+        </TRACK>
+      </COLLECTION>
+    </DJ_PLAYLISTS>
+""")
+
+
+def test_run_prep_prints_table_footer_and_hint_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_PREP_XML)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", tmp_path / "history.json")
+
+    exit_code = run_prep(None, 20)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Artist B — No Cue" in out
+    assert "Artist C — Half Cue" in out
+    assert "Artist D — No Cue Too" in out
+    assert "Artist E — Techno No Cue" in out
+    assert "Full Cue" not in out  # fully-cued track excluded from the table
+    assert "  house: 3 of 4 tracks lack cue data" in out
+    assert "  techno: 2 of 2 tracks lack cue data" in out
+    assert out.index("house: 3 of 4") < out.index("techno: 2 of 2")
+    assert "Cue up the top entries in Rekordbox, re-export, and booth sheets gain clock times." in out
+
+
+def test_run_prep_genre_house_scopes_to_bucket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_PREP_XML)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", tmp_path / "history.json")
+
+    exit_code = run_prep("house", 20)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Artist B — No Cue" in out
+    assert "Techno" not in out
+    assert "  house: 3 of 4 tracks lack cue data" in out
+    assert "techno:" not in out
+
+
+def test_run_prep_genre_4x4_errors_with_exit_one(capsys: pytest.CaptureFixture[str]) -> None:
+    """--prep only accepts standard GENRE_MAP labels — custom pools (170/140/4x4) are rejected."""
+    exit_code = run_prep("4x4", 20)
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "--prep accepts standard genre labels only" in err
+    assert "4x4" in err
+
+
+def _count_prep_rows(out: str) -> int:
+    """Count printed table rows: lines whose rank column starts with a digit.
+
+    Excludes the "Cue-Prep Assistant — top N target(s):" header line (starts with
+    "Cue-Prep", not a digit) even though it also contains an em dash.
+    """
+    return sum(1 for line in out.splitlines() if line.strip()[:1].isdigit() and " — " in line)
+
+
+def test_run_prep_top_1_limits_to_one_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_PREP_XML)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", tmp_path / "history.json")
+
+    exit_code = run_prep(None, 1)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert _count_prep_rows(out) == 1
+
+
+def test_run_prep_empty_gap_library_prints_congratulatory_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_PREP_ALL_CUED_XML)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", tmp_path / "history.json")
+
+    exit_code = run_prep(None, 20)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "nothing to prep" in out.lower()
+    assert "Cue-Prep Assistant" not in out
+
+
+def test_main_prep_flag_runs_via_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--prep and --top wire through main()'s argv parsing to run_prep (#74)."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_PREP_XML)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", tmp_path / "history.json")
+    monkeypatch.setattr("sys.argv", ["mixlab", "--prep", "--top", "1"])
+
+    with patch("mixlab.__main__.load_dotenv"), pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert _count_prep_rows(out) == 1

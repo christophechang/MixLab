@@ -57,6 +57,7 @@ from mixlab.playlist_mode import (
     filter_tracks_for_playlist_genre,
     resolve_playlist,
 )
+from mixlab.prep import PrepItem, rank_prep_targets
 from mixlab.reader import apply_bpm_corrections, parse_collection, parse_playlists
 
 _XML_PATH = Path("import/rekordbox.xml")
@@ -371,6 +372,77 @@ def run_feedback(concept: str | None, verdict: str | None, notes: str, history_p
     record.feedback_recorded_at = datetime.datetime.now(datetime.UTC).isoformat()
     save_history(history, history_path)
     print(f'Recorded feedback "{verdict}" for concept "{record.title}" (run {entry.created_at[:10]}, {entry.genre}).')
+    return 0
+
+
+_PREP_LABEL_WIDTH = 42
+_PREP_BUCKET_WIDTH = 14
+_PREP_HINT = "Cue up the top entries in Rekordbox, re-export, and booth sheets gain clock times."
+
+
+def _truncate_label(text: str, width: int) -> str:
+    """Truncate ``text`` to ``width`` chars, replacing the tail with an ellipsis when it overflows."""
+    if len(text) <= width:
+        return text
+    return text[: width - 1].rstrip() + "…"
+
+
+def _print_prep_table(items: list[PrepItem], totals: dict[str, tuple[int, int]]) -> None:
+    print(f"\nCue-Prep Assistant — top {len(items)} target(s):\n")
+    print(
+        f"  {'#':>3}  {'Track':<{_PREP_LABEL_WIDTH}} {'Bucket':<{_PREP_BUCKET_WIDTH}} "
+        f"{'BPM':>6}  {'Key':<4} {'Gap':<11} {'Score':>6}  Reason"
+    )
+    for i, item in enumerate(items, start=1):
+        label = _truncate_label(item.label, _PREP_LABEL_WIDTH)
+        bucket_label = _truncate_label(item.bucket or item.genre, _PREP_BUCKET_WIDTH)
+        print(
+            f"  {i:>3}  {label:<{_PREP_LABEL_WIDTH}} {bucket_label:<{_PREP_BUCKET_WIDTH}} "
+            f"{item.bpm:>6.1f}  {item.camelot_key:<4} {item.gap:<11} {item.score:>6.2f}  {item.reason}"
+        )
+
+    print()
+    for bucket_key, (gap_count, total_count) in sorted(totals.items(), key=lambda kv: -kv[1][0]):
+        print(f"  {bucket_key}: {gap_count} of {total_count} tracks lack cue data")
+
+    print(f"\n{_PREP_HINT}")
+
+
+def run_prep(genre: str | None, top: int) -> int:
+    """Handle ``mixlab --prep`` (Cue-Prep Assistant, #72/#74). No LLM calls, no API,
+    no Discord — ranks tracks with missing/partial cue-point data by expected payoff.
+
+    Returns the process exit code: 0 on a successful listing (including the
+    "nothing to prep" case), 1 when ``--genre`` names something other than a
+    standard genre label or a standard label with no matching tracks.
+    """
+    bucket: str | None = None
+    if genre is not None:
+        if genre not in GENRE_MAP:
+            print(
+                f"ERROR: --prep accepts standard genre labels only — '{genre}' is not one. "
+                f"Standard labels: {', '.join(sorted(GENRE_MAP.keys()))}",
+                file=sys.stderr,
+            )
+            return 1
+        bucket = genre
+
+    tracks = parse_collection(_XML_PATH)
+    tracks = apply_bpm_corrections(tracks)
+    history = load_history(_HISTORY_PATH)
+
+    items, totals = rank_prep_targets(tracks, history, bucket=bucket, top=top)
+
+    if bucket is not None and not totals:
+        print(f"No tracks found for genre '{genre}'.", file=sys.stderr)
+        return 1
+
+    total_gap = sum(gap_count for gap_count, _ in totals.values())
+    if total_gap == 0:
+        print("Every track in scope already has full cue-point data — nothing to prep. Nice work!")
+        return 0
+
+    _print_prep_table(items, totals)
     return 0
 
 
@@ -873,6 +945,7 @@ async def run(
         deep=deep,
         debug=debug,
         mix_length=mix_length,
+        naming_seed=effective_seed,
     )
     if not all_concepts:
         print(report, file=sys.stderr)
@@ -888,6 +961,7 @@ async def run(
         allow_played=mode in ("all", "played"),
         genre=genre or "_default",
         risk=risk,
+        used_mix_names=mix_names or None,
     )
 
     # Bounded self-revision pass (#55). Runs when revision is enabled and there is
@@ -1112,6 +1186,8 @@ examples:
   mixlab --export-unplayed            export all unplayed tracks as Rekordbox XML + post to Discord
   mixlab --feedback                   list most recent run's concepts + feedback state (no LLM)
   mixlab --feedback --concept "Title" --verdict played --notes "great opener"  record concept feedback
+  mixlab --prep                       rank uncued tracks by cue-prep payoff (offline, no LLM)
+  mixlab --prep --genre house --top 10  scope to house genre, top 10 targets
 """,
     )
     parser.add_argument(
@@ -1333,6 +1409,18 @@ examples:
         metavar="TEXT",
         help="With --feedback --concept --verdict: optional free-text note stored alongside the verdict.",
     )
+    parser.add_argument(
+        "--prep",
+        action="store_true",
+        help="Rank uncued tracks by cue-prep payoff — offline, no API/LLM (#74).",
+    )
+    parser.add_argument(
+        "--top",
+        type=int,
+        default=20,
+        metavar="N",
+        help="With --prep: number of top targets to show (default 20).",
+    )
     args = parser.parse_args()
     _validate_range_args(
         min_bpm=args.min_bpm,
@@ -1343,6 +1431,9 @@ examples:
     debug = args.debug or bool(os.environ.get("MIXLAB_DEBUG_SCORE"))
     if args.feedback:
         sys.exit(run_feedback(args.concept, args.verdict, args.notes, _HISTORY_PATH))
+
+    if args.prep:
+        sys.exit(run_prep(args.genre, args.top))
 
     if args.genres:
         _show_cached_genres()
