@@ -2560,12 +2560,14 @@ async def revise_concepts(
         resolved_kinds = sorted(before_kinds - after_kinds) or sorted(before_kinds)
 
         # Regenerate this concept's prose section so it describes the revised order.
-        # Only attempted when the report splits cleanly into one section per concept
-        # (always true for the genre-mode "\n\n---\n\n" join; skipped defensively
-        # otherwise). Best-effort: a failure must never cost us the accepted repair.
+        # The genre-mode report is the concept sections joined by "\n\n---\n\n" with
+        # trailing sections appended after (SHORTFALL WARNINGS, "Main brain: ..."),
+        # so the first len(concepts) sections are the concept prose — splice by index.
+        # Skipped defensively when there are fewer sections than concepts. Best-effort:
+        # a failure must never cost us the accepted repair.
         fresh_section: str | None = None
         sections = report.split("\n\n---\n\n")
-        if len(sections) == len(concepts):
+        if len(sections) >= len(concepts):
             try:
                 fresh = await _call_stage2_report_single(revised, tracks_by_id, None, unplayed_ids, stage2_key)
                 fresh_section = _append_critique_to_report(

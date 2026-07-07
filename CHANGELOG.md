@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.3 — 2026-07-07
+
+- **Fix: v1.5.2's revised-concept prose regeneration never fired in production.** The genre-mode report always carries trailing sections after the concept prose (shortfall warnings, "Main brain"), so v1.5.2's exact-count guard never matched and every accepted revision silently fell back to the pre-revision disclaimer. The guard now only requires the concept sections to be present (they are always first), and the splice replaces by index. Tests mirror the real report shape so the trailer case is pinned.
+
+---
+
 ## v1.5.2 — 2026-07-07
 
 - **Revised concepts get regenerated prose.** When the self-revision pass (#55) accepts a repair, the concept's report section is now regenerated so the card's prose describes the shipped track list (previously the HTML card showed the revised table next to pre-revision prose). One extra report call per accepted revision; a regeneration failure keeps the repair and falls back to the old pre-revision disclaimer. Found via live run: a revised concept's prose still narrated a track that revision had swapped out.
