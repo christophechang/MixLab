@@ -993,6 +993,33 @@ def test_main_risk_medium_no_note_in_playlist_mode(
 
 
 # ---------------------------------------------------------------------------
+# main() — --resequence flag parsing (#61)
+# ---------------------------------------------------------------------------
+
+
+def test_main_resequence_defaults_false_and_threaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["resequence"] is False
+
+
+def test_main_resequence_flag_sets_kwarg_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--resequence"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["resequence"] is True
+
+
+# ---------------------------------------------------------------------------
 # main() — --intent works in playlist mode too (#54)
 # ---------------------------------------------------------------------------
 
