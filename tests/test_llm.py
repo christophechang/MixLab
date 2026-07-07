@@ -4708,9 +4708,13 @@ async def test_revise_concepts_happy_path_accepts_and_annotates(
         ]
     )
 
+    # Mirror the real genre-mode report shape: concept sections FIRST, then trailing
+    # sections (stage2_curate_and_report always appends "Main brain: ..."). The live
+    # v1.5.2 run regressed exactly here — an equality guard on section count never
+    # matched because of the trailer.
     concepts, report, final_warnings = await revise_concepts(
         [original],
-        "PROSE REPORT",
+        "PROSE REPORT\n\n---\n\nMain brain: test-model",
         warnings,
         [canvas],
         lib,
@@ -4725,8 +4729,64 @@ async def test_revise_concepts_happy_path_accepts_and_annotates(
     assert "prose regenerated to match" in report
     assert "FRESH PROSE FOR REVISED ORDER" in report
     assert "PROSE REPORT" not in report  # stale pre-revision section replaced
+    assert "Main brain: test-model" in report  # trailing section untouched
     assert not any("Camelot jump" in w for w in final_warnings)
     assert len(final_warnings) < len(warnings)
+
+
+@respx.mock
+async def test_revise_concepts_regen_splices_correct_section_with_trailers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With several concepts and trailing report sections, only the revised
+    concept's section is replaced — neighbours and trailers stay intact."""
+    from mixlab.llm import revise_concepts, validate_stage2_output
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    pool = [str(i) for i in range(1, 10)]
+    lib = _revision_lib({i: ("2A" if i == "3" else "8A") for i in pool})
+    canvas = _revision_canvas(pool)
+    flagged = MixConcept(title="Flagged", mood="m", track_ids=[str(i) for i in range(1, 9)])
+    clean = MixConcept(title="Clean", mood="m", track_ids=["1", "2", "4", "5", "6", "7", "8", "9"])
+    warnings = validate_stage2_output(
+        [flagged, clean], [canvas], lib, played_ids=set(), denylist_ids=set(), genre="house"
+    )
+
+    revision_payload = json.dumps(
+        [
+            {
+                "title": "Flagged",
+                "name_reason": "m",
+                "mood": "m",
+                "track_ids": ["1", "2", "4", "5", "6", "7", "8", "9"],
+                "transitions": [],
+            }
+        ]
+    )
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(revision_payload)),
+            Response(200, json=_anthropic_response("REGENERATED FLAGGED SECTION")),
+        ]
+    )
+
+    report_in = "FLAGGED SECTION\n\n---\n\nCLEAN SECTION\n\n---\n\nMain brain: test-model"
+    _concepts, report, _final = await revise_concepts(
+        [flagged, clean],
+        report_in,
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+
+    assert "REGENERATED FLAGGED SECTION" in report
+    assert "FLAGGED SECTION\n\n---" not in report  # index-0 section replaced
+    assert "CLEAN SECTION" in report  # neighbour untouched
+    assert "Main brain: test-model" in report  # trailer untouched
+    assert "prose regenerated to match" in report
 
 
 @respx.mock
@@ -4784,7 +4844,7 @@ async def test_revise_concepts_report_regen_failure_keeps_repair_with_disclaimer
 async def test_revise_concepts_section_mismatch_skips_regen_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the report doesn't split into one section per concept, no regen call is made."""
+    """When the report has fewer sections than concepts, no regen call is made."""
     from mixlab.llm import revise_concepts, validate_stage2_output
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
@@ -4810,7 +4870,8 @@ async def test_revise_concepts_section_mismatch_skips_regen_call(
     )
     route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(revision_payload)))
 
-    # Two concepts but a single-section report — splice impossible, regen skipped.
+    # Two concepts but a single-section report — fewer sections than concepts, so
+    # splicing is impossible and the regen call is skipped.
     _concepts, report, _final = await revise_concepts(
         [flagged, clean],
         "PROSE REPORT",
