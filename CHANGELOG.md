@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.7.0 — 2026-07-07
+
+- **Cue-Prep Assistant (epic #72).** `mixlab --prep` ranks every track with missing or partial cue data by expected payoff — how often concept history programs it, how harmonically central it is in its genre bucket, unplayed status, and gap severity — so cue-prep time in Rekordbox goes where booth sheets and blend scoring gain the most. Fully offline: no LLM, no API, no Discord. `--top N` and `--genre <standard label>` scope the table. Born from the Booth Sheet's scout notes (v1.6.0).
+- **Named tracks in validation warnings.** Bridge/wildcard warnings now say which track ("wildcard track Artist — Title (ID …) used without a justified transition") instead of a bare Rekordbox ID.
+
+---
+
 ## v1.6.0 — 2026-07-07
 
 - **Booth Sheet (epic #67, mock approved by owner).** Each concept card in the HTML report now carries a per-transition execution plan: clock position of the outgoing mix-out cue, pitch-fader percentage (tempo-relation aware), key move, bars available, a plan line in booth language with fallback and scout notes, colour-coded by blend headroom (relaxed/tight/hard). Fully deterministic — computed from cue points and beat grids already in the Rekordbox XML, zero LLM calls (#68 core module, #69 rendering). Scout notes double as a cue-prep to-do list.
