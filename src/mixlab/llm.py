@@ -2471,6 +2471,7 @@ async def revise_concepts(
     allow_played: bool,
     genre: str,
     risk: RiskTolerance = "medium",
+    unplayed_ids: set[str] | None = None,
 ) -> tuple[list[MixConcept], str, list[str]]:
     """One bounded self-revision pass (#55). Returns (possibly-updated concepts,
     possibly-updated report, final warnings).
@@ -2480,6 +2481,10 @@ async def revise_concepts(
     the concept's hard-finding count, appends a ``**Revised**`` annotation to the report
     for accepted repairs, and recomputes the warning list over the final concept set.
     Never a second round — hard cap of one call per concept per run.
+
+    Accepted repairs also regenerate the concept's prose report section so the prose
+    matches the revised track list (best-effort — a regeneration failure keeps the
+    pre-revision prose with a disclaimer rather than losing the repair).
     """
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
     if not stage2_key:
@@ -2553,10 +2558,43 @@ async def revise_concepts(
         before_kinds = _finding_kinds(hard)
         after_kinds = _finding_kinds(_hard_findings_for_concept(revised, revised_warnings))
         resolved_kinds = sorted(before_kinds - after_kinds) or sorted(before_kinds)
+
+        # Regenerate this concept's prose section so it describes the revised order.
+        # Only attempted when the report splits cleanly into one section per concept
+        # (always true for the genre-mode "\n\n---\n\n" join; skipped defensively
+        # otherwise). Best-effort: a failure must never cost us the accepted repair.
+        fresh_section: str | None = None
+        sections = report.split("\n\n---\n\n")
+        if len(sections) == len(concepts):
+            try:
+                fresh = await _call_stage2_report_single(revised, tracks_by_id, None, unplayed_ids, stage2_key)
+                fresh_section = _append_critique_to_report(
+                    _append_practicality_to_report(
+                        _append_runtime_to_report(
+                            _append_bold_moves_to_report(fresh, revised, canvases, tracks_by_id),
+                            revised,
+                            tracks_by_id,
+                        ),
+                        revised,
+                        tracks_by_id,
+                    ),
+                    revised,
+                )
+            except Exception as exc:
+                print(
+                    f"Revision: {original.title} — report regeneration failed ({exc}); keeping pre-revision prose",
+                    file=sys.stderr,
+                )
+
+        if fresh_section is not None:
+            sections[idx] = fresh_section
+            report = "\n\n---\n\n".join(sections)
+            prose_note = "prose regenerated to match"
+        else:
+            prose_note = "prose above reflects the pre-revision sequence; exported playlist uses the revised order"
         annotations.append(
             f"**Revised**: {original.title} — resolved {n_before - n_after} of {n_before} findings "
-            f"({', '.join(resolved_kinds)}); track list updated. "
-            f"(prose above reflects the pre-revision sequence; exported playlist uses the revised order)"
+            f"({', '.join(resolved_kinds)}); track list updated ({prose_note})."
         )
         print(
             f"Revision: {original.title} — accepted ({n_before - n_after}/{n_before} finding(s) resolved)",

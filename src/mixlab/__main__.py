@@ -906,6 +906,7 @@ async def run(
             allow_played=mode in ("all", "played"),
             genre=genre or "_default",
             risk=risk,
+            unplayed_ids=unplayed_ids_for_stage2,
         )
 
     # Deterministic sequencer pass (#61). Runs after revision so suggestions reflect the

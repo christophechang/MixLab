@@ -4700,7 +4700,13 @@ async def test_revise_concepts_happy_path_accepts_and_annotates(
             }
         ]
     )
-    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(revision_payload)))
+    # First call: the revision repair. Second call: the report-section regeneration.
+    route = respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(revision_payload)),
+            Response(200, json=_anthropic_response("FRESH PROSE FOR REVISED ORDER")),
+        ]
+    )
 
     concepts, report, final_warnings = await revise_concepts(
         [original],
@@ -4713,11 +4719,111 @@ async def test_revise_concepts_happy_path_accepts_and_annotates(
         genre="house",
     )
 
-    assert route.call_count == 1
+    assert route.call_count == 2
     assert concepts[0].track_ids == ["1", "2", "9", "4", "5", "6", "7", "8"]
     assert "**Revised**" in report
+    assert "prose regenerated to match" in report
+    assert "FRESH PROSE FOR REVISED ORDER" in report
+    assert "PROSE REPORT" not in report  # stale pre-revision section replaced
     assert not any("Camelot jump" in w for w in final_warnings)
     assert len(final_warnings) < len(warnings)
+
+
+@respx.mock
+async def test_revise_concepts_report_regen_failure_keeps_repair_with_disclaimer(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A report-regeneration failure must not cost us the accepted repair."""
+    from mixlab.llm import revise_concepts, validate_stage2_output
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    pool = [str(i) for i in range(1, 10)]
+    lib = _revision_lib({i: ("2A" if i == "3" else "8A") for i in pool})
+    canvas = _revision_canvas(pool)
+    original = MixConcept(title="Jump Fix", mood="steady", track_ids=[str(i) for i in range(1, 9)])
+    warnings = validate_stage2_output([original], [canvas], lib, played_ids=set(), denylist_ids=set(), genre="house")
+
+    revision_payload = json.dumps(
+        [
+            {
+                "title": "Jump Fix",
+                "name_reason": "steady",
+                "mood": "steady",
+                "track_ids": ["1", "2", "9", "4", "5", "6", "7", "8"],
+                "transitions": [],
+            }
+        ]
+    )
+    # 400 fails fast (no retry loop) — only 429/5xx are retried.
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(revision_payload)),
+            Response(400, json={"error": {"message": "bad request"}}),
+        ]
+    )
+
+    concepts, report, _final = await revise_concepts(
+        [original],
+        "PROSE REPORT",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+
+    assert concepts[0].track_ids == ["1", "2", "9", "4", "5", "6", "7", "8"]
+    assert "PROSE REPORT" in report  # pre-revision prose kept
+    assert "pre-revision sequence" in report  # disclaimer annotation
+    assert "report regeneration failed" in capsys.readouterr().err
+
+
+@respx.mock
+async def test_revise_concepts_section_mismatch_skips_regen_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the report doesn't split into one section per concept, no regen call is made."""
+    from mixlab.llm import revise_concepts, validate_stage2_output
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    pool = [str(i) for i in range(1, 10)]
+    lib = _revision_lib({i: ("2A" if i == "3" else "8A") for i in pool})
+    canvas = _revision_canvas(pool)
+    flagged = MixConcept(title="Flagged", mood="m", track_ids=[str(i) for i in range(1, 9)])
+    clean = MixConcept(title="Clean", mood="m", track_ids=["1", "2", "4", "5", "6", "7", "8", "9"])
+    warnings = validate_stage2_output(
+        [flagged, clean], [canvas], lib, played_ids=set(), denylist_ids=set(), genre="house"
+    )
+
+    revision_payload = json.dumps(
+        [
+            {
+                "title": "Flagged",
+                "name_reason": "m",
+                "mood": "m",
+                "track_ids": ["1", "2", "4", "5", "6", "7", "8", "9"],
+                "transitions": [],
+            }
+        ]
+    )
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(revision_payload)))
+
+    # Two concepts but a single-section report — splice impossible, regen skipped.
+    _concepts, report, _final = await revise_concepts(
+        [flagged, clean],
+        "PROSE REPORT",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+
+    assert route.call_count == 1  # revision only, no regeneration
+    assert "pre-revision sequence" in report
 
 
 @respx.mock
