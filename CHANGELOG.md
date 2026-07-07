@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.7.4 — 2026-07-07
+
+Two fixes from the first v1.7.3 live run — a strong run (zero exact name repeats against 27 forbidden names, lens character clearly visible) that exposed two subtler defects.
+
+- **History-echo warnings survived only on revision-free runs.** `revise_concepts`' final revalidation didn't receive the name-avoid list, so any run that revised a concept silently dropped every history-echo warning ('Heist at 4AM' vs 'Heist Recordings' went unflagged). The final revalidation now carries `used_mix_names`.
+- **Lens sampler could contradict the anchor-lift cap.** Three of the twelve naming lenses instruct drawing words from the pool's own titles/artists; sampling two or more forced the model to violate the one-anchor-lift-per-response rule (live run produced four anchor-lifted names). The sampler now picks at most one pool-drawing lens per run, and the lens block restates the cap.
+
+---
+
 ## v1.7.3 — 2026-07-07
 
 Two fixes from the first post-v1.7.2 live run, where four of six concept names were exact repeats of earlier same-day runs — the detection guard flagged every one, but the prompt-side avoidance was skated past.
