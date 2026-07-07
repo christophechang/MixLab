@@ -3356,6 +3356,14 @@ def _lib(ids: list[str], bpm: float = 174.0, key: str = "8A") -> dict[str, Track
     }
 
 
+def _lib_with_artist(ids: list[str], artist: str, bpm: float = 174.0, key: str = "8A") -> dict[str, Track]:
+    """Like ``_lib`` but every track shares the given artist (for anchor-lift fixtures)."""
+    return {
+        i: Track(track_id=i, artist=artist, title=f"Title_{i}", bpm=bpm, camelot_key=key, genre="Drum & Bass")
+        for i in ids
+    }
+
+
 def test_validate_stage2_output_passes_clean_concept() -> None:
     from mixlab.llm import validate_stage2_output
 
@@ -4017,6 +4025,189 @@ def test_generic_name_regex_classification(title: str, should_flag: bool) -> Non
         assert warning is not None, f"Expected '{title}' to be flagged as generic"
     else:
         assert warning is None, f"Expected '{title}' NOT to be flagged"
+
+
+# ---------------------------------------------------------------------------
+# Deterministic name-family guard (#75 part C) — warn-only drift detection for
+# repetitive concept-title patterns, within a run and against catalogue history.
+# ---------------------------------------------------------------------------
+
+
+def test_flag_name_families_history_echo_warns_on_shared_salient_word() -> None:
+    """'Fever Chart' vs used name 'Fever Latitude' shares the salient word 'fever'."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    canvas = _make_canvas(ids)
+    concept = MixConcept(title="Fever Chart", mood="dark", track_ids=ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set(), used_mix_names=["Fever Latitude"])
+    assert any(
+        "Fever Chart" in w and "Fever Latitude" in w and "'fever'" in w and "echoes existing mix name" in w
+        for w in warnings
+    )
+
+
+@pytest.mark.parametrize(
+    "title,used_names",
+    [
+        ("Night Drive", ["Night Static"]),  # only shared word is stopword "night"
+        ("Emo Bar", ["Emo Bar Live"]),  # only shared words are <4 chars ("emo", "bar")
+    ],
+)
+def test_flag_name_families_history_echo_silent_for_stopwords_and_short_words(
+    title: str, used_names: list[str]
+) -> None:
+    """Stopwords ("night"/"house"/etc.) and sub-4-char tokens never count as a shared salient word."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    canvas = _make_canvas(ids)
+    concept = MixConcept(title=title, mood="dark", track_ids=ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set(), used_mix_names=used_names)
+    assert not any("echoes existing mix name" in w for w in warnings)
+
+
+def test_flag_name_families_history_echo_absent_without_used_mix_names() -> None:
+    """No used_mix_names supplied (the default) — no echo warnings, even for a title that would otherwise match."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    canvas = _make_canvas(ids)
+    concept = MixConcept(title="Fever Chart", mood="dark", track_ids=ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+    assert not any("echoes existing mix name" in w for w in warnings)
+
+
+def test_flag_name_families_within_run_shared_word_names_both_titles() -> None:
+    """'Velvet Machinery' and 'Ame & The Machinery' in the same run share the word 'machinery'."""
+    from mixlab.llm import validate_stage2_output
+
+    ids_a = [f"A{i}" for i in range(1, 9)]
+    ids_b = [f"B{i}" for i in range(1, 9)]
+    lib = {**_lib(ids_a), **_lib(ids_b)}
+    canvas_a = _make_canvas(ids_a)
+    canvas_b = _make_canvas(ids_b)
+    concept_a = MixConcept(title="Velvet Machinery", mood="dark", track_ids=ids_a)
+    concept_b = MixConcept(title="Ame & The Machinery", mood="dark", track_ids=ids_b)
+    warnings = validate_stage2_output([concept_a, concept_b], [canvas_a, canvas_b], lib, set(), set())
+    assert any(
+        "Velvet Machinery" in w and "Ame & The Machinery" in w and "'machinery'" in w and "same name family" in w
+        for w in warnings
+    )
+
+
+def test_flag_name_families_ampersand_family_warns_when_two_titles_use_shape() -> None:
+    """Two '&'-shaped titles in one run trigger the ampersand-family warning; 'and' counts too."""
+    from mixlab.llm import validate_stage2_output
+
+    ids_a = [f"A{i}" for i in range(1, 9)]
+    ids_b = [f"B{i}" for i in range(1, 9)]
+    lib = {**_lib(ids_a), **_lib(ids_b)}
+    canvas_a = _make_canvas(ids_a)
+    canvas_b = _make_canvas(ids_b)
+    concept_a = MixConcept(title="Fire & Rain", mood="dark", track_ids=ids_a)
+    concept_b = MixConcept(title="Salt and Light", mood="dark", track_ids=ids_b)
+    warnings = validate_stage2_output([concept_a, concept_b], [canvas_a, canvas_b], lib, set(), set())
+    assert any("2 concept titles use the '[Word] & [Word]' shape" in w for w in warnings)
+
+
+def test_flag_name_families_ampersand_family_silent_for_single_occurrence() -> None:
+    """Only one '&'-shaped title in the run — no ampersand-family warning."""
+    from mixlab.llm import validate_stage2_output
+
+    ids_a = [f"A{i}" for i in range(1, 9)]
+    ids_b = [f"B{i}" for i in range(1, 9)]
+    lib = {**_lib(ids_a), **_lib(ids_b)}
+    canvas_a = _make_canvas(ids_a)
+    canvas_b = _make_canvas(ids_b)
+    concept_a = MixConcept(title="Fire & Rain", mood="dark", track_ids=ids_a)
+    concept_b = MixConcept(title="Warm Tundra", mood="dark", track_ids=ids_b)
+    warnings = validate_stage2_output([concept_a, concept_b], [canvas_a, canvas_b], lib, set(), set())
+    assert not any("[Word] & [Word]" in w for w in warnings)
+
+
+def test_flag_name_families_anchor_lift_warns_for_two_self_titled_concepts() -> None:
+    """Two concepts each titled from their own tracks' artist trip the anchor-lift cap and name both."""
+    from mixlab.llm import validate_stage2_output
+
+    ids_a = [f"A{i}" for i in range(1, 9)]
+    ids_b = [f"B{i}" for i in range(1, 9)]
+    lib = {**_lib_with_artist(ids_a, "Levon Vincent"), **_lib_with_artist(ids_b, "Objekt Crew")}
+    canvas_a = _make_canvas(ids_a)
+    canvas_b = _make_canvas(ids_b)
+    concept_a = MixConcept(title="Levon Vincent", mood="dark", track_ids=ids_a)
+    concept_b = MixConcept(title="Objekt Signals", mood="dark", track_ids=ids_b)
+    warnings = validate_stage2_output([concept_a, concept_b], [canvas_a, canvas_b], lib, set(), set())
+    assert any(
+        "Levon Vincent" in w and "Objekt Signals" in w and "at most one anchor-lift per run" in w for w in warnings
+    )
+
+
+def test_flag_name_families_anchor_lift_silent_for_single_occurrence() -> None:
+    """Exactly one anchor-lift in the run is fine — no warning."""
+    from mixlab.llm import validate_stage2_output
+
+    ids_a = [f"A{i}" for i in range(1, 9)]
+    ids_b = [f"B{i}" for i in range(1, 9)]
+    lib = {**_lib_with_artist(ids_a, "Levon Vincent"), **_lib(ids_b)}
+    canvas_a = _make_canvas(ids_a)
+    canvas_b = _make_canvas(ids_b)
+    concept_a = MixConcept(title="Levon Vincent", mood="dark", track_ids=ids_a)
+    concept_b = MixConcept(title="Interzone Redux", mood="dark", track_ids=ids_b)
+    warnings = validate_stage2_output([concept_a, concept_b], [canvas_a, canvas_b], lib, set(), set())
+    assert not any("anchor-lift per run" in w for w in warnings)
+
+
+def test_flag_name_families_no_new_warnings_without_used_mix_names_for_clean_run() -> None:
+    """Two unrelated, non-repetitive titles with no used_mix_names add no name-family warnings (regression guard)."""
+    from mixlab.llm import validate_stage2_output
+
+    ids_a = [f"A{i}" for i in range(1, 9)]
+    ids_b = [f"B{i}" for i in range(1, 9)]
+    lib = {**_lib(ids_a), **_lib(ids_b)}
+    canvas_a = _make_canvas(ids_a)
+    canvas_b = _make_canvas(ids_b)
+    concept_a = MixConcept(title="Interzone Redux", mood="dark", track_ids=ids_a)
+    concept_b = MixConcept(title="Salt Circuit", mood="dark", track_ids=ids_b)
+    warnings = validate_stage2_output([concept_a, concept_b], [canvas_a, canvas_b], lib, set(), set())
+    name_family_phrases = ("echoes existing mix name", "same name family", "[Word] & [Word]", "anchor-lift per run")
+    assert not any(phrase in w for w in warnings for phrase in name_family_phrases)
+
+
+def test_flag_name_families_warnings_never_contain_hard_finding_markers() -> None:
+    """None of the four name-family warning shapes may contain a _HARD_FINDING_MARKERS substring —
+    they are warn-only and must never trigger the bounded self-revision pass (#55)."""
+    from mixlab.llm import (
+        _HARD_FINDING_MARKERS,
+        _ampersand_family_warning,
+        _anchor_lift_warning,
+        _history_echo_warnings,
+        _within_run_shared_word_warnings,
+    )
+
+    ids_a = [f"A{i}" for i in range(1, 9)]
+    ids_b = [f"B{i}" for i in range(1, 9)]
+    concept_a = MixConcept(title="Fever Chart", mood="dark", track_ids=ids_a)
+    concept_b = MixConcept(title="Fever Static & Chart", mood="dark", track_ids=ids_b)
+    lib = {**_lib_with_artist(ids_a, "Fever Crew"), **_lib_with_artist(ids_b, "Static Machine")}
+
+    generated: list[str] = [
+        *_history_echo_warnings([concept_a], ["Fever Latitude"]),
+        *_within_run_shared_word_warnings([concept_a, concept_b]),
+    ]
+    ampersand_warning = _ampersand_family_warning(
+        [concept_a, concept_b, MixConcept(title="Salt and Pepper", mood="dark", track_ids=[])]
+    )
+    if ampersand_warning is not None:
+        generated.append(ampersand_warning)
+    anchor_warning = _anchor_lift_warning([concept_a, concept_b], lib)
+    if anchor_warning is not None:
+        generated.append(anchor_warning)
+
+    assert len(generated) == 4, f"expected all four checks to fire for this fixture, got: {generated}"
+    for warning in generated:
+        for marker in _HARD_FINDING_MARKERS:
+            assert marker not in warning, f"warning {warning!r} unexpectedly contains hard-finding marker {marker!r}"
 
 
 @pytest.mark.parametrize(

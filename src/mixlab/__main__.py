@@ -961,6 +961,7 @@ async def run(
         allow_played=mode in ("all", "played"),
         genre=genre or "_default",
         risk=risk,
+        used_mix_names=mix_names or None,
     )
 
     # Bounded self-revision pass (#55). Runs when revision is enabled and there is

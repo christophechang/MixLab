@@ -942,6 +942,121 @@ def _generic_name_warning(concept: MixConcept) -> str | None:
     return None
 
 
+# Deterministic name-family guard (#75 part C). Warn-only: none of these strings may
+# contain a substring from _HARD_FINDING_MARKERS — they are advisory, not hard findings,
+# and must never trigger the bounded self-revision pass.
+_NAME_FAMILY_STOPWORDS = frozenset({"with", "from", "into", "over", "under", "this", "that", "night", "house"})
+_SALIENT_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+_AMPERSAND_FAMILY_RE = re.compile(r"\s&\s|\band\b", re.IGNORECASE)
+
+
+def _salient_words(text: str) -> list[str]:
+    """Casefolded alphanumeric tokens of length >= 4, minus scene-generic stopwords.
+
+    Order-preserving and de-duplicated so callers can deterministically pick "the
+    first shared word" by title word order.
+    """
+    seen: set[str] = set()
+    words: list[str] = []
+    for match in _SALIENT_WORD_RE.findall(text.casefold()):
+        if len(match) >= 4 and match not in _NAME_FAMILY_STOPWORDS and match not in seen:
+            seen.add(match)
+            words.append(match)
+    return words
+
+
+def _history_echo_warnings(concepts: list[MixConcept], used_mix_names: list[str]) -> list[str]:
+    """Warn when a concept title shares a salient word with a name already in the catalogue."""
+    if not used_mix_names:
+        return []
+    existing: list[tuple[str, set[str]]] = [(name, set(_salient_words(name))) for name in used_mix_names]
+    warnings: list[str] = []
+    for concept in concepts:
+        concept_words = _salient_words(concept.title)
+        if not concept_words:
+            continue
+        for existing_name, existing_words in existing:
+            shared_word = next((word for word in concept_words if word in existing_words), None)
+            if shared_word is not None:
+                warnings.append(
+                    f"Concept title '{concept.title}' echoes existing mix name '{existing_name}' "
+                    f"(shared word '{shared_word}') — consider renaming"
+                )
+                break
+    return warnings
+
+
+def _within_run_shared_word_warnings(concepts: list[MixConcept]) -> list[str]:
+    """Warn once per pair of concept titles in this run that share a salient word."""
+    word_lists = [_salient_words(c.title) for c in concepts]
+    warnings: list[str] = []
+    for i in range(len(concepts)):
+        words_i = word_lists[i]
+        for j in range(i + 1, len(concepts)):
+            words_j_set = set(word_lists[j])
+            shared_word = next((word for word in words_i if word in words_j_set), None)
+            if shared_word is not None:
+                warnings.append(
+                    f"Concept titles '{concepts[i].title}' and '{concepts[j].title}' share the word "
+                    f"'{shared_word}' — same name family in one run"
+                )
+    return warnings
+
+
+def _ampersand_family_warning(concepts: list[MixConcept]) -> str | None:
+    """Warn when more than one concept title in the run uses a '[Word] & [Word]' shape."""
+    count = sum(1 for c in concepts if _AMPERSAND_FAMILY_RE.search(c.title))
+    if count > 1:
+        return f"{count} concept titles use the '[Word] & [Word]' shape in one run — vary the naming pattern"
+    return None
+
+
+def _anchor_lift_warning(concepts: list[MixConcept], tracks_by_id: dict[str, Track]) -> str | None:
+    """Warn when more than one concept title is lifted from its own tracks' title/artist/label."""
+    lifted_titles: list[str] = []
+    for concept in concepts:
+        concept_words = set(_salient_words(concept.title))
+        if not concept_words:
+            continue
+        track_words: set[str] = set()
+        for tid in concept.track_ids:
+            track = tracks_by_id.get(tid)
+            if track is None:
+                continue
+            track_words.update(_salient_words(track.title))
+            track_words.update(_salient_words(track.artist))
+            track_words.update(_salient_words(track.label))
+        if concept_words & track_words:
+            lifted_titles.append(concept.title)
+    if len(lifted_titles) > 1:
+        titles_str = ", ".join(f"'{title}'" for title in lifted_titles)
+        return (
+            f"{len(lifted_titles)} concept titles are lifted from their own track lists "
+            f"({titles_str}) — at most one anchor-lift per run"
+        )
+    return None
+
+
+def _flag_name_families(
+    concepts: list[MixConcept],
+    tracks_by_id: dict[str, Track],
+    used_mix_names: list[str] | None,
+) -> list[str]:
+    """Deterministic name-family guard (#75 part C) — warn-only drift detection for
+    repetitive concept-title patterns, within this run and against catalogue history.
+    """
+    warnings: list[str] = []
+    warnings.extend(_history_echo_warnings(concepts, used_mix_names or []))
+    warnings.extend(_within_run_shared_word_warnings(concepts))
+    ampersand_warning = _ampersand_family_warning(concepts)
+    if ampersand_warning is not None:
+        warnings.append(ampersand_warning)
+    anchor_warning = _anchor_lift_warning(concepts, tracks_by_id)
+    if anchor_warning is not None:
+        warnings.append(anchor_warning)
+    return warnings
+
+
 def _cross_concept_distinctiveness_warnings(concepts: list[MixConcept]) -> list[str]:
     """Warn when two concepts share >50% of tracks (against the prompt's distinctiveness rule)."""
     warnings: list[str] = []
@@ -992,8 +1107,16 @@ def validate_stage2_output(
     allow_played: bool = False,
     genre: str = "_default",
     risk: RiskTolerance = "medium",
+    *,
+    used_mix_names: list[str] | None = None,
 ) -> list[str]:
-    """Warn-only post-Stage-2 validation. Returns a list of warning strings (never raises)."""
+    """Warn-only post-Stage-2 validation. Returns a list of warning strings (never raises).
+
+    ``used_mix_names`` (#75 part C) enables the history-echo name-family check against
+    catalogue mix names already in use. Callers that re-validate purely for hard-finding
+    counting (the bounded self-revision path) should omit it — name warnings there would
+    be noise on top of the same concept re-checked mid-repair.
+    """
     from collections import Counter
 
     warnings: list[str] = []
@@ -1104,6 +1227,9 @@ def validate_stage2_output(
     # Cross-concept distinctiveness — runs after per-concept checks so the warning surfaces
     # alongside the per-concept ones, not as a separate report section.
     warnings.extend(_cross_concept_distinctiveness_warnings(concepts))
+
+    # Deterministic name-family guard (#75 part C) — warn-only, never a hard finding.
+    warnings.extend(_flag_name_families(concepts, tracks_by_id, used_mix_names))
 
     return warnings
 
