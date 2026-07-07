@@ -3046,6 +3046,122 @@ async def test_stage2_curate_naming_seed_injects_lenses_genre_mode_only(
     assert "NAMING LENSES for this run" in system
 
 
+@respx.mock
+async def test_reroll_colliding_titles_renames_exact_collision() -> None:
+    """Live finding: prompt pressure alone cannot stop exact repeats — the re-roll
+    pass renames them mechanically."""
+    from mixlab.llm import _reroll_colliding_titles
+
+    respx.post(_ANTHROPIC_URL).mock(
+        return_value=Response(
+            200,
+            json=_anthropic_response(json.dumps([{"old_title": "Ladbroke Spine", "new_title": "Grove Pressure"}])),
+        )
+    )
+    colliding = MixConcept(title="Ladbroke Spine", mood="m", track_ids=["1"], name_reason="t")
+    clean = MixConcept(title="Fresh Name", mood="m", track_ids=["2"], name_reason="t")
+
+    concepts, notes = await _reroll_colliding_titles(
+        [colliding, clean], ["Ladbroke Spine", "Kaoz to Ladbroke"], "test-key"
+    )
+
+    assert concepts[0].title == "Grove Pressure"
+    assert concepts[1].title == "Fresh Name"
+    assert len(notes) == 1
+    assert "'Ladbroke Spine' → 'Grove Pressure'" in notes[0]
+
+
+@respx.mock
+async def test_reroll_colliding_titles_no_collision_makes_no_call() -> None:
+    from mixlab.llm import _reroll_colliding_titles
+
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response("[]")))
+    concepts, notes = await _reroll_colliding_titles(
+        [MixConcept(title="Fresh Name", mood="m", track_ids=["1"])], ["Ladbroke Spine"], "test-key"
+    )
+    assert route.call_count == 0
+    assert concepts[0].title == "Fresh Name"
+    assert notes == []
+
+
+@respx.mock
+async def test_reroll_colliding_titles_replacement_still_colliding_keeps_original() -> None:
+    from mixlab.llm import _reroll_colliding_titles
+
+    # Replacement is itself in the forbidden list — must be rejected.
+    respx.post(_ANTHROPIC_URL).mock(
+        return_value=Response(
+            200,
+            json=_anthropic_response(json.dumps([{"old_title": "Ladbroke Spine", "new_title": "Kaoz to Ladbroke"}])),
+        )
+    )
+    concepts, notes = await _reroll_colliding_titles(
+        [MixConcept(title="Ladbroke Spine", mood="m", track_ids=["1"])],
+        ["Ladbroke Spine", "Kaoz to Ladbroke"],
+        "test-key",
+    )
+    assert concepts[0].title == "Ladbroke Spine"  # kept; echo warning will flag it
+    assert notes == []
+
+
+@respx.mock
+async def test_reroll_colliding_titles_api_failure_keeps_titles(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mixlab.llm import _reroll_colliding_titles
+
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(400, json={"error": {"message": "bad"}}))
+    concepts, notes = await _reroll_colliding_titles(
+        [MixConcept(title="Ladbroke Spine", mood="m", track_ids=["1"])], ["Ladbroke Spine"], "test-key"
+    )
+    assert concepts[0].title == "Ladbroke Spine"
+    assert notes == []
+    assert "Title re-roll failed" in capsys.readouterr().err
+
+
+@respx.mock
+async def test_stage2_curate_reroll_wired_and_note_in_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end wiring: colliding selection title gets renamed before the report
+    pass (prose uses the new title) and the run note lands in a trailing section."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    selection_payload = json.dumps(
+        [
+            {
+                "title": "Ladbroke Spine",
+                "name_reason": "t",
+                "mood": "m",
+                "track_ids": ["1", "2", "3", "4"],
+                "transitions": [],
+            }
+        ]
+    )
+    rename_payload = json.dumps([{"old_title": "Ladbroke Spine", "new_title": "Grove Pressure"}])
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(selection_payload)),
+            Response(200, json=_anthropic_response(rename_payload)),
+            Response(200, json=_anthropic_response("prose report")),
+        ]
+    )
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=124.0, camelot_key="6A", genre="House")
+        for i in range(1, 5)
+    }
+
+    concepts, report = await stage2_curate_and_report(
+        [MixConcept(title="pool", mood="m", track_ids=["1", "2", "3", "4"])],
+        tracks_by_id,
+        used_mix_names=["Ladbroke Spine"],
+    )
+
+    assert concepts[0].title == "Grove Pressure"
+    assert "**Renamed**: 'Ladbroke Spine' → 'Grove Pressure'" in report
+
+
 def test_forbidden_names_block_lists_names_with_discard_instruction() -> None:
     """Live finding: the old mid-sentence avoid-list injection was skated past —
     a run reproduced four already-used titles verbatim. The replacement is a hard

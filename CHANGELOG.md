@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.7.5 — 2026-07-07
+
+- **Title re-roll (#75).** Prompt pressure alone cannot stop exact title repeats — the v1.7.4 live run still reproduced two forbidden titles verbatim ('Ladbroke Spine', 'Rej & The Room') for the same canvases. Exact collisions (casefolded match against the avoid list) now trigger one bounded rename-only LLM call for just the colliding concepts, before the report pass so prose uses the final titles. Replacements that fail, collide with the avoid list, or duplicate another title are rejected — the original stays and the echo warning stands. Accepted renames appear in run notes ("**Renamed**: 'old' → 'new'").
+
+---
+
 ## v1.7.4 — 2026-07-07
 
 Two fixes from the first v1.7.3 live run — a strong run (zero exact name repeats against 27 forbidden names, lens character clearly visible) that exposed two subtler defects.
