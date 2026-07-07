@@ -1182,6 +1182,8 @@ custom genres (merge multiple genres into one cross-genre pool):
   140   breakbeat + uk_bass + uk_garage   130–140 BPM hard filter
   4x4   house + electronica + disco +     no BPM filter (Stage 1 groups by BPM)
         progressive + techno
+  traverse  all standard genres           no BPM filter; unlocks cross-genre
+                                          journey concepts via ratio bridges
 
   Custom genre pools are partitioned deterministically by BPM/key/era (see docs/architecture/deterministic-stage1.md).
 
@@ -1217,7 +1219,7 @@ examples:
         default=None,
         metavar="LABEL",
         help="Genre to target. Standard labels: house, drum_and_bass, techno, etc. "
-        "Custom labels: 170, 140, 4x4 (cross-genre pools). "
+        "Custom labels: 170, 140, 4x4, traverse (cross-genre pools). "
         "Also accepts a Rekordbox genre tag directly, e.g. 'Deep House'. "
         "When combined with --playlist, constrains added library tracks to that genre scope.",
     )
