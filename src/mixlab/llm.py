@@ -807,15 +807,43 @@ _NAMING_LENSES: tuple[str, ...] = (
 )
 
 
+# Lenses that instruct drawing words from the pool's own titles/artists. At most one
+# may be sampled per run — two or more would force the model to violate the
+# one-anchor-lift-per-response cap to follow its lens instructions (live finding:
+# a run produced four anchor-lifted names).
+_POOL_DRAWING_LENSES: frozenset[str] = frozenset(
+    # " the pool " (spaces) matches the three lift-from-pool lenses while excluding
+    # the era-slang lens's "the pool's dominant production era".
+    lens
+    for lens in _NAMING_LENSES
+    if " the pool " in lens
+)
+assert len(_POOL_DRAWING_LENSES) == 3, "pool-drawing lens tagging drifted — update the predicate with the bank"
+
+
 def _naming_lenses_block(seed: int) -> str:
-    """Three seed-rotated naming techniques, formatted for prompt injection (#75)."""
+    """Three seed-rotated naming techniques, formatted for prompt injection (#75).
+
+    At most one pool-drawing lens per sample, so the lens instructions never
+    contradict the anchor-lift cap in the naming rules.
+    """
     rng = random.Random(seed)
-    picks = rng.sample(list(_NAMING_LENSES), 3)
+    pool_lenses = [lens for lens in _NAMING_LENSES if lens in _POOL_DRAWING_LENSES]
+    external = [lens for lens in _NAMING_LENSES if lens not in _POOL_DRAWING_LENSES]
+    # Include one pool-drawing lens with probability proportional to its share of the
+    # bank, preserving overall lens variety while enforcing the cap.
+    if rng.random() < len(pool_lenses) / len(_NAMING_LENSES):
+        picks = [rng.choice(pool_lenses), *rng.sample(external, 2)]
+        rng.shuffle(picks)
+    else:
+        picks = rng.sample(external, 3)
     lines = "\n".join(f"- {lens}" for lens in picks)
     return (
         "\n\nNAMING LENSES for this run — use each of these techniques for exactly one "
         "concept name in this response; name any remaining concepts with distinct "
-        "techniques of your own:\n" + lines
+        "techniques of your own. At most ONE name in the whole response may lift words "
+        "from its own track list; every other name must build from material outside "
+        "the pool:\n" + lines
     )
 
 
@@ -2655,6 +2683,7 @@ async def revise_concepts(
     genre: str,
     risk: RiskTolerance = "medium",
     unplayed_ids: set[str] | None = None,
+    used_mix_names: list[str] | None = None,
 ) -> tuple[list[MixConcept], str, list[str]]:
     """One bounded self-revision pass (#55). Returns (possibly-updated concepts,
     possibly-updated report, final warnings).
@@ -2798,6 +2827,11 @@ async def revise_concepts(
         allow_played=allow_played,
         genre=genre,
         risk=risk,
+        # Thread the name-avoid list into the FINAL revalidation only — without it,
+        # any run that revises a concept silently drops every history-echo warning
+        # (live finding). The per-repair improvement checks above stay without it:
+        # they only count hard findings, and name warnings are warn-only.
+        used_mix_names=used_mix_names,
     )
     return revised_concepts, report, final_warnings
 
