@@ -8,6 +8,22 @@ from pydantic import BaseModel, Field
 TrackMode = Literal["unplayed", "all", "played"]
 
 
+class GridAnchor(BaseModel):
+    inizio: float  # seconds
+    bpm: float
+    metro: str = "4/4"
+    battito: int = 1
+
+
+class MixPoints(BaseModel):
+    mix_in_secs: float
+    mix_out_secs: float | None = None
+    intro_bars: float | None = None  # bars from 0:00 to mix-in (grid required)
+    outro_bars: float | None = None  # bars from mix-out to track end (grid + duration required)
+    loops: list[tuple[float, float]] = Field(default_factory=list)
+    cue_count: int = 0
+
+
 class Track(BaseModel):
     track_id: str
     artist: str
@@ -27,6 +43,8 @@ class Track(BaseModel):
     duration_secs: int | None = None
     date_added: str = ""
     rating: int | None = None
+    grid: list[GridAnchor] = Field(default_factory=list)
+    mix_points: MixPoints | None = None
 
 
 class PlayedTrack(BaseModel):

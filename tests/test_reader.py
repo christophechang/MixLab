@@ -6,8 +6,8 @@ from typing import Literal
 
 import pytest
 
-from mixlab.models import Track
-from mixlab.reader import apply_bpm_corrections, parse_collection, parse_playlists
+from mixlab.models import GridAnchor, Track
+from mixlab.reader import _bars_between, apply_bpm_corrections, derive_mix_points, parse_collection, parse_playlists
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -516,3 +516,199 @@ def test_parse_playlists_duplicate_names_in_different_folders_are_distinct_keys(
     playlists = parse_playlists(xml_path)
     assert playlists["Sets/Warm Up"] == ["2"]
     assert playlists["Backups/Warm Up"] == ["3"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — grid + mix points (H3 / #41)
+# ---------------------------------------------------------------------------
+
+_GRID_CUE_XML = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <DJ_PLAYLISTS Version="1.0.0">
+      <COLLECTION Entries="8">
+        <TRACK TrackID="30" Name="Fully Prepped" Artist="Artist A" AverageBpm="174.00" Tonality="8A"
+               Genre="Drum &amp; Bass" TotalTime="330">
+          <TEMPO Inizio="0.196" Bpm="174.00" Metro="4/4" Battito="1"/>
+          <POSITION_MARK Name="" Type="0" Start="43.2" Num="0"/>
+          <POSITION_MARK Name="" Type="0" Start="290" Num="1"/>
+        </TRACK>
+        <TRACK TrackID="31" Name="Single Cue" Artist="Artist B" AverageBpm="128.00" Tonality="9A"
+               Genre="House" TotalTime="300">
+          <TEMPO Inizio="0.0" Bpm="128.00" Metro="4/4" Battito="1"/>
+          <POSITION_MARK Name="" Type="0" Start="50.0" Num="0"/>
+        </TRACK>
+        <TRACK TrackID="32" Name="Last Cue Front Half" Artist="Artist C" AverageBpm="140.00" Tonality="10A"
+               Genre="Techno" TotalTime="250">
+          <POSITION_MARK Name="" Type="0" Start="30.0" Num="0"/>
+          <POSITION_MARK Name="" Type="0" Start="100.0" Num="1"/>
+        </TRACK>
+        <TRACK TrackID="33" Name="No Duration" Artist="Artist D" AverageBpm="132.00" Tonality="4B"
+               Genre="UK Garage">
+          <POSITION_MARK Name="" Type="0" Start="30.0" Num="0"/>
+          <POSITION_MARK Name="" Type="0" Start="200.0" Num="1"/>
+        </TRACK>
+        <TRACK TrackID="34" Name="Cueless" Artist="Artist E" AverageBpm="126.00" Tonality="7A"
+               Genre="House" TotalTime="200"/>
+        <TRACK TrackID="35" Name="Marks No Grid" Artist="Artist F" AverageBpm="122.00" Tonality="5A"
+               Genre="House" TotalTime="200">
+          <POSITION_MARK Name="" Type="0" Start="20.0" Num="0"/>
+          <POSITION_MARK Name="" Type="0" Start="150.0" Num="1"/>
+        </TRACK>
+        <TRACK TrackID="36" Name="Has Loop" Artist="Artist G" AverageBpm="140.00" Tonality="6A"
+               Genre="Techno" TotalTime="200">
+          <POSITION_MARK Name="" Type="0" Start="5.0" Num="0"/>
+          <POSITION_MARK Name="" Type="4" Start="150.0" End="170.0" Num="-1"/>
+        </TRACK>
+        <TRACK TrackID="37" Name="Multi Anchor Grid" Artist="Artist H" AverageBpm="120.00" Tonality="3A"
+               Genre="House" TotalTime="400">
+          <TEMPO Inizio="0.0" Bpm="120.00" Metro="4/4" Battito="1"/>
+          <TEMPO Inizio="60.0" Bpm="180.00" Metro="4/4" Battito="1"/>
+          <POSITION_MARK Name="" Type="0" Start="90.0" Num="0"/>
+        </TRACK>
+      </COLLECTION>
+    </DJ_PLAYLISTS>
+""")
+
+
+def test_parse_collection_fully_prepped_track_gets_mix_in_and_mix_out(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _GRID_CUE_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    mp = by_id["30"].mix_points
+    assert mp is not None
+    assert mp.mix_in_secs == 43.2
+    assert mp.mix_out_secs == 290
+    assert mp.intro_bars == 31.3
+    assert mp.outro_bars == 29.0
+    assert mp.cue_count == 2
+    assert mp.loops == []
+
+
+def test_parse_collection_fully_prepped_track_has_grid_anchor(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _GRID_CUE_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    grid = by_id["30"].grid
+    assert len(grid) == 1
+    assert grid[0].inizio == 0.196
+    assert grid[0].bpm == 174.0
+    assert grid[0].metro == "4/4"
+    assert grid[0].battito == 1
+
+
+def test_parse_collection_single_cue_track_has_no_mix_out(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _GRID_CUE_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    mp = by_id["31"].mix_points
+    assert mp is not None
+    assert mp.mix_in_secs == 50.0
+    assert mp.mix_out_secs is None
+    assert mp.outro_bars is None
+    assert mp.intro_bars == 26.7
+    assert mp.cue_count == 1
+
+
+def test_parse_collection_last_cue_in_front_half_has_no_mix_out(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _GRID_CUE_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    mp = by_id["32"].mix_points
+    assert mp is not None
+    assert mp.mix_in_secs == 30.0
+    assert mp.mix_out_secs is None
+    assert mp.cue_count == 2
+
+
+def test_parse_collection_no_duration_has_no_mix_out(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _GRID_CUE_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    track = by_id["33"]
+    assert track.duration_secs is None
+    mp = track.mix_points
+    assert mp is not None
+    assert mp.mix_in_secs == 30.0
+    assert mp.mix_out_secs is None
+
+
+def test_parse_collection_cueless_track_has_no_mix_points(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _GRID_CUE_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    track = by_id["34"]
+    assert track.mix_points is None
+    assert track.grid == []
+
+
+def test_parse_collection_marks_without_grid_has_secs_but_no_bars(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _GRID_CUE_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    track = by_id["35"]
+    assert track.grid == []
+    mp = track.mix_points
+    assert mp is not None
+    assert mp.mix_in_secs == 20.0
+    assert mp.mix_out_secs == 150.0
+    assert mp.intro_bars is None
+    assert mp.outro_bars is None
+
+
+def test_parse_collection_loop_mark_counts_as_mark_and_is_recorded(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _GRID_CUE_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    mp = by_id["36"].mix_points
+    assert mp is not None
+    assert mp.cue_count == 2
+    assert mp.loops == [(150.0, 170.0)]
+    assert mp.mix_in_secs == 5.0
+    assert mp.mix_out_secs == 150.0
+
+
+def test_parse_collection_multi_anchor_grid_computes_piecewise_intro_bars(tmp_path: Path) -> None:
+    xml_path = _write_xml(tmp_path, _GRID_CUE_XML)
+    by_id = {t.track_id: t for t in parse_collection(xml_path)}
+    track = by_id["37"]
+    assert len(track.grid) == 2
+    mp = track.mix_points
+    assert mp is not None
+    assert mp.mix_in_secs == 90.0
+    assert mp.intro_bars == 52.5
+
+
+# ---------------------------------------------------------------------------
+# _bars_between / derive_mix_points unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_bars_between_empty_grid_returns_none() -> None:
+    assert _bars_between(0.0, 10.0, []) is None
+
+
+def test_bars_between_end_before_start_returns_none() -> None:
+    grid = [GridAnchor(inizio=0.0, bpm=120.0)]
+    assert _bars_between(10.0, 5.0, grid) is None
+
+
+def test_bars_between_single_anchor_four_four() -> None:
+    grid = [GridAnchor(inizio=0.0, bpm=120.0, metro="4/4")]
+    assert _bars_between(0.0, 8.0, grid) == 4.0
+
+
+def test_bars_between_metro_three_four_uses_numerator() -> None:
+    grid = [GridAnchor(inizio=0.0, bpm=120.0, metro="3/4")]
+    assert _bars_between(0.0, 3.0, grid) == 2.0
+
+
+def test_bars_between_multi_anchor_piecewise_integration() -> None:
+    grid = [
+        GridAnchor(inizio=0.0, bpm=120.0),
+        GridAnchor(inizio=60.0, bpm=180.0),
+    ]
+    assert _bars_between(0.0, 90.0, grid) == 52.5
+
+
+def test_derive_mix_points_no_marks_returns_none() -> None:
+    assert derive_mix_points([], [], None) is None
+
+
+def test_derive_mix_points_single_mark_mix_out_none() -> None:
+    mp = derive_mix_points([(10.0, None)], [], 100)
+    assert mp is not None
+    assert mp.mix_in_secs == 10.0
+    assert mp.mix_out_secs is None
+    assert mp.cue_count == 1
