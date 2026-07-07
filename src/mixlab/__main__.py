@@ -34,10 +34,12 @@ from mixlab.config import CUSTOM_GENRES, GENRE_MAP, IGNORED_GENRES
 from mixlab.directions import generate_directions
 from mixlab.discord_client import send_report
 from mixlab.history import ConceptHistory, ConceptRecord, HistoryEntry, append_run, load_history, save_history
+from mixlab.html_report import render_html_report, report_filename
 from mixlab.llm import (
     _parse_user_intent,  # noqa: PLC2701 — reused here for playlist-mode risk override (#54)
     _qualifies_for_revision,  # noqa: PLC2701 — reused for the revision-gate decision (#55)
     make_cascade_state,
+    resequence_suggestions,
     revise_concepts,
     stage0_intent_brief,
     stage2_curate_and_report,
@@ -65,6 +67,21 @@ _FEEDBACK_VERDICTS = ("played", "played_modified", "rejected", "unused")
 
 def _build_tracks_by_id(tracks: list[Track]) -> dict[str, Track]:
     return {t.track_id: t for t in tracks}
+
+
+def _write_html_report(html: str, genre: str | None, playlist_name: str | None) -> Path:
+    """Write the standalone HTML report to disk and return its path (#45).
+
+    Directory defaults to ``output/reports`` and can be overridden with
+    ``MIXLAB_REPORT_DIR``. The filename embeds the genre/playlist slug and today's date.
+    """
+    report_dir = Path(os.environ.get("MIXLAB_REPORT_DIR", "output/reports"))
+    report_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.date.today().isoformat()
+    path = report_dir / report_filename(genre, playlist_name, today)
+    path.write_text(html, encoding="utf-8")
+    print(f"HTML report: {path}")
+    return path
 
 
 def _title_case_label(label: str) -> str:
@@ -523,13 +540,26 @@ async def run_playlist_mode(
         if out_path is not None:
             print(f"Exported: {out_path}")
 
+    # Standalone HTML report (#45) — playlist mode has no validation pass and no crate counts.
+    html = render_html_report(
+        all_concepts,
+        tracks_by_id,
+        report_text=report,
+        report_context=report_context,
+        validation_warnings=[],
+        counts=None,
+        generated_at=today,
+    )
+    html_path = _write_html_report(html, genre, playlist_name)
+    attachments: list[tuple[str, bytes]] = [*xml_attachments, (html_path.name, html.encode("utf-8"))]
+
     await send_report(
         report,
         [all_concepts[0]],
         [],
         tracks_by_id,
         counts={},
-        attachments=xml_attachments,
+        attachments=attachments,
         show_unplayed=False,
         report_context=report_context,
         filter_desc=_build_filter_desc(min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year),
@@ -599,6 +629,7 @@ async def run(
     directions: str = "mixed",
     no_revise: bool = False,
     risk: RiskTolerance = "medium",
+    resequence: bool = False,
 ) -> None:
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
@@ -877,6 +908,15 @@ async def run(
             risk=risk,
         )
 
+    # Deterministic sequencer pass (#61). Runs after revision so suggestions reflect the
+    # final track lists. Suggest-only by default; --resequence applies the swaps.
+    all_concepts, resequence_notes = resequence_suggestions(all_concepts, tracks_by_id, apply=resequence)
+    if resequence_notes:
+        print("\n🎚 Sequencer:")
+        for note in resequence_notes:
+            print(f"  {note}")
+        report += "\n\n**Sequencer**\n" + "\n".join(f"- {note}" for note in resequence_notes)
+
     if validation_warnings:
         print("\n⚠ Validation Notes:")
         for w in validation_warnings:
@@ -931,6 +971,19 @@ async def run(
         if out_path is not None:
             print(f"Exported: {out_path}")
 
+    # 8b. Standalone HTML report (#45) — self-contained artifact written to disk and attached.
+    html = render_html_report(
+        all_concepts,
+        tracks_by_id,
+        report_text=report,
+        report_context=report_context,
+        validation_warnings=validation_warnings,
+        counts=counts,
+        generated_at=today,
+    )
+    html_path = _write_html_report(html, genre, None)
+    attachments: list[tuple[str, bytes]] = [*xml_attachments, (html_path.name, html.encode("utf-8"))]
+
     # 9. Discord delivery.
     filtered_outliers = [t for t in outliers if t.genre not in IGNORED_GENRES]
     await send_report(
@@ -939,7 +992,7 @@ async def run(
         filtered_outliers,
         tracks_by_id,
         counts=counts,
-        attachments=xml_attachments,
+        attachments=attachments,
         show_unplayed=used_catalog_api,
         report_context=report_context,
         excluded_count=denylist_excluded,
@@ -1049,6 +1102,7 @@ examples:
   mixlab --genre house --intent "warmup, melodic, outdoor afternoon"  creative direction
   mixlab --genre house --deep          opt-in critique pass per concept (2x Stage 2 cost)
   mixlab --genre house --no-revise     skip the bounded self-revision pass (#55)
+  mixlab --genre house --resequence    apply the sequencer's suggested order swaps (#61)
   mixlab --genre house --risk high     promote wildcard/anchor picks, relax jump thresholds (#42)
   mixlab --playlist "Monday Night" --mix-length 60   target ~15 tracks for a 1-hour set
   mixlab --playlist "Monday Night" --mix-length 90   target ~22 tracks for a 90-minute set
@@ -1190,6 +1244,15 @@ examples:
         help=(
             "Skip the bounded self-revision pass (#55). By default MixLab attempts one minimal "
             "repair per flagged concept after validation; this disables that pass."
+        ),
+    )
+    parser.add_argument(
+        "--resequence",
+        action="store_true",
+        help=(
+            "Apply the sequencer's suggested order improvements to exported concepts (#61). "
+            "By default the sequencer only suggests swaps in the report and leaves the exported "
+            "order unchanged; this flag applies them."
         ),
     )
     parser.add_argument(
@@ -1354,6 +1417,7 @@ examples:
             directions=args.directions,
             no_revise=args.no_revise,
             risk=cast("RiskTolerance", args.risk),
+            resequence=args.resequence,
         )
     )
 

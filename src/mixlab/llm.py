@@ -36,6 +36,7 @@ from typing import Any, Callable, Literal, cast, get_args
 
 import httpx
 
+from mixlab import sequencer
 from mixlab.clustering import camelot_distance
 from mixlab.config import TRACK_COUNT_TARGETS, shortfall_warning
 from mixlab.history import ConceptHistory, format_recent_concepts
@@ -56,7 +57,14 @@ from mixlab.models import (
     TrackMode,
     Transition,
 )
-from mixlab.transitions import relation_label, strong_edges, tempo_relation, trace_arc
+from mixlab.transitions import (
+    TransitionEdge,
+    blend_headroom,
+    relation_label,
+    strong_edges,
+    tempo_relation,
+    trace_arc,
+)
 
 _ARC_TYPE_VALUES: frozenset[str] = frozenset(get_args(ArcType))
 
@@ -579,6 +587,23 @@ def _format_duration(secs: int) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
+def _mix_point_token(t: Track) -> str | None:
+    """Compact intro/outro mix-point token for prompt surfaces (#61).
+
+    Returns e.g. ``intro:16b``, ``outro:32b``, or ``intro:16b/outro:32b`` when both
+    bar counts are known. ``None`` when the track carries no mix_points or neither
+    intro_bars nor outro_bars is set, so callers can skip the token entirely.
+    """
+    if t.mix_points is None:
+        return None
+    parts: list[str] = []
+    if t.mix_points.intro_bars is not None:
+        parts.append(f"intro:{t.mix_points.intro_bars:.0f}b")
+    if t.mix_points.outro_bars is not None:
+        parts.append(f"outro:{t.mix_points.outro_bars:.0f}b")
+    return "/".join(parts) if parts else None
+
+
 def _duration_target_tracks(mix_length: int, tracks: list[Track]) -> int:
     """Derive a target track count for a set length from real track durations.
 
@@ -629,11 +654,13 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
     edges = strong_edges(canvas_tracks, top_n=6)
     if edges:
         tracks_lookup = {t.track_id: t for t in canvas_tracks}
-        edge_parts = [
-            f"ID:{e.from_id}→ID:{e.to_id} "
-            f"({relation_label(e, tracks_lookup[e.from_id], tracks_lookup[e.to_id])}, score {e.score:.2f})"
-            for e in edges
-        ]
+
+        def _edge_part(e: TransitionEdge) -> str:
+            mechanism = relation_label(e, tracks_lookup[e.from_id], tracks_lookup[e.to_id])
+            blend_suffix = f", {e.blend_label}" if e.blend_label else ""
+            return f"ID:{e.from_id}→ID:{e.to_id} ({mechanism}{blend_suffix}, score {e.score:.2f})"
+
+        edge_parts = [_edge_part(e) for e in edges]
         lines.append("Strong transitions: " + " | ".join(edge_parts))
 
     if canvas.core_anchor_ids:
@@ -681,6 +708,9 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
         extras: list[str] = []
         if t.duration_secs is not None:
             extras.append(_format_duration(t.duration_secs))
+        mix_token = _mix_point_token(t)
+        if mix_token is not None:
+            extras.append(mix_token)
         if t.year is not None:
             extras.append(str(t.year))
         if t.label:
@@ -992,6 +1022,12 @@ def validate_stage2_output(
             cam_dist = camelot_distance(a.camelot_key, b.camelot_key)
             if cam_dist > cam_thr and not justified_risk:
                 warnings.append(f"{label} Camelot jump {cam_dist} between {a.camelot_key} and {b.camelot_key}")
+            # Blend headroom (#61): flag transitions the mix-point data says are hard to
+            # ride (score < 0.3) unless the move is already annotated as a justified risk.
+            # Silent when either track lacks the cue data blend_headroom needs.
+            blend_score, blend_label = blend_headroom(a, b)
+            if blend_score is not None and blend_score < 0.3 and not justified_risk:
+                warnings.append(f"{label} blend risk {i + 1}->{i + 2}: {blend_label}")
 
         # Bridge/wildcard tracks used without is_risky flag
         for i in range(len(seq) - 1):
@@ -1656,11 +1692,12 @@ def _format_practicality_line(score: DJPracticalityScore) -> str:
     1.0 — overall is slightly inflated relative to playlist-mode scores. Decorative
     for now; intentionally not used for ranking.
     """
+    blend = f", blend_feasibility {score.blend_feasibility:.2f}" if score.has_blend_data else ""
     return (
         "**Practicality**: "
         f"bpm_smoothness {score.bpm_smoothness:.2f}, "
         f"harmonic_ratio {score.harmonic_ratio:.2f}, "
-        f"risk_justified {score.risk_justified:.2f}, "
+        f"risk_justified {score.risk_justified:.2f}{blend}, "
         f"overall {score.overall:.2f}"
     )
 
@@ -1790,11 +1827,26 @@ def _compute_practicality_score(
         )
         fragment_preserved = preserved / len(intent_brief.strong_adjacencies)
 
+    # blend_feasibility (#61): mean mix-point headroom over consecutive pairs that carry
+    # cue data. has_blend_data guards against a single cued pair dominating a mostly
+    # cueless set — it flips True only when at least half the pairs have data, keeping
+    # the overall formula byte-stable for cueless libraries.
+    headroom_scores: list[float] = []
+    total_pairs = max(0, n - 1)
+    for i in range(total_pairs):
+        score, _label = blend_headroom(track_sequence[i], track_sequence[i + 1])
+        if score is not None:
+            headroom_scores.append(score)
+    blend_feasibility = statistics.fmean(headroom_scores) if headroom_scores else 1.0
+    has_blend_data = total_pairs > 0 and len(headroom_scores) * 2 >= total_pairs
+
     return DJPracticalityScore(
         bpm_smoothness=bpm_smoothness,
         harmonic_ratio=harmonic_ratio,
         risk_justified=risk_justified,
         fragment_preserved=fragment_preserved,
+        blend_feasibility=blend_feasibility,
+        has_blend_data=has_blend_data,
     )
 
 
@@ -2004,6 +2056,9 @@ async def _call_stage2_report_single(
         extras: list[str] = []
         if t.duration_secs is not None:
             extras.append(_format_duration(t.duration_secs))
+        mix_token = _mix_point_token(t)
+        if mix_token is not None:
+            extras.append(mix_token)
         if t.year is not None:
             extras.append(str(t.year))
         if t.label:
@@ -2243,6 +2298,7 @@ _HARD_FINDING_MARKERS: tuple[str, ...] = (
     "Camelot jump",
     "arc mismatch",
     "used without a justified transition",
+    "blend risk",
 )
 
 # Hard-finding marker → short human label used in the report annotation's resolved list.
@@ -2254,6 +2310,7 @@ _HARD_FINDING_KIND_LABELS: tuple[tuple[str, str], ...] = (
     ("Camelot jump", "Camelot jump"),
     ("arc mismatch", "arc mismatch"),
     ("used without a justified transition", "unjustified transition"),
+    ("blend risk", "blend risk"),
 )
 
 _STAGE2_REVISION_SYSTEM = """\
@@ -2499,6 +2556,76 @@ async def revise_concepts(
         risk=risk,
     )
     return revised_concepts, report, final_warnings
+
+
+_RESEQUENCE_MIN_TRACKS = 4  # sequencer swaps need at least two interior positions
+_RESEQUENCE_IMPROVEMENT_BAR = 1.10  # swapped order must beat current by >=10% (#61)
+
+
+def resequence_suggestions(
+    concepts: list[MixConcept],
+    tracks_by_id: dict[str, Track],
+    *,
+    apply: bool = False,
+) -> tuple[list[MixConcept], list[str]]:
+    """Deterministic post-Stage-2 sequencer pass (#61). No LLM.
+
+    For each concept of at least four tracks, score the exported order and the order
+    produced by ``sequencer.suggest_swaps`` (opener/closer stay pinned). A concept
+    qualifies only when the swapped order's ``total_score`` beats the current order by
+    at least 10%.
+
+    With ``apply=False`` (default) qualifying concepts are returned unchanged and a
+    single suggestion note is emitted per concept. With ``apply=True`` the concept is
+    returned with the swapped track order and rebuilt transitions — annotations survive
+    for pairs still adjacent in the new order; genuinely new pairs default to a
+    non-risky transition. Non-qualifying concepts (and concepts under four tracks) pass
+    through untouched with no note.
+    """
+    result: list[MixConcept] = []
+    notes: list[str] = []
+    for concept in concepts:
+        if len(concept.track_ids) < _RESEQUENCE_MIN_TRACKS:
+            result.append(concept)
+            continue
+        plan = sequencer.score_order(concept.track_ids, tracks_by_id, arc_type=concept.arc_type)
+        swaps = sequencer.suggest_swaps(concept.track_ids, tracks_by_id, arc_type=concept.arc_type)
+        if not swaps:
+            result.append(concept)
+            continue
+        new_order = [tid for tid in concept.track_ids if tid in tracks_by_id]
+        for s in swaps:
+            new_order[s.pos_a], new_order[s.pos_b] = new_order[s.pos_b], new_order[s.pos_a]
+        new_plan = sequencer.score_order(new_order, tracks_by_id, arc_type=concept.arc_type)
+        if new_plan.total_score < plan.total_score * _RESEQUENCE_IMPROVEMENT_BAR:
+            result.append(concept)
+            continue
+
+        swap_positions = ", ".join(f"{s.pos_a + 1}<->{s.pos_b + 1}" for s in swaps)
+        reasons = "; ".join(s.reason for s in swaps)
+        tail = "Order applied." if apply else "Exported order unchanged."
+        notes.append(
+            f"Sequencer: [{concept.title}] swapping {swap_positions} would improve the order "
+            f"({plan.total_score:.2f} -> {new_plan.total_score:.2f}): {reasons}. {tail}"
+        )
+
+        if not apply:
+            result.append(concept)
+            continue
+
+        # Rebuild transitions for the new order: keep an existing annotation when its
+        # (from, to) pair is still adjacent; default a non-risky transition otherwise.
+        old_transitions = {(tr.from_id, tr.to_id): tr for tr in concept.transitions}
+        new_transitions: list[Transition] = []
+        for i in range(len(new_order) - 1):
+            a_id, b_id = new_order[i], new_order[i + 1]
+            existing = old_transitions.get((a_id, b_id))
+            new_transitions.append(
+                existing if existing is not None else Transition(from_id=a_id, to_id=b_id, is_risky=False)
+            )
+        result.append(concept.model_copy(update={"track_ids": new_order, "transitions": new_transitions}))
+
+    return result, notes
 
 
 def _kw_search(kw: str, text: str, pos: int = 0) -> re.Match[str] | None:

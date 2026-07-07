@@ -11,6 +11,17 @@ from mixlab.models import MixConcept, Track
 
 _DISCORD_API = "https://discord.com/api/v10"
 _CHUNK_SIZE = 2000
+
+
+def _attachment_mime(filename: str) -> str:
+    """Infer the multipart MIME type for a Discord attachment from its extension."""
+    if filename.endswith(".html"):
+        return "text/html"
+    if filename.endswith(".xml"):
+        return "application/xml"
+    return "application/octet-stream"
+
+
 _CHUNK_SLEEP = 0.5
 _RATE_LIMIT_BUFFER = 0.5
 _MAX_RATE_LIMIT_RETRIES = 5
@@ -165,7 +176,7 @@ class DiscordClient:
         url = f"{_DISCORD_API}/channels/{channel_id}/messages"
         # Multipart upload — httpx sets Content-Type with boundary automatically
         headers = {k: v for k, v in self._headers.items() if k.lower() != "content-type"}
-        files = {f"files[{i}]": (name, data, "application/xml") for i, (name, data) in enumerate(attachments)}
+        files = {f"files[{i}]": (name, data, _attachment_mime(name)) for i, (name, data) in enumerate(attachments)}
         data = {"payload_json": json.dumps({"content": content})}
         for _ in range(_MAX_RATE_LIMIT_RETRIES):
             resp = await client.post(url, headers=headers, data=data, files=files)
@@ -192,8 +203,13 @@ class DiscordClient:
                 # One message per concept so each file is clearly labelled.
                 for filename, data in attachments or []:
                     await asyncio.sleep(_CHUNK_SLEEP)
-                    label = filename.removesuffix(".xml").replace("_", " ")
-                    await self._post_with_files(client, channel_id, f"🎵 **{label}**", [(filename, data)])
+                    if filename.endswith(".html"):
+                        label = filename.removesuffix(".html").replace("_", " ")
+                        prefix = "📄"
+                    else:
+                        label = filename.removesuffix(".xml").replace("_", " ")
+                        prefix = "🎵"
+                    await self._post_with_files(client, channel_id, f"{prefix} **{label}**", [(filename, data)])
             n_attachments = len(attachments) if attachments else 0
             print(f"Discord: delivered {len(chunks)} message(s) + {n_attachments} attachment(s).")
             return True

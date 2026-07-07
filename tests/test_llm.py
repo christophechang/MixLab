@@ -17,6 +17,7 @@ from mixlab.models import (
     DJPracticalityScore,
     MixCanvas,
     MixConcept,
+    MixPoints,
     Track,
     Transition,
 )
@@ -4223,6 +4224,44 @@ def test_format_canvas_section_renders_strong_transitions_line_with_mechanism() 
     assert "ID:1→ID:2" in section
 
 
+def test_format_canvas_section_strong_transitions_includes_blend_label_when_mix_points_present() -> None:
+    # #59: when both tracks carry mix_points, the Strong transitions line appends the
+    # blend-headroom label (e.g. "29 bars out / 32 in — tight") after the mechanism.
+    from mixlab.llm import _format_canvas_section
+
+    # Both directions need mix_points so blend_headroom is defined both ways; the
+    # reverse direction (2→1) is deliberately given a much lower blend headroom so it
+    # loses the symmetric-pair dedup and the kept edge is the 1→2 halftime one.
+    tracks_by_id = {
+        "1": Track(
+            track_id="1",
+            artist="A",
+            title="T1",
+            bpm=172.0,
+            camelot_key="8A",
+            genre="Drum & Bass",
+            mix_points=MixPoints(mix_in_secs=0.0, outro_bars=29.0, intro_bars=40.0),
+        ),
+        "2": Track(
+            track_id="2",
+            artist="B",
+            title="T2",
+            bpm=86.0,
+            camelot_key="8A",
+            genre="Drum & Bass",
+            mix_points=MixPoints(mix_in_secs=0.0, outro_bars=2.0, intro_bars=32.0),
+        ),
+    }
+    roles = CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[])
+    canvas = _canvas_with_role_candidates(["1", "2"], roles)
+
+    section = _format_canvas_section(canvas, tracks_by_id)
+
+    assert "Strong transitions:" in section
+    assert "halftime lock 172→86" in section
+    assert "29 bars out / 32 in — tight" in section
+
+
 def test_format_canvas_section_keeps_opener_closer_drops_other_role_hints() -> None:
     from mixlab.llm import _format_canvas_section
 
@@ -4762,3 +4801,288 @@ async def test_revise_concepts_no_api_key_returns_inputs_unchanged(
     assert concepts[0] is original
     assert report == "PROSE REPORT"
     assert final_warnings == warnings
+
+
+# ---------------------------------------------------------------------------
+# Mix Engine (#61) — validator blend check
+# ---------------------------------------------------------------------------
+
+
+def _blend_track(tid: str, mp: MixPoints | None = None) -> Track:
+    return Track(
+        track_id=tid, artist=f"A{tid}", title=f"T{tid}", bpm=174.0, camelot_key="8A", genre="DnB", mix_points=mp
+    )
+
+
+def test_validate_stage2_output_tight_blend_unannotated_warns_and_is_hard_finding() -> None:
+    from mixlab.llm import _qualifies_for_revision, validate_stage2_output
+
+    # Two consecutive pairs (1->2, 2->3) with a 2-bar outro into a 32-bar intro — both
+    # score 0.15 (< 0.3). Same BPM/key everywhere so nothing else warns.
+    lib = {
+        "1": _blend_track("1", MixPoints(mix_in_secs=0.0, outro_bars=2.0)),
+        "2": _blend_track("2", MixPoints(mix_in_secs=0.0, intro_bars=32.0, outro_bars=2.0)),
+        "3": _blend_track("3", MixPoints(mix_in_secs=0.0, intro_bars=32.0)),
+    }
+    for i in range(4, 9):
+        lib[str(i)] = _blend_track(str(i))
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="B", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    blend_warnings = [w for w in warnings if "blend risk" in w]
+    assert len(blend_warnings) == 2
+    assert "blend risk 1->2" in blend_warnings[0]
+    assert "cut or manual loop likely" in blend_warnings[0]
+    # Two blend findings are two hard findings — enough to trigger the #55 revision gate.
+    assert _qualifies_for_revision(concept, warnings) is True
+
+
+def test_validate_stage2_output_tight_blend_suppressed_when_transition_justified() -> None:
+    from mixlab.llm import validate_stage2_output
+    from mixlab.models import Transition
+
+    lib = {
+        "1": _blend_track("1", MixPoints(mix_in_secs=0.0, outro_bars=2.0)),
+        "2": _blend_track("2", MixPoints(mix_in_secs=0.0, intro_bars=32.0, outro_bars=2.0)),
+        "3": _blend_track("3", MixPoints(mix_in_secs=0.0, intro_bars=32.0)),
+    }
+    for i in range(4, 9):
+        lib[str(i)] = _blend_track(str(i))
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(
+        title="B",
+        mood="dark",
+        track_ids=ids,
+        transitions=[Transition(from_id="1", to_id="2", is_risky=True, risk_type="chapter_pivot")],
+    )
+    canvas = _make_canvas(ids)
+
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert not any("blend risk 1->2" in w for w in warnings)
+    # The un-annotated 2->3 pair still warns.
+    assert any("blend risk 2->3" in w for w in warnings)
+
+
+def test_validate_stage2_output_blend_silent_without_mix_points() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="B", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+    assert not any("blend risk" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# Mix Engine (#61) — practicality blend component
+# ---------------------------------------------------------------------------
+
+
+def test_compute_practicality_cueless_overall_uses_legacy_formula() -> None:
+    from mixlab.llm import _compute_practicality_score
+
+    ids = ["1", "2", "3", "4"]
+    lib = {
+        tid: Track(track_id=tid, artist="A", title=f"T{tid}", bpm=172.0, camelot_key="8A", genre="DnB") for tid in ids
+    }
+    concept = MixConcept(title="C", mood="dark", track_ids=ids)
+    score = _compute_practicality_score(concept, lib, intent_brief=None)
+
+    assert score.has_blend_data is False
+    legacy = (
+        score.bpm_smoothness * 0.30
+        + score.harmonic_ratio * 0.30
+        + score.risk_justified * 0.25
+        + score.fragment_preserved * 0.15
+    )
+    assert score.overall == pytest.approx(legacy)
+
+
+def test_compute_practicality_cued_all_pairs_uses_new_weights() -> None:
+    from mixlab.llm import _compute_practicality_score
+
+    ids = ["1", "2", "3", "4"]
+    # outro 16 into intro 16 → ratio 1.0 → headroom 0.7 on every pair.
+    lib = {
+        tid: Track(
+            track_id=tid,
+            artist="A",
+            title=f"T{tid}",
+            bpm=172.0,
+            camelot_key="8A",
+            genre="DnB",
+            mix_points=MixPoints(mix_in_secs=0.0, intro_bars=16.0, outro_bars=16.0),
+        )
+        for tid in ids
+    }
+    concept = MixConcept(title="C", mood="dark", track_ids=ids)
+    score = _compute_practicality_score(concept, lib, intent_brief=None)
+
+    assert score.has_blend_data is True
+    assert score.blend_feasibility == pytest.approx(0.7)
+    new_formula = (
+        score.bpm_smoothness * 0.25
+        + score.harmonic_ratio * 0.25
+        + score.risk_justified * 0.20
+        + score.fragment_preserved * 0.10
+        + score.blend_feasibility * 0.20
+    )
+    assert score.overall == pytest.approx(new_formula)
+    assert score.overall == pytest.approx(0.94)
+
+
+def test_compute_practicality_has_blend_data_half_pairs_boundary() -> None:
+    from mixlab.llm import _compute_practicality_score
+
+    ids = ["0", "1", "2", "3", "4"]  # 4 consecutive pairs
+    concept = MixConcept(title="C", mood="dark", track_ids=ids)
+
+    def _mk(tid: str, mp: MixPoints | None) -> Track:
+        return Track(track_id=tid, artist="A", title=f"T{tid}", bpm=172.0, camelot_key="8A", genre="DnB", mix_points=mp)
+
+    # Exactly 2 of 4 pairs carry data (pairs 0->1 and 1->2): 2*2 >= 4 → True.
+    lib_boundary = {
+        "0": _mk("0", MixPoints(mix_in_secs=0.0, outro_bars=16.0)),
+        "1": _mk("1", MixPoints(mix_in_secs=0.0, intro_bars=16.0, outro_bars=16.0)),
+        "2": _mk("2", MixPoints(mix_in_secs=0.0, intro_bars=16.0)),
+        "3": _mk("3", None),
+        "4": _mk("4", None),
+    }
+    assert _compute_practicality_score(concept, lib_boundary, intent_brief=None).has_blend_data is True
+
+    # Only 1 of 4 pairs carries data (drop track 1's outro): 1*2 < 4 → False.
+    lib_below = dict(lib_boundary)
+    lib_below["1"] = _mk("1", MixPoints(mix_in_secs=0.0, intro_bars=16.0))
+    assert _compute_practicality_score(concept, lib_below, intent_brief=None).has_blend_data is False
+
+
+def test_format_practicality_line_appends_blend_only_when_blend_data() -> None:
+    from mixlab.llm import _format_practicality_line
+
+    with_blend = DJPracticalityScore(
+        bpm_smoothness=0.8,
+        harmonic_ratio=0.7,
+        risk_justified=0.5,
+        fragment_preserved=1.0,
+        blend_feasibility=0.65,
+        has_blend_data=True,
+    )
+    assert "blend_feasibility 0.65" in _format_practicality_line(with_blend)
+
+    without_blend = DJPracticalityScore(
+        bpm_smoothness=0.8, harmonic_ratio=0.7, risk_justified=0.5, fragment_preserved=1.0
+    )
+    assert "blend_feasibility" not in _format_practicality_line(without_blend)
+
+
+# ---------------------------------------------------------------------------
+# Mix Engine (#61) — resequence_suggestions
+# ---------------------------------------------------------------------------
+
+
+def _resequence_case() -> tuple[MixConcept, dict[str, Track]]:
+    # Two tempo families: k0..k5 at 170 BPM, k6..k9 at 205 BPM. The planted order swaps
+    # positions 3 and 6, dropping a fast track into the slow block; a single 3<->6 swap
+    # restores contiguity for a >10% gain (0.63 -> 0.78). Annotate (k0,k1) so we can
+    # check annotation survival after apply.
+    bpms = [170.0] * 6 + [205.0] * 4
+    lib = {
+        f"k{i}": Track(track_id=f"k{i}", artist=f"A{i}", title=f"T{i}", bpm=bpms[i], camelot_key="8A", genre="DnB")
+        for i in range(10)
+    }
+    planted = [f"k{i}" for i in range(10)]
+    planted[3], planted[6] = planted[6], planted[3]
+    concept = MixConcept(
+        title="Two Families",
+        mood="dark",
+        track_ids=planted,
+        transitions=[Transition(from_id="k0", to_id="k1", is_risky=True, risk_type="chapter_pivot")],
+    )
+    return concept, lib
+
+
+def test_resequence_suggestions_suggest_mode_leaves_concept_unchanged() -> None:
+    from mixlab.llm import resequence_suggestions
+
+    concept, lib = _resequence_case()
+    result, notes = resequence_suggestions([concept], lib, apply=False)
+
+    assert result[0].track_ids == concept.track_ids  # untouched
+    assert result[0] is concept
+    assert len(notes) == 1
+    assert "Exported order unchanged." in notes[0]
+    assert "swapping 4<->7" in notes[0]
+    assert "Two Families" in notes[0]
+
+
+def test_resequence_suggestions_apply_mode_swaps_and_rebuilds_transitions() -> None:
+    from mixlab.llm import resequence_suggestions
+
+    concept, lib = _resequence_case()
+    result, notes = resequence_suggestions([concept], lib, apply=True)
+
+    assert result[0].track_ids == [f"k{i}" for i in range(10)]  # restored contiguity
+    assert len(notes) == 1
+    assert "Order applied." in notes[0]
+
+    tmap = {(t.from_id, t.to_id): t for t in result[0].transitions}
+    # Annotated pair (k0,k1) survives adjacency in the new order → keeps its risk_type.
+    assert tmap[("k0", "k1")].is_risky is True
+    assert tmap[("k0", "k1")].risk_type == "chapter_pivot"
+    # A pair newly adjacent after the swap (k2,k3) defaults to a non-risky transition.
+    assert tmap[("k2", "k3")].is_risky is False
+    assert tmap[("k2", "k3")].risk_type == ""
+    assert len(result[0].transitions) == 9  # one per consecutive pair
+
+
+def test_resequence_suggestions_already_good_order_no_notes() -> None:
+    from mixlab.llm import resequence_suggestions
+
+    ids = [f"c{i}" for i in range(10)]
+    lib = {
+        f"c{i}": Track(track_id=f"c{i}", artist=f"A{i}", title=f"T{i}", bpm=170.0, camelot_key=f"{i + 1}A", genre="DnB")
+        for i in range(10)
+    }
+    concept = MixConcept(title="Chain", mood="dark", track_ids=ids)
+    result, notes = resequence_suggestions([concept], lib, apply=False)
+    assert notes == []
+    assert result[0] is concept
+
+
+def test_resequence_suggestions_skips_short_concepts() -> None:
+    from mixlab.llm import resequence_suggestions
+
+    ids = ["1", "2", "3"]
+    lib = {
+        tid: Track(track_id=tid, artist="A", title=f"T{tid}", bpm=170.0, camelot_key="8A", genre="DnB") for tid in ids
+    }
+    concept = MixConcept(title="Short", mood="dark", track_ids=ids)
+    result, notes = resequence_suggestions([concept], lib, apply=True)
+    assert notes == []
+    assert result[0] is concept
+
+
+# ---------------------------------------------------------------------------
+# Mix Engine (#61) — intro/outro prompt tokens
+# ---------------------------------------------------------------------------
+
+
+def test_format_canvas_section_includes_intro_outro_token_when_mix_points_present() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    ids = ["1", "2"]
+    tracks_by_id = _lib(ids)
+    tracks_by_id["1"] = tracks_by_id["1"].model_copy(
+        update={"mix_points": MixPoints(mix_in_secs=0.0, intro_bars=16.0, outro_bars=32.0)}
+    )
+    canvas = _make_canvas(ids)
+
+    section = _format_canvas_section(canvas, tracks_by_id)
+    line = next(text_line for text_line in section.splitlines() if "Artist_1 —" in text_line)
+    assert "intro:16b/outro:32b" in line
+    # A track with no mix_points carries no intro/outro token.
+    line2 = next(text_line for text_line in section.splitlines() if "Artist_2 —" in text_line)
+    assert "intro:" not in line2
+    assert "outro:" not in line2

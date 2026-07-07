@@ -226,6 +226,10 @@ Report context: 140 (custom genre, All Tracks)
 
 For standard and custom genre runs, a Rekordbox-compatible merged XML file can be attached to the Discord message or written to disk. It contains one playlist per concept plus an **All Unplayed Tunes** playlist with the full scoped unplayed pool when played-track history was used.
 
+### HTML report
+
+Every genre and playlist run also writes a standalone HTML report to `output/reports/` (override the directory with the `MIXLAB_REPORT_DIR` environment variable) and attaches it to the Discord message. The file is fully self-contained and offline — inline CSS and JS, a system font stack, no images, CDNs, fonts, or any external request — so it opens straight from disk and renders identically in light and dark mode. Each concept gets a card carrying everything the text report holds (title, arc type, mood, name reason, track table, and the full prose) plus computed transition intelligence: an energy sparkline across the set, per-transition mechanism labels (halftime locks, energy lifts), blend headroom, and a colour-coded mixability score for each consecutive pair. Click any track row to copy its `artist — title`. The rendered output is deterministic for identical inputs.
+
 ### Steer genre mode with a free-text intent
 
 ```bash
@@ -273,6 +277,20 @@ Each proposed direction is feasibility-scored (pool fill, BPM-path viability, an
 ```
 
 `--risk` composes with `--directions`: it changes how canvases are scored and validated regardless of whether they came from classic BPM strata or a concept direction. It is genre mode only — playlist mode derives its own risk tolerance from the Stage 0 intent brief (see `--intent` above) and prints a stderr note if `--risk` is passed alongside `--playlist`.
+
+### Mix Engine (genre mode)
+
+When your Rekordbox export carries a beat grid and memory/hot cues, MixLab parses each track's structure into mix points (intro/outro bar counts, loop zones, cue count) and uses them across genre mode:
+
+- **Owner cue conventions.** The first cue is read as the mix-in; the last cue is read as the mix-out when a track has at least two cues in the back half of the arrangement. Tracks with short outros get manual-loop language ("cut or manual loop likely") rather than being called unmixable, and cueless tracks stay neutral — absence of cue data never penalises a track.
+- **Blend warnings.** The post-Stage-2 validator flags any consecutive pair whose outro/intro headroom is too tight to ride (unless the transition is already annotated as a justified risk). These count as hard findings and can trigger the self-revision pass.
+- **Practicality blend component.** When enough of a concept's transitions carry cue data, the per-concept practicality line gains a `blend_feasibility` term and rebalances its weights to include it; cueless concepts keep the original formula unchanged.
+- **Intro/outro prompt tokens.** Stage 2 candidate and report lines show `intro:16b/outro:32b` tokens so the model can reason about workable mix windows directly.
+- **`--resequence`.** By default the deterministic sequencer only *suggests* order improvements in a `**Sequencer**` report block and leaves the exported order untouched. Pass `--resequence` to apply the suggested swaps to the exported concepts (opener and closer are never moved).
+
+```sh
+./mixlab --genre house --resequence   # apply the sequencer's suggested order swaps
+```
 
 ### Complete a mix from an existing Rekordbox playlist
 

@@ -23,7 +23,7 @@ from mixlab.__main__ import (
     run_feedback,
 )
 from mixlab.history import ConceptHistory, ConceptRecord, HistoryEntry, append_run, load_history
-from mixlab.models import PlayedTrack, Track
+from mixlab.models import MixConcept, PlayedTrack, Track
 from mixlab.playlist_exporter import build_merged_xml, parse_raw_tracks
 from mixlab.reader import parse_collection
 
@@ -993,6 +993,33 @@ def test_main_risk_medium_no_note_in_playlist_mode(
 
 
 # ---------------------------------------------------------------------------
+# main() — --resequence flag parsing (#61)
+# ---------------------------------------------------------------------------
+
+
+def test_main_resequence_defaults_false_and_threaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["resequence"] is False
+
+
+def test_main_resequence_flag_sets_kwarg_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--resequence"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["resequence"] is True
+
+
+# ---------------------------------------------------------------------------
 # main() — --intent works in playlist mode too (#54)
 # ---------------------------------------------------------------------------
 
@@ -1014,3 +1041,60 @@ def test_main_playlist_mode_intent_no_longer_ignored(
     assert "--intent ignored in playlist mode" not in err
     assert playlist_mock.await_args is not None
     assert playlist_mock.await_args.kwargs["intent"] == "dark hypnotic late night warmup"
+
+
+# ---------------------------------------------------------------------------
+# run() — standalone HTML report attachment (#45)
+# ---------------------------------------------------------------------------
+
+
+def _house_collection_xml(n: int = 18) -> str:
+    keys = ["8A", "9A", "10A", "11A", "12A", "1A", "2A", "3A", "4A", "5A", "6A", "7A"]
+    rows = "\n".join(
+        f'    <TRACK TrackID="{i}" Name="Track {i}" Artist="Artist {i}" '
+        f'AverageBpm="124.00" Tonality="{keys[i % len(keys)]}" Genre="House" '
+        f'TotalTime="300" Rating="0"/>'
+        for i in range(1, n + 1)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<DJ_PLAYLISTS Version="1.0.0">\n'
+        f'  <COLLECTION Entries="{n}">\n{rows}\n  </COLLECTION>\n'
+        "</DJ_PLAYLISTS>\n"
+    )
+
+
+async def test_run_genre_mode_attaches_html_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full genre run writes the HTML report to MIXLAB_REPORT_DIR and attaches it to Discord."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_house_collection_xml())
+    report_dir = tmp_path / "reports"
+
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setenv("MIXLAB_REPORT_DIR", str(report_dir))
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", tmp_path / "history.json")
+    monkeypatch.chdir(tmp_path)
+
+    concepts = [MixConcept(title="Deep Cuts", mood="warm", track_ids=["1", "2", "3", "4"])]
+    stage2 = AsyncMock(return_value=(concepts, "concept prose\n\n---\n\nmain-brain note"))
+    send_report_mock = AsyncMock()
+
+    with (
+        patch("mixlab.__main__.stage2_curate_and_report", stage2),
+        patch("mixlab.__main__.validate_stage2_output", return_value=[]),
+        patch("mixlab.__main__.send_report", send_report_mock),
+    ):
+        await run(genre="house", export_dir=None, directions="off")
+
+    assert send_report_mock.await_args is not None
+    attachments = send_report_mock.await_args.kwargs["attachments"]
+    html_names = [name for name, _ in attachments]
+    assert any(name.endswith(".html") for name in html_names)
+    # The HTML file was written to the overridden report dir.
+    written = list(report_dir.glob("*.html"))
+    assert len(written) == 1
+    assert written[0].name.startswith("mixlab-house-")
