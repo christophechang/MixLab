@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.7.2 — 2026-07-07
+
+- **Recent concept titles join the name-avoid list (#75).** Live finding from the first Name Studio run: 'Heist Recordings' was generated twice in one day and 'Rej & The Room' echoed the earlier 'Rej' — the avoid list only carried catalogue mix names, so same-day repeats were invisible to both the prompt and the name-family guard. `recent_concept_titles` (last 10 runs, deduped, newest first) now merges into the avoid list for the Stage 2 prompt and the history-echo validation check.
+
+---
+
 ## v1.7.1 — 2026-07-07
 
 - **Fix: `--prep` now applies the DO NOT RECOMMEND denylist.** The first production run reported 414 house tracks where the concept pipeline sees 370 — `--prep` was counting (and could rank) denylisted tracks, and cueing tracks that are never recommended is exactly the wasted prep time the feature exists to avoid. The filter now runs before ranking, matching every other mode.
