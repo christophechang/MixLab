@@ -17,6 +17,7 @@ import re
 from html import escape
 
 from mixlab import transitions
+from mixlab.booth_sheet import BoothStep, build_booth_sheet
 from mixlab.models import MixConcept, Track
 
 _PROSE_SEPARATOR = "\n\n---\n\n"
@@ -183,6 +184,42 @@ def _render_transitions(concept: MixConcept, tracks: list[Track]) -> str:
     return '<div class="transitions"><h4>Transitions</h4><ol class="tlist">' + "".join(rows) + "</ol></div>"
 
 
+def _render_booth_step(step: BoothStep) -> str:
+    cls = "step"
+    if step.tier == "tight":
+        cls = "step tight"
+    elif step.tier == "hard":
+        cls = "step hard"
+    chips = "".join(
+        f'<span class="chip warn">{_esc(text)}</span>' if is_warn else f'<span class="chip">{_esc(text)}</span>'
+        for text, is_warn in step.chips
+    )
+    fallback = f'<p class="fallback">{_esc(step.fallback)}</p>' if step.fallback is not None else ""
+    scout = f'<p class="scout">{_esc(step.scout)}</p>' if step.scout is not None else ""
+    return (
+        f'<li class="{cls}">'
+        '<div class="head">'
+        f'<span class="pair">{step.index}→{step.index + 1}</span>'
+        f'<span class="titles">{_esc(step.from_label)} <span class="into">into</span> {_esc(step.to_label)}</span>'
+        "</div>"
+        f'<div class="chips">{chips}</div>'
+        f'<p class="plan">{_esc(step.plan)}</p>'
+        f"{fallback}{scout}"
+        "</li>"
+    )
+
+
+def _render_booth_sheet(concept: MixConcept, tracks_by_id: dict[str, Track]) -> str:
+    steps = build_booth_sheet(concept, tracks_by_id)
+    if not steps:
+        return ""
+    items = "".join(_render_booth_step(step) for step in steps)
+    return (
+        '<details class="prose-details booth-details" open><summary>Booth sheet</summary>'
+        f'<ol class="booth">{items}</ol></details>'
+    )
+
+
 def _render_concept(
     concept: MixConcept,
     tracks_by_id: dict[str, Track],
@@ -202,6 +239,7 @@ def _render_concept(
         parts.append(f'<div class="sparkwrap">{spark}</div>')
     parts.append(_render_track_rows(tracks))
     parts.append(_render_transitions(concept, tracks))
+    parts.append(_render_booth_sheet(concept, tracks_by_id))
     if prose is not None and prose.strip():
         parts.append(
             '<details class="prose-details"><summary>Full report</summary>'
@@ -341,6 +379,23 @@ pre.prose {
 section.validation ul { margin: 0; padding-left: 20px; }
 section.validation li { color: var(--warn); margin: 4px 0; }
 footer { margin-top: 40px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--border); padding-top: 14px; }
+.booth { list-style: none; margin: 8px 0 0; padding: 0; }
+.booth li.step { border: 1px solid var(--border); border-left: 4px solid var(--good); border-radius: 8px; padding: 10px 12px; margin: 10px 0; }
+.booth li.step.tight { border-left-color: var(--warn); }
+.booth li.step.hard { border-left-color: var(--bad); }
+.step .head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.step .pair { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; min-width: 40px; }
+.step .titles { font-weight: 600; }
+.step .titles .into { color: var(--muted); font-weight: 400; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 2px 0 8px; }
+.chip { background: var(--code-bg); border: 1px solid var(--border); border-radius: 999px; font-size: 12px; padding: 1px 9px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chip.warn { color: var(--warn); border-color: var(--warn); background: transparent; }
+.step .plan { margin: 0; font-size: 14px; }
+.step .fallback { margin: 6px 0 0; font-size: 13px; color: var(--muted); }
+.step .fallback::before { content: "↩ "; }
+.step .scout { margin: 6px 0 0; font-size: 13px; color: var(--warn); }
+.step .scout::before { content: "⚠ "; }
+@media print { .booth li.step { break-inside: avoid; } }
 """.strip()
 
 _SCRIPT = """

@@ -230,6 +230,10 @@ For standard and custom genre runs, a Rekordbox-compatible merged XML file can b
 
 Every genre and playlist run also writes a standalone HTML report to `output/reports/` (override the directory with the `MIXLAB_REPORT_DIR` environment variable) and attaches it to the Discord message. The file is fully self-contained and offline — inline CSS and JS, a system font stack, no images, CDNs, fonts, or any external request — so it opens straight from disk and renders identically in light and dark mode. Each concept gets a card carrying everything the text report holds (title, arc type, mood, name reason, track table, and the full prose) plus computed transition intelligence: an energy sparkline across the set, per-transition mechanism labels (halftime locks, energy lifts), blend headroom, and a colour-coded mixability score for each consecutive pair. Click any track row to copy its `artist — title`. The rendered output is deterministic for identical inputs.
 
+#### Booth sheet
+
+Each concept card carries a booth sheet: a per-transition execution plan computed deterministically from your cue points and beat grids — no LLM involved. Each step shows: the clock position of the outgoing track's mix-out cue (`Open the blend at 5:43`), the pitch-fader move (halftime/double-time aware), key move, bars available each side, a plan line in booth language, a fallback when the outro allows one, and colour coding (green = relaxed window, amber = tight, red = hard commit). Scout notes flag tracks with missing cue data — they double as a cue-prep to-do list for Rekordbox.
+
 ### Steer genre mode with a free-text intent
 
 ```bash

@@ -15,10 +15,11 @@ def _track(
     duration: int | None = 300,
     intro: float | None = None,
     outro: float | None = None,
+    mix_out: float | None = None,
 ) -> Track:
     mix_points = None
-    if intro is not None or outro is not None:
-        mix_points = MixPoints(mix_in_secs=8.0, intro_bars=intro, outro_bars=outro)
+    if intro is not None or outro is not None or mix_out is not None:
+        mix_points = MixPoints(mix_in_secs=8.0, mix_out_secs=mix_out, intro_bars=intro, outro_bars=outro)
     return Track(
         track_id=tid,
         artist=artist,
@@ -294,6 +295,83 @@ def test_render_html_report_omits_snapshot_when_counts_absent() -> None:
         [_concept(["0"])], _tracks_by_id([_track("0")]), report_text="", report_context="", validation_warnings=[]
     )
     assert "Crate snapshot" not in html
+
+
+# ---------------------------------------------------------------------------
+# Booth sheet (#69)
+# ---------------------------------------------------------------------------
+
+
+def test_render_html_report_cued_pair_shows_booth_sheet_relaxed_step() -> None:
+    a = _track("1", title="Outbound", mix_out=100.0, outro=20.0)
+    b = _track("2", title="Inbound", intro=8.0)
+    concept = _concept(["1", "2"])
+    html = render_html_report(
+        [concept], _tracks_by_id([a, b]), report_text="", report_context="", validation_warnings=[]
+    )
+    assert 'class="booth"' in html
+    assert "Booth sheet" in html
+    assert "Open the blend at" in html
+    assert '<li class="step">' in html
+
+
+def test_render_html_report_tight_and_hard_steps_get_tier_classes() -> None:
+    a1 = _track("1", title="A1", mix_out=100.0, outro=6.0)
+    b1 = _track("2", title="B1", intro=10.0)
+    tight_concept = _concept(["1", "2"])
+
+    a2 = _track("3", title="A2", mix_out=100.0, outro=2.0)
+    b2 = _track("4", title="B2", intro=10.0)
+    hard_concept = _concept(["3", "4"])
+
+    tbi = _tracks_by_id([a1, b1, a2, b2])
+    html = render_html_report(
+        [tight_concept, hard_concept], tbi, report_text="", report_context="", validation_warnings=[]
+    )
+    assert '<li class="step tight">' in html
+    assert '<li class="step hard">' in html
+
+
+def test_render_html_report_risk_annotation_renders_warn_chip_in_booth_sheet() -> None:
+    a = _track("1", title="Outbound", mix_out=100.0, outro=20.0)
+    b = _track("2", title="Inbound", intro=8.0)
+    concept = _concept(["1", "2"], transitions=[Transition(from_id="1", to_id="2", risk_type="peak_impact")])
+    html = render_html_report(
+        [concept], _tracks_by_id([a, b]), report_text="", report_context="", validation_warnings=[]
+    )
+    assert '<span class="chip warn">peak_impact</span>' in html
+
+
+def test_render_html_report_single_track_concept_omits_booth_sheet() -> None:
+    t = _track("1")
+    html = render_html_report(
+        [_concept(["1"])], _tracks_by_id([t]), report_text="", report_context="", validation_warnings=[]
+    )
+    assert "Booth sheet" not in html
+    assert 'class="booth"' not in html
+
+
+def test_render_html_report_booth_sheet_escapes_track_titles() -> None:
+    evil = _track("1", artist="A & B", title="<script>alert(1)</script>")
+    safe = _track("2", title="Safe")
+    concept = _concept(["1", "2"])
+    html = render_html_report(
+        [concept], _tracks_by_id([evil, safe]), report_text="", report_context="", validation_warnings=[]
+    )
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+
+
+def test_render_html_report_uncued_pair_renders_step_with_scout_note() -> None:
+    a = _track("1", title="Outbound")
+    b = _track("2", title="Inbound")
+    concept = _concept(["1", "2"])
+    html = render_html_report(
+        [concept], _tracks_by_id([a, b]), report_text="", report_context="", validation_warnings=[]
+    )
+    assert '<span class="chip warn">no cue data either side</span>' in html
+    assert 'class="scout"' in html
+    assert "Both tracks uncued" in html
 
 
 # ---------------------------------------------------------------------------
