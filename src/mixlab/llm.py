@@ -1031,12 +1031,16 @@ def validate_stage2_output(
 
         # Bridge/wildcard tracks used without is_risky flag
         for i in range(len(seq) - 1):
-            to_id = seq[i + 1].track_id
+            to = seq[i + 1]
+            to_id = to.track_id
             if to_id in bridge_ids or to_id in wildcard_ids:
                 tr = transition_map.get((seq[i].track_id, to_id))
                 pool = "bridge" if to_id in bridge_ids else "wildcard"
                 if tr is None or (not tr.is_risky and tr.risk_type == ""):
-                    warnings.append(f"{label} {pool} track ID {to_id} used without a justified transition")
+                    warnings.append(
+                        f"{label} {pool} track {to.artist} — {to.title} (ID {to_id}) "
+                        f"used without a justified transition"
+                    )
 
         # Wildcard used in any role but not flagged as a concept-anchor candidate (#10).
         # Wildcard inclusion outside the anchor list raises the bar for justification.
@@ -1045,9 +1049,9 @@ def validate_stage2_output(
             anchor_track_ids = {a.track_id for a in canvas_for_concept_anchors.concept_anchor_candidates}
             for tid in concept.track_ids:
                 if tid in wildcard_ids and tid not in anchor_track_ids:
-                    warnings.append(
-                        f"{label} wildcard track ID {tid} used but not flagged as a concept-anchor candidate"
-                    )
+                    t = tracks_by_id.get(tid)
+                    name = f"{t.artist} — {t.title} (ID {tid})" if t is not None else f"ID {tid}"
+                    warnings.append(f"{label} wildcard track {name} used but not flagged as a concept-anchor candidate")
 
         # DJ-structural warnings: opener/closer presence, peak, wind-down, role-family runs,
         # energy bands. Genre-aware and arc_type-aware softening for soft-tier checks.
