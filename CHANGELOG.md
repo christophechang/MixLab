@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.6.0 — 2026-07-07
+
+- **Booth Sheet (epic #67, mock approved by owner).** Each concept card in the HTML report now carries a per-transition execution plan: clock position of the outgoing mix-out cue, pitch-fader percentage (tempo-relation aware), key move, bars available, a plan line in booth language with fallback and scout notes, colour-coded by blend headroom (relaxed/tight/hard). Fully deterministic — computed from cue points and beat grids already in the Rekordbox XML, zero LLM calls (#68 core module, #69 rendering). Scout notes double as a cue-prep to-do list.
+
+---
+
 ## v1.5.3 — 2026-07-07
 
 - **Fix: v1.5.2's revised-concept prose regeneration never fired in production.** The genre-mode report always carries trailing sections after the concept prose (shortfall warnings, "Main brain"), so v1.5.2's exact-count guard never matched and every accepted revision silently fell back to the pre-revision disclaimer. The guard now only requires the concept sections to be present (they are always first), and the splice replaces by index. Tests mirror the real report shape so the trailer case is pinned.
