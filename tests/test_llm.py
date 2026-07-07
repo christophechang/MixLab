@@ -2729,6 +2729,57 @@ def test_stage2_report_prompt_enforces_prose_and_json_risk_consistency() -> None
     assert "Risk: none" in _STAGE2_REPORT_SYSTEM
 
 
+def test_stage2_report_prompt_enforces_arc_consistency() -> None:
+    """The prose "Energy path:" label must match the concept's declared arc_type.
+
+    Live-run finding: the report pass never saw arc_type, so cards showed e.g. a
+    `wave` badge next to "Energy path: Slow Climb" prose. The mapping from arc_type
+    values to the seven prose labels lives in the report-pass prompt.
+    """
+    from mixlab.llm import _STAGE2_REPORT_SYSTEM
+
+    assert "ARC CONSISTENCY" in _STAGE2_REPORT_SYSTEM
+    assert "declared arc_type" in _STAGE2_REPORT_SYSTEM
+    assert "plateau or sustained-pressure" in _STAGE2_REPORT_SYSTEM
+    assert "Do not contradict the declared arc." in _STAGE2_REPORT_SYSTEM
+
+
+@respx.mock
+async def test_stage2_report_prompt_includes_declared_arc_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Report-pass user prompt must carry the concept's arc_type so prose can match it."""
+    from mixlab.llm import _call_stage2_reports
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    captured: list[dict[str, object]] = []
+
+    def capture(request: object) -> Response:
+        body = json.loads(request.content)  # type: ignore[attr-defined]
+        captured.append(body)
+        return Response(200, json={"content": [{"text": "report"}], "stop_reason": "end_turn"})
+
+    respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
+
+    concept = MixConcept(title="Test", mood="dark", track_ids=["1", "2"], arc_type="wave")
+    no_arc = MixConcept(title="Test 2", mood="warm", track_ids=["1", "2"])
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 3)
+    }
+
+    await _call_stage2_reports([concept, no_arc], tracks_by_id, None, None, "test-key")
+
+    assert len(captured) == 2
+    prompts = []
+    for body in captured:
+        messages = cast(list[dict[str, str]], body["messages"])
+        prompts.append(next(m["content"] for m in messages if m["role"] == "user"))
+    assert any("Declared arc_type: wave" in p for p in prompts)
+    assert any("Declared arc_type: (none)" in p for p in prompts)
+
+
 @respx.mock
 async def test_stage2_report_prompt_includes_transition_annotations(
     monkeypatch: pytest.MonkeyPatch,

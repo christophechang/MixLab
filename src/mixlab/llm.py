@@ -1358,6 +1358,13 @@ real risk (harmonic jump, BPM gap, energy shift, etc.) consistent with the risk_
 transition's is_risky=false, the destination track's Risk: line must be "none". Do not write \
 "Risk: none" when is_risky=true, and do not describe a risk in prose when is_risky=false.
 
+ARC CONSISTENCY: the input includes the concept's declared arc_type. Your "Energy path:" label \
+must match it: plateau or sustained-pressure → Plateau With Detail; wave → Wave; \
+progressive-build → Slow Climb; build-and-drop or double-peak → Double Peak; front-loaded → \
+Front-Loaded Hook; dark-to-light → Dark to Light; light-to-dark → Light to Dark; narrative or \
+abstract-journey → choose the closest of the seven labels and reflect the framing in the thesis. \
+When arc_type is (none), choose freely. Do not contradict the declared arc.
+
 Be opinionated, musical, and honest. Peer-to-peer, no marketing language, no filler.
 
 Return ONLY the report text. No JSON, no markdown fences, no preamble.\
@@ -2099,7 +2106,8 @@ async def _call_stage2_report_single(
     prompt = (
         f"Concept title: {concept.title}\n"
         f"Strategy/mood: {concept.mood}\n"
-        f"Thesis: {concept.name_reason}\n\n"
+        f"Thesis: {concept.name_reason}\n"
+        f"Declared arc_type: {concept.arc_type or '(none)'}\n\n"
         f"Tracks in play order:\n" + "\n".join(track_lines) + transitions_block
     )
 

@@ -220,6 +220,29 @@ def test_render_html_report_prose_mismatch_falls_back_to_single_section() -> Non
     assert "Run notes" in html
 
 
+def test_render_html_report_run_notes_strip_duplicated_validation_block() -> None:
+    """The textual Validation Notes block is dropped from run notes (live-run finding).
+
+    Discord's report text embeds a "⚠ **Validation Notes**" bullet block, but the HTML
+    report already renders validation_warnings as its own section — keeping the textual
+    copy duplicated every warning in Run notes.
+    """
+    tracks = [_track("0")]
+    report = "concept prose\n\n---\n\n⚠ **Validation Notes**\n- warning one\n- warning two\n\nactual shortfall note"
+    html = render_html_report(
+        [_concept(["0"])],
+        _tracks_by_id(tracks),
+        report_text=report,
+        report_context="",
+        validation_warnings=["warning one", "warning two"],
+    )
+    assert "Run notes" in html
+    assert "actual shortfall note" in html
+    # Warnings appear once (the dedicated section), not again inside run notes.
+    assert html.count("warning one") == 1
+    assert "Validation Notes" not in html
+
+
 def test_render_html_report_empty_report_text_renders_no_prose() -> None:
     tracks = [_track("0")]
     html = render_html_report(
