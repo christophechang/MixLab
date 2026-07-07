@@ -864,6 +864,82 @@ def _forbidden_names_block(used_mix_names: list[str]) -> str:
     )
 
 
+_STAGE2_RENAME_SYSTEM = """\
+You titled these mix concepts moments ago, but every title listed below is already used by an \
+existing mix or an earlier run. Provide a NEW title for each concept: 2-4 words, keeping the \
+concept's character (its mood and thesis are provided), built with a different naming technique. \
+The new title must not appear in the forbidden list and must not share a distinctive word with \
+any entry in it, nor with the other new titles.
+
+Respond ONLY with a JSON array, no fences, no prose:
+[{"old_title": "...", "new_title": "..."}]\
+"""
+
+
+async def _reroll_colliding_titles(
+    curated: list[MixConcept],
+    used_mix_names: list[str],
+    stage2_key: str,
+) -> tuple[list[MixConcept], list[str]]:
+    """One bounded rename-only pass for titles that exactly repeat a used name (#75).
+
+    Live finding: prompt pressure alone cannot stop exact repeats — runs kept
+    reproducing forbidden titles verbatim for the same canvases. Detection is
+    deterministic (casefolded exact match against the avoid list); repair is a
+    single small LLM call renaming only the colliding concepts. A failed call,
+    unparseable response, or a replacement that itself collides (with the avoid
+    list or another concept's title) keeps the original title — the name-family
+    guard's echo warning then stands. Returns (concepts, run-note lines).
+    """
+    forbidden_keys = {name.strip().casefold() for name in used_mix_names}
+    colliding = [c for c in curated if c.title.strip().casefold() in forbidden_keys]
+    if not colliding:
+        return curated, []
+
+    listing = "\n".join(f'- old_title: "{c.title}" | mood: {c.mood} | thesis: {c.name_reason}' for c in colliding)
+    prompt = f"Concepts to rename:\n{listing}\n\nFORBIDDEN LIST:\n{', '.join(used_mix_names)}"
+    try:
+        raw = await _call_anthropic_http(
+            stage2_key, _stage2_model(), _STAGE2_RENAME_SYSTEM, prompt, max_tokens=1024, timeout=60
+        )
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+        first, last = cleaned.find("["), cleaned.rfind("]")
+        if first != -1 and last > first:
+            cleaned = cleaned[first : last + 1]
+        mappings = json.loads(cleaned)
+    except Exception as exc:
+        print(f"Title re-roll failed ({exc}) — keeping colliding titles, warnings will flag them.", file=sys.stderr)
+        return curated, []
+
+    if not isinstance(mappings, list):
+        return curated, []
+    renames: dict[str, str] = {}
+    for item in mappings:
+        if not isinstance(item, dict):
+            continue
+        old = str(item.get("old_title", "")).strip()
+        new = str(item.get("new_title", "")).strip()
+        if old and new and 0 < len(new) <= 60:
+            renames[old.casefold()] = new
+
+    notes: list[str] = []
+    taken = {c.title.strip().casefold() for c in curated} | forbidden_keys
+    for concept in colliding:
+        new_title = renames.get(concept.title.strip().casefold())
+        if new_title is None or new_title.strip().casefold() in taken:
+            print(f"Title re-roll: no usable replacement for '{concept.title}' — keeping it.", file=sys.stderr)
+            continue
+        old_title = concept.title
+        concept.title = new_title
+        taken.add(new_title.strip().casefold())
+        notes.append(f"**Renamed**: '{old_title}' → '{new_title}' (title collided with an existing mix name)")
+        print(f"Title re-roll: '{old_title}' → '{new_title}'", file=sys.stderr)
+    return curated, notes
+
+
 def select_shortlists_for_stage2(shortlists: list[MixConcept]) -> list[MixConcept]:
     """Select up to _STAGE2_CAP shortlists for Stage 2, sampling randomly from the top candidates by pool size.
 
@@ -3410,6 +3486,14 @@ async def stage2_curate_and_report(
     )
     report = ""
 
+    # Title re-roll (#75): prompt pressure alone cannot stop exact title repeats —
+    # live runs kept reproducing forbidden titles verbatim for the same canvases.
+    # One bounded rename-only call fixes exact collisions mechanically; runs before
+    # the report pass so prose is written against the final titles. Genre mode only.
+    rename_notes: list[str] = []
+    if playlist_name is None and used_mix_names and curated:
+        curated, rename_notes = await _reroll_colliding_titles(curated, used_mix_names, stage2_key)
+
     # Optional Stage 2 critique pass (#22, --deep). Runs between selection and report
     # so the per-concept report can carry the critique inline. Genre-mode only —
     # playlist mode has its own variant-scoring path and a critique loop there would
@@ -3568,6 +3652,9 @@ async def stage2_curate_and_report(
 
     if warnings:
         report += "\n\n---\n\nSHORTFALL WARNINGS\n" + "\n".join(warnings)
+
+    if rename_notes:
+        report += "\n\n---\n\n" + "\n".join(rename_notes)
 
     report += f"\n\n---\n\nMain brain: {stage2_model_display}"
 
