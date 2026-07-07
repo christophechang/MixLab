@@ -1161,6 +1161,9 @@ story; abstract-journey describes a non-linear, impressionistic set. The chosen 
 should be visible in the track sequence and consistent with the energy path you describe \
 in the report.
 
+The "mood" value must be a SHORT phrase — 12 words maximum. It is a character label, not a thesis; \
+the full thesis belongs in the report, not the mood field.
+
 Give each concept a short, evocative name (2–4 words max) — not the pool name from Stage 1. \
 Avoid generic [Adjective][Noun] patterns (e.g. "Warm Gravity", "Committed Floor", "Orbital Descent" are bad). \
 Good names are oblique, specific, or surprising — they suggest a place, a feeling, a moment, or a cultural \

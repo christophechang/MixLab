@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import datetime
 import difflib
+import io
 import os
 import sys
 import time
@@ -1014,6 +1015,10 @@ def _warn_intent(intent: str | None) -> None:
 
 
 def main() -> None:
+    # Line-buffer stdout even when piped (tee/log capture) so progress lines interleave
+    # correctly with unbuffered stderr diagnostics instead of flushing in one late block.
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True)
     load_dotenv()
     parser = argparse.ArgumentParser(
         description="MixLab — AI-powered DJ crate assistant",
