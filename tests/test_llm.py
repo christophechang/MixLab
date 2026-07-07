@@ -2959,6 +2959,78 @@ def test_selection_system_playlist_variant_has_practical_balanced_adventurous() 
     assert '"report":' not in _STAGE2_SYSTEM_PLAYLIST_SELECTION
 
 
+def test_stage2_naming_section_bans_exemplar_anchoring_and_family_repeats() -> None:
+    """Name Studio (#75): technique-driven naming, no reusable exemplars.
+
+    Live finding: the prompt's own example names leaked into output ("Fever" +
+    "Late Latitude" exemplars → "Fever Latitude" and "Fever Chart" concepts on
+    the same day). Examples must be marked as taken and the good-name exemplar
+    list removed; family-repeat rules must be stated.
+    """
+    from mixlab.llm import _STAGE2_SYSTEM
+
+    assert "ALREADY TAKEN" in _STAGE2_SYSTEM
+    assert "no two names may share a distinctive word" in _STAGE2_SYSTEM
+    assert '"[Word] & [Word]" shape at most once' in _STAGE2_SYSTEM
+    assert "at most ONE name may be lifted from a track title, artist" in _STAGE2_SYSTEM
+    # The old suggestion-flavoured exemplar list must be gone.
+    assert "Late Latitude" not in _STAGE2_SYSTEM
+    assert "Interzone" not in _STAGE2_SYSTEM
+    assert "Think how a DJ would title a mix" not in _STAGE2_SYSTEM
+    # The dedup-injection sentinel must survive the rewrite verbatim.
+    assert 'The name should make someone curious, not nod in recognition. Add a "name_reason" field' in _STAGE2_SYSTEM
+
+
+def test_naming_lenses_block_same_seed_deterministic() -> None:
+    from mixlab.llm import _naming_lenses_block
+
+    assert _naming_lenses_block(20260707) == _naming_lenses_block(20260707)
+    block = _naming_lenses_block(20260707)
+    assert block.count("\n- ") == 3
+    assert "NAMING LENSES for this run" in block
+
+
+def test_naming_lenses_block_different_seeds_rotate() -> None:
+    from mixlab.llm import _NAMING_LENSES, _naming_lenses_block
+
+    blocks = {_naming_lenses_block(seed) for seed in range(20260701, 20260731)}
+    assert len(blocks) > 1  # a month of runs must not all get the same lenses
+    # Every lens line comes from the bank verbatim.
+    for block in blocks:
+        for line in block.splitlines():
+            if line.startswith("- "):
+                assert line[2:] in _NAMING_LENSES
+
+
+@respx.mock
+async def test_stage2_curate_naming_seed_injects_lenses_genre_mode_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    captured: list[dict[str, object]] = []
+
+    def capture(request: object) -> Response:
+        body = json.loads(request.content)  # type: ignore[attr-defined]
+        captured.append(body)
+        return Response(200, json={"content": [{"text": "[]"}], "stop_reason": "end_turn"})
+
+    respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
+
+    shortlist = MixConcept(title="pool", mood="m", track_ids=["1", "2"])
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=124.0, camelot_key="6A", genre="House")
+        for i in range(1, 3)
+    }
+
+    await stage2_curate_and_report([shortlist], tracks_by_id, naming_seed=20260707)
+
+    assert captured, "no Anthropic call captured"
+    system = str(captured[0]["system"])
+    assert "NAMING LENSES for this run" in system
+
+
 def test_used_mix_names_are_injected_into_standard_selection_system() -> None:
     """Regression: the replace() search string previously had a spurious backslash that never matched."""
     from mixlab.llm import _STAGE2_SYSTEM_SELECTION

@@ -787,6 +787,37 @@ _STAGE2_RISK_FRAGMENT_LOW = """\
 \nRISK: LOW — Restraint is the brief. Prefer core tracks, adjacent-key moves, and gentle BPM steps; save bold transitions for another day. A concept succeeds here by being effortlessly mixable end to end.\
 """
 
+# Naming lenses (#75): concrete title-crafting techniques rotated per run so name
+# character varies day to day instead of converging on one house style. Three are
+# sampled by the run seed (same date-derived seed as Stage 1, overridable via
+# --stage1-seed) and injected into the Stage 2 selection prompt.
+_NAMING_LENSES: tuple[str, ...] = (
+    "lift a 2-4 word fragment from a lyric or track title in the pool and cut it mid-phrase so it reads unfinished",
+    "name a specific place at a specific hour — pick the place from the music's scene geography, not a postcard",
+    "fuse two artist or title words from the pool into one invented portmanteau word",
+    "deliberately mishear a lyric or title from the pool and write down the wrong version",
+    "use scene slang or studio jargon from the pool's dominant production era",
+    "name a physical object that would be in the booth or on the floor during this exact set",
+    "use weather or temperature as a verb, not an adjective",
+    "a fragment of overheard smoking-area conversation — first person, mid-sentence",
+    "a night-transit reference — last train, night bus route, taxi rank — matched to the set's energy",
+    "something from a DJ's phone notes at 4am: cryptic, personal, no explanation",
+    "the cadence of a white-label etching or dubplate scrawl — terse, initials, studio shorthand",
+    "a number that means something inside the set (a year, a BPM only insiders would clock) worn as a name",
+)
+
+
+def _naming_lenses_block(seed: int) -> str:
+    """Three seed-rotated naming techniques, formatted for prompt injection (#75)."""
+    rng = random.Random(seed)
+    picks = rng.sample(list(_NAMING_LENSES), 3)
+    lines = "\n".join(f"- {lens}" for lens in picks)
+    return (
+        "\n\nNAMING LENSES for this run — use each of these techniques for exactly one "
+        "concept name in this response; name any remaining concepts with distinct "
+        "techniques of your own:\n" + lines
+    )
+
 
 def select_shortlists_for_stage2(shortlists: list[MixConcept]) -> list[MixConcept]:
     """Select up to _STAGE2_CAP shortlists for Stage 2, sampling randomly from the top candidates by pool size.
@@ -1211,10 +1242,15 @@ The "mood" value must be a SHORT phrase — 12 words maximum. It is a character 
 the full thesis belongs in the report, not the mood field.
 
 Give each concept a short, evocative name (2–4 words max) — not the pool name from Stage 1. \
-Avoid generic [Adjective][Noun] patterns (e.g. "Warm Gravity", "Committed Floor", "Orbital Descent" are bad). \
-Good names are oblique, specific, or surprising — they suggest a place, a feeling, a moment, or a cultural \
-reference rather than describing the music. Think how a DJ would title a mix: "Late Latitude", "Fever", \
-"Interzone", "Red Light", "The Slow Hours". The name should make someone curious, not nod in recognition. \
+NAME CRAFT: names come from technique, not vocabulary. Any example name printed anywhere in these \
+instructions is ALREADY TAKEN — never reuse, echo, or recombine its words ("Warm Gravity", "Committed \
+Floor", "Orbital Descent" are all burned, and bad besides: the generic [Adjective][Noun] mood pattern \
+is banned entirely). Hard rules across this whole response: no two names may share a distinctive word; \
+use the "[Word] & [Word]" shape at most once; at most ONE name may be lifted from a track title, artist, \
+or label in its own track list — and it must be twisted, not quoted verbatim. Use a different naming \
+technique for every concept in the response. A good name sounds like something you'd text a friend at \
+2am about last night, not a poetry-collection title. \
+The name should make someone curious, not nod in recognition. \
 Add a "name_reason" field: one short sentence (max 15 words) explaining WHY this specific title was \
 chosen — what literal or metaphorical quality in the track list earns the name. This must reference \
 the title explicitly and connect it to something audible (BPM arc, key centre, a specific track, \
@@ -2949,6 +2985,7 @@ async def stage2_curate_and_report(
     deep: bool = False,
     debug: bool = False,
     mix_length: int | None = None,
+    naming_seed: int | None = None,
 ) -> tuple[list[MixConcept], str]:
     stage2_key = os.environ.get("ANTHROPIC_API_KEY")
     if not stage2_key:
@@ -3177,6 +3214,10 @@ async def stage2_curate_and_report(
         stage2_system = stage2_system + _STAGE2_RISK_FRAGMENT_HIGH
     elif playlist_name is None and risk == "low":
         stage2_system = stage2_system + _STAGE2_RISK_FRAGMENT_LOW
+    # Naming lenses (#75): genre mode only — playlist mode overwrites titles via
+    # _retitle_playlist_concept, so lens pressure there would be wasted tokens.
+    if playlist_name is None and naming_seed is not None:
+        stage2_system = stage2_system + _naming_lenses_block(naming_seed)
     _name_dedup_sentinel = 'The name should make someone curious, not nod in recognition. Add a "name_reason" field'
     if used_mix_names:
         assert _name_dedup_sentinel in stage2_system, (

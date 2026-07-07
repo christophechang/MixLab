@@ -945,6 +945,7 @@ async def run(
         deep=deep,
         debug=debug,
         mix_length=mix_length,
+        naming_seed=effective_seed,
     )
     if not all_concepts:
         print(report, file=sys.stderr)
