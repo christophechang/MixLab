@@ -24,6 +24,9 @@ class Track(BaseModel):
     remixer: str = ""
     mix: list[str] = Field(default_factory=list)
     enrichment_confidence: Literal["high", "medium", "low", ""] = ""
+    duration_secs: int | None = None
+    date_added: str = ""
+    rating: int | None = None
 
 
 class PlayedTrack(BaseModel):
@@ -224,6 +227,15 @@ class MixCanvas:
     # the Stage 2 canvas header so the model can deliberately use them in structural
     # roles. Empty when no off-core track crosses the multi-signal threshold.
     concept_anchor_candidates: list[ConceptAnchorCandidate] = field(default_factory=list)
+    # Concept-direction metadata (#53). When ``brief`` is non-empty this canvas was
+    # materialised from a cross-strata creative direction (mood journey, era dialogue,
+    # etc.) rather than a BPM-stratum shortlist. ``brief`` is the DIRECTION BRIEF text
+    # rendered ahead of the canvas block in the Stage 2 prompt; ``direction_type`` names
+    # the direction family; ``thread_artist`` scopes the artist-thread validator
+    # suppression (empty for every other direction type and for classic canvases).
+    brief: str = ""
+    direction_type: str = ""
+    thread_artist: str = ""
 
 
 SeedTier = Literal["anchor", "supporting", "optional"]

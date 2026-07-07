@@ -12,8 +12,10 @@ from mixlab.clustering import (
     MIN_POOL_COUNT,
     MIN_SHORTLIST,
     _camelot_components,
+    _centrality_rank,
     _era_split,
     _find_bpm_peaks,
+    _has_vocal_token,
     _infer_shortlist_mood,
     _resize_shortlists,
     build_custom_genre_pool,
@@ -25,6 +27,7 @@ from mixlab.clustering import (
     partition_bpm_pools,
     partition_outliers,
     partition_pool,
+    partition_pool_with_stats,
     score_anchors,
     score_canvas,
     select_canvases,
@@ -411,6 +414,33 @@ def test_build_mix_canvas_contrast_assets_vocal() -> None:
     assert "plain" not in canvas.contrast.vocal_moments
 
 
+def test_has_vocal_token_rejects_false_positives() -> None:
+    """Ensure vocal token matching uses word boundaries, not substring matching."""
+    # These should NOT match (false positives with substring matching)
+    assert not _has_vocal_token("Afterlife")  # contains "ft" but not as word boundary
+    assert not _has_vocal_token("Left Field")  # contains "ft" in "Left"
+    assert not _has_vocal_token("Soft Focus")  # contains "ft" in "Soft"
+    assert not _has_vocal_token("The Loft")  # contains "ft" in "Loft"
+    assert not _has_vocal_token("Swift Motion")  # contains "ft" in "Swift"
+
+
+def test_has_vocal_token_accepts_vocal_tokens() -> None:
+    """Ensure vocal token matching detects valid tokens."""
+    # These SHOULD match
+    assert _has_vocal_token("Massive Attack feat. Tracey Thorn")  # feat. token
+    assert _has_vocal_token("ft. MC Det")  # ft. token
+    assert _has_vocal_token("Vocal Mix")  # vocal token
+    assert _has_vocal_token("w/ Jenna G")  # w/ token
+    assert _has_vocal_token("Featuring Sara")  # featuring token
+    # Case insensitivity
+    assert _has_vocal_token("FEAT Sample")
+    assert _has_vocal_token("Featuring Artist")
+    assert _has_vocal_token("VOCALS Remix")
+    # Variations
+    assert _has_vocal_token("feat Sample")
+    assert _has_vocal_token("ft Sample")
+
+
 def test_build_mix_canvas_risk_notes_weak_closer_no_energy() -> None:
     # No energy metadata + uniform BPM → BPM proxy can't help → risk note fires
     tracks = [_track(track_id=str(i), bpm=172.0, energy=None) for i in range(5)]
@@ -741,13 +771,42 @@ def test_select_canvases_novelty_penalty() -> None:
     assert s.novelty < 1.0  # penalised by history
 
 
-def test_select_canvases_returns_all_when_fewer_than_n() -> None:
+def test_select_canvases_three_candidates_returns_three() -> None:
+    # #48: the forward-everything branch is gone. With 3 candidates, n_effective =
+    # min(6, max(3, ceil(0.75*3))) = 3, so all three still survive the greedy loop —
+    # 3 is the floor below which nothing is dropped.
     from mixlab.models import MixCanvas
 
     canvases = [_rich_canvas(f"c{i}", [f"T{i}{j:02d}" for j in range(5)]) for i in range(3)]
     assert all(isinstance(c, MixCanvas) for c in canvases)
     selected = select_canvases(canvases, ConceptHistory(), n=6)  # type: ignore[arg-type]
     assert len(selected) == 3
+
+
+def test_select_canvases_four_candidates_drops_weakest_returns_three() -> None:
+    # #48: n_effective = min(6, max(3, ceil(0.75*4))) = 3 → the weakest of 4 is dropped.
+    from mixlab.models import MixCanvas
+
+    strong = [_rich_canvas(f"s{i}", [f"S{i}{j:02d}" for j in range(20)]) for i in range(3)]
+    weak = _rich_canvas("weak", ["W000"])  # 1-track core → floor multiplier + weak scores
+    canvases = [*strong, weak]
+    assert all(isinstance(c, MixCanvas) for c in canvases)
+    selected = select_canvases(canvases, ConceptHistory(), n=6)  # type: ignore[arg-type]
+    assert len(selected) == 3
+    assert "weak" not in {c.canvas_id for c in selected}
+
+
+def test_select_canvases_six_candidates_drops_weakest_returns_five() -> None:
+    # #48: n_effective = min(6, max(3, ceil(0.75*6))) = 5 → exactly one (the weakest) drops.
+    from mixlab.models import MixCanvas
+
+    strong = [_rich_canvas(f"s{i}", [f"S{i}{j:02d}" for j in range(20)]) for i in range(5)]
+    weak = _rich_canvas("weak", ["W000"])
+    canvases = [*strong, weak]
+    assert all(isinstance(c, MixCanvas) for c in canvases)
+    selected = select_canvases(canvases, ConceptHistory(), n=6)  # type: ignore[arg-type]
+    assert len(selected) == 5
+    assert "weak" not in {c.canvas_id for c in selected}
 
 
 # ---------------------------------------------------------------------------
@@ -1481,14 +1540,25 @@ def test_partition_pool_small_but_above_absolute_min_returns_single_shortlist() 
     assert len(result[0].track_ids) == ABSOLUTE_MIN + 1
 
 
-def test_partition_pool_n_groups_one_fallback_no_peaks_returns_single_shortlist_up_to_29_tracks() -> None:
-    # 15–29 tracks with BPM spread ≥ 4.0 but no peaks → n_groups = 1 → single shortlist.
+def test_partition_pool_n_groups_one_fallback_no_peaks_returns_single_shortlist() -> None:
+    # 15–25 tracks with BPM spread ≥ 4.0 but no peaks → n_groups = 1 → single shortlist.
     # Spread tracks linearly across a range that yields monotone histogram (no interior peak).
-    # 20 tracks from 165 to 184 BPM in 1-BPM steps.
+    # 20 tracks from 165 to 184 BPM in 1-BPM steps → within MAX_SHORTLIST, no windowing.
     tracks = [_pt(track_id=str(i), bpm=165.0 + i) for i in range(20)]
     result = partition_pool(tracks)
     # n_groups = min(5, 20//15) = 1 → single shortlist returned immediately.
     assert len(result) == 1
+
+
+def test_partition_pool_n_groups_one_fallback_oversized_now_windowed_to_max() -> None:
+    # #48 contract change: the n_groups=1 fallback used to return up to 29 tracks intact
+    # (4 over MAX_SHORTLIST). Seeded windowing now enforces the 15–25 ceiling here too.
+    # 28 tracks in 1-BPM steps → monotone histogram → no peaks → n_groups=min(5,28//15)=1.
+    tracks = [_pt(track_id=f"{i:02d}", bpm=165.0 + i) for i in range(28)]
+    concepts, stats = partition_pool_with_stats(tracks, seed=7)
+    assert len(concepts) == 1
+    assert len(concepts[0].track_ids) == MAX_SHORTLIST
+    assert stats.overflow_counts == [28 - MAX_SHORTLIST]
 
 
 def test_partition_pool_n_groups_one_fallback_bypasses_step4_peaks_path_same_size_does_not() -> None:
@@ -2280,3 +2350,245 @@ def test_partition_pool_custom_genre_pool_respects_sub_genre_coherence() -> None
     all_ids = {tid for c in result for tid in c.track_ids}
     expected = {f"G1_{i}" for i in range(25)} | {f"G2_{i}" for i in range(25)}
     assert all_ids == expected
+
+
+# ---------------------------------------------------------------------------
+# Seeded final windowing — partition_pool_with_stats (issue #48)
+# ---------------------------------------------------------------------------
+
+
+def _gaussian_pool(n: int = 800, *, rng_seed: int = 42) -> list[Track]:
+    """Build an n-track pool with a Gaussian BPM mixture (deterministic local RNG).
+
+    Mirrors the real-world oversubscribed-pool case that produced 5×160-track
+    shortlists before #48: a large single-genre pool whose Camelot/BPM structure
+    collapses to a few very large clusters.
+    """
+    import random as _random
+
+    local = _random.Random(rng_seed)
+    keys = [f"{num}{mode}" for num in range(1, 13) for mode in "AB"]
+    pool = [
+        _pt(
+            track_id=f"{i:04d}",
+            bpm=round(local.gauss(125, 8) if i % 3 else local.gauss(132, 5), 1),
+            camelot_key=local.choice(keys),
+            year=local.choice([None, *range(1992, 2026)]),
+        )
+        for i in range(n)
+    ]
+    return [t for t in pool if t.bpm > 60]
+
+
+def test_partition_pool_large_pool_all_shortlists_within_max_and_overflow_accounts_for_all() -> None:
+    # #48: an 800-track pool must emit 3–5 shortlists, ALL <= MAX_SHORTLIST, and the
+    # reported overflow must account for every track dropped by windowing.
+    pool = _gaussian_pool(800)
+    concepts, stats = partition_pool_with_stats(sorted(pool, key=lambda t: t.bpm), seed=1)
+    assert MIN_POOL_COUNT <= len(concepts) <= MAX_POOL_COUNT
+    assert all(len(c.track_ids) <= MAX_SHORTLIST for c in concepts)
+    assert len(stats.overflow_counts) == len(concepts)
+    emitted = sum(len(c.track_ids) for c in concepts)
+    assert sum(stats.overflow_counts) == len(pool) - emitted
+
+
+def test_partition_pool_same_seed_identical_two_seeds_differ_on_oversized_pool() -> None:
+    # #48: reproducibility (same seed → identical) plus run-to-run exploration
+    # (different seeds → at least one shortlist differs) on an oversized pool.
+    pool = sorted(_gaussian_pool(800), key=lambda t: t.bpm)
+    a1, _ = partition_pool_with_stats(pool, seed=1)
+    a2, _ = partition_pool_with_stats(pool, seed=1)
+    b, _ = partition_pool_with_stats(pool, seed=2)
+    assert [c.track_ids for c in a1] == [c.track_ids for c in a2]
+    assert [c.track_ids for c in a1] != [c.track_ids for c in b]
+
+
+def test_partition_pool_small_pool_no_windowing_overflow_zero_and_output_matches_legacy() -> None:
+    # #48: a pool with no oversized shortlists must have overflow_counts all zero and
+    # produce output identical to the plain partition_pool wrapper (pre-change behaviour
+    # preserved for the common case). Exercised on two typical scenarios.
+    for tracks in (_typical_pool(80), _typical_pool(60, base_bpm=120.0)):
+        concepts, stats = partition_pool_with_stats(tracks, seed=99)
+        assert all(oc == 0 for oc in stats.overflow_counts)
+        assert all(len(c.track_ids) <= MAX_SHORTLIST for c in concepts)
+        legacy = partition_pool(tracks, seed=99)
+        assert [c.track_ids for c in concepts] == [c.track_ids for c in legacy]
+
+
+def test_window_shortlist_spine_present_for_any_seed() -> None:
+    # #48 spine property: the MIN_SHORTLIST most-central tracks of an oversized shortlist
+    # appear in the emitted window regardless of seed (only the sampled fill varies).
+    import random as _random
+
+    from mixlab.clustering import _window_shortlist
+
+    oversized = [_pt(track_id=f"{i:03d}", bpm=170.0 + (i % 25) * 0.4, camelot_key="8A") for i in range(40)]
+    spine_ids = {t.track_id for t in _centrality_rank(oversized)[:MIN_SHORTLIST]}
+    for seed in (1, 2, 3):
+        window, overflow = _window_shortlist(oversized, _random.Random(seed))
+        window_ids = {t.track_id for t in window}
+        assert len(window) == MAX_SHORTLIST
+        assert spine_ids <= window_ids
+        assert len(overflow) == 40 - MAX_SHORTLIST
+        # window is BPM-sorted by (bpm, track_id)
+        assert [(t.bpm, t.track_id) for t in window] == sorted((t.bpm, t.track_id) for t in window)
+
+
+def test_window_shortlist_different_seeds_vary_the_fill() -> None:
+    # #48: the sampled (non-spine) fill differs across seeds so runs explore the pool.
+    import random as _random
+
+    from mixlab.clustering import _window_shortlist
+
+    oversized = [_pt(track_id=f"{i:03d}", bpm=170.0 + (i % 25) * 0.4, camelot_key="8A") for i in range(40)]
+    w1, _ = _window_shortlist(oversized, _random.Random(1))
+    w2, _ = _window_shortlist(oversized, _random.Random(2))
+    assert {t.track_id for t in w1} != {t.track_id for t in w2}
+
+
+# ---------------------------------------------------------------------------
+# Risk knob (#42) — CANVAS_SCORE_WEIGHTS_BY_RISK / select_canvases(risk=...)
+# ---------------------------------------------------------------------------
+
+
+def test_canvas_weights_by_risk_sum_to_one() -> None:
+    """Every non-None risk weight table must sum exactly to 1.0 (validated by
+    CanvasScoreWeights.__post_init__ at construction — this asserts it explicitly).
+    """
+    from mixlab.clustering import CANVAS_SCORE_WEIGHTS_BY_RISK
+
+    for risk, w in CANVAS_SCORE_WEIGHTS_BY_RISK.items():
+        if w is None:
+            continue
+        total = (
+            w.technical_viability
+            + w.role_coverage
+            + w.anchor_strength
+            + w.contrast_potential
+            + w.distinctiveness
+            + w.era_coherence
+            + w.label_coherence
+            + w.novelty
+        )
+        assert abs(total - 1.0) < 1e-9, f"risk {risk!r} weights sum to {total}, not 1.0"
+
+
+def test_canvas_weights_by_risk_medium_is_none() -> None:
+    """risk='medium' must map to None — it is a no-op override so the mode/default
+    table is used unchanged (byte-stable with pre-#42 behaviour).
+    """
+    from mixlab.clustering import CANVAS_SCORE_WEIGHTS_BY_RISK
+
+    assert CANVAS_SCORE_WEIGHTS_BY_RISK["medium"] is None
+
+
+def test_select_canvases_risk_medium_matches_default_selection() -> None:
+    """risk='medium' (explicit) must produce byte-identical selection to omitting
+    the argument entirely — the regression guard for #42's default behaviour.
+    """
+    from mixlab.models import MixCanvas
+
+    good = _rich_canvas("good", [f"T{i:03d}" for i in range(20)])
+    poor = _rich_canvas("poor", ["X001"])
+    assert isinstance(good, MixCanvas)
+    assert isinstance(poor, MixCanvas)
+    selected_default = select_canvases([poor, good], ConceptHistory(), n=1)
+    selected_medium = select_canvases([poor, good], ConceptHistory(), n=1, risk="medium")
+    assert [c.canvas_id for c in selected_default] == [c.canvas_id for c in selected_medium]
+
+
+def test_select_canvases_risk_high_promotes_contrast_over_role_coverage() -> None:
+    """A contrast-rich, role-sparse, wildcard-heavy canvas loses to a role-complete,
+    contrast-free canvas at risk='medium', but wins at risk='high' — the risk table
+    shifts enough weight from role_coverage/anchor_strength to contrast_potential to
+    flip the ranking (#42).
+    """
+    from mixlab.models import CanvasRoleCandidates, CanvasScore, ContrastAssets, MixCanvas
+
+    clean_ids = [f"C{i:03d}" for i in range(20)]
+    clean = MixCanvas(
+        canvas_id="clean",
+        genre="Drum & Bass",
+        bpm_range=(168.0, 176.0),
+        dominant_bpm=172.0,
+        dominant_camelot="4A",
+        core_track_ids=clean_ids,
+        bridge_track_ids=[],
+        wildcard_track_ids=[],
+        roles=CanvasRoleCandidates(
+            opener=clean_ids[:1],
+            groove_locker=clean_ids[:2],
+            builder=clean_ids[1:3],
+            pivot=clean_ids[10:11],
+            peak=clean_ids[-2:],
+            closer=clean_ids[-1:],
+        ),
+        contrast=ContrastAssets(
+            vocal_moments=[], texture_changes=[], darker_turns=[], brighter_lifts=[], lower_pressure_resets=[]
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=MixConcept(title="Clean", mood="steady", track_ids=clean_ids),
+    )
+
+    wild_ids = [f"W{i:03d}" for i in range(20)]
+    contrast_rich = MixCanvas(
+        canvas_id="contrast",
+        genre="Drum & Bass",
+        bpm_range=(168.0, 176.0),
+        dominant_bpm=172.0,
+        dominant_camelot="4A",
+        core_track_ids=wild_ids,
+        bridge_track_ids=[f"B{i:03d}" for i in range(3)],
+        wildcard_track_ids=[f"WC{i:03d}" for i in range(3)],
+        roles=CanvasRoleCandidates(
+            opener=[],
+            groove_locker=wild_ids[:2],
+            builder=[],
+            pivot=[],
+            peak=wild_ids[-2:],
+            closer=[],
+        ),
+        contrast=ContrastAssets(
+            vocal_moments=wild_ids[:1],
+            texture_changes=wild_ids[1:2],
+            darker_turns=wild_ids[2:3],
+            brighter_lifts=wild_ids[3:4],
+            lower_pressure_resets=[],
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=MixConcept(title="Contrast", mood="wild", track_ids=wild_ids),
+    )
+
+    picked_medium = select_canvases([clean, contrast_rich], ConceptHistory(), n=1, risk="medium")
+    picked_high = select_canvases([clean, contrast_rich], ConceptHistory(), n=1, risk="high")
+
+    assert picked_medium[0].canvas_id == "clean"
+    assert picked_high[0].canvas_id == "contrast"
+
+
+def test_select_canvases_risk_low_favours_role_coverage_and_anchors() -> None:
+    """risk='low' weights role_coverage/anchor_strength even more heavily than medium —
+    the clean, role-complete canvas should still win (sanity check that the low table
+    doesn't accidentally invert the medium ranking).
+    """
+    from mixlab.models import MixCanvas
+
+    good = _rich_canvas("good", [f"T{i:03d}" for i in range(20)])
+    poor = _rich_canvas("poor", ["X001"])
+    assert isinstance(good, MixCanvas)
+    assert isinstance(poor, MixCanvas)
+    selected = select_canvases([poor, good], ConceptHistory(), n=1, risk="low")
+    assert selected[0].canvas_id == "good"
+
+
+def test_select_canvases_debug_risk_in_output(capsys: pytest.CaptureFixture[str]) -> None:
+    """Debug output names the active risk tolerance (#42)."""
+    from mixlab.models import MixCanvas
+
+    canvases = [_rich_canvas(f"c{i}", [f"T{i}{j:02d}" for j in range(10)]) for i in range(3)]
+    assert all(isinstance(c, MixCanvas) for c in canvases)
+    select_canvases(canvases, ConceptHistory(), n=2, risk="high", debug=True)  # type: ignore[arg-type]
+    captured = capsys.readouterr()
+    assert "risk=high" in captured.err

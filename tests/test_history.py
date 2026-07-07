@@ -9,12 +9,15 @@ from mixlab.history import (
     _NOVELTY_SHAPE_WEIGHT,
     _NOVELTY_TRACK_WEIGHT,
     ConceptHistory,
+    ConceptRecord,
     HistoryEntry,
     append_run,
     concept_shape_from_canvas,
     concept_shape_from_entry,
+    concept_shape_from_record,
     concept_shape_similarity,
     load_history,
+    save_history,
     similarity_breakdown_to_history,
     similarity_to_history,
 )
@@ -549,3 +552,337 @@ def test_format_recent_concepts_includes_divergence_instruction() -> None:
     block = format_recent_concepts(ConceptHistory(runs=[_entry("r1", ["T001"])]))
     assert block is not None
     assert "Diverge deliberately" in block
+
+
+# ---------------------------------------------------------------------------
+# ConceptRecord — full per-run concept list (#52)
+# ---------------------------------------------------------------------------
+
+
+def _record(
+    concept_id: str,
+    title: str,
+    *,
+    track_ids: list[str] | None = None,
+    mood: str = "dark",
+    arc_type: str = "",
+    role_pattern: list[str] | None = None,
+    feedback: str = "",
+) -> ConceptRecord:
+    return ConceptRecord(
+        concept_id=concept_id,
+        title=title,
+        mood=mood,
+        track_ids=track_ids if track_ids is not None else [],
+        arc_type=arc_type,
+        role_pattern=role_pattern if role_pattern is not None else [],
+        feedback=feedback,
+    )
+
+
+def test_append_run_round_trip_preserves_multiple_concept_records(tmp_path: Path) -> None:
+    """A run with 3 ConceptRecords survives a save/load round-trip with all fields intact."""
+    p = tmp_path / "history.json"
+    entry = _entry("r1", ["T001", "T002"])
+    entry.concepts = [
+        _record("c1", "First", track_ids=["T001"], arc_type="wave", role_pattern=["opener"]),
+        _record(
+            "c2",
+            "Second",
+            track_ids=["T002"],
+            mood="light",
+            arc_type="plateau",
+            role_pattern=["closer"],
+            feedback="played",
+        ),
+        _record("c3", "Third", track_ids=["T001", "T002"]),
+    ]
+    append_run(ConceptHistory(), entry, p)
+    reloaded = load_history(p)
+
+    assert len(reloaded.runs) == 1
+    assert len(reloaded.runs[0].concepts) == 3
+    assert [c.title for c in reloaded.runs[0].concepts] == ["First", "Second", "Third"]
+    assert reloaded.runs[0].concepts[1].feedback == "played"
+    assert reloaded.runs[0].concepts[1].mood == "light"
+    assert reloaded.runs[0].concepts[0].role_pattern == ["opener"]
+
+
+def test_load_history_old_format_without_concepts_key_loads_empty_list(tmp_path: Path) -> None:
+    """Pre-#52 history files have no 'concepts' key at all — must load with concepts=[]."""
+    p = tmp_path / "history.json"
+    old_entry = {
+        "run_id": "r1",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "mode": "standard",
+        "genre": "house",
+        "selected_canvas_ids": ["c1"],
+        "dominant_bpm_clusters": [124.0],
+        "dominant_camelot_keys": ["8A"],
+        "core_track_ids": ["T001", "T002"],
+        "anchor_track_ids": ["T001"],
+        "opener_candidates": ["T001"],
+        "closer_candidates": ["T002"],
+        "concept_title": "Old",
+        "concept_track_ids": ["T001", "T002"],
+        "energy_path": "",
+        "mood": "dark",
+        "rating": None,
+    }
+    p.write_text(json.dumps({"runs": [old_entry]}))
+    history = load_history(p)
+    assert history.runs[0].concepts == []
+    # Legacy fields remain intact.
+    assert history.runs[0].concept_title == "Old"
+    assert history.runs[0].concept_track_ids == ["T001", "T002"]
+
+
+def test_load_history_coerces_concept_dicts_missing_optional_fields(tmp_path: Path) -> None:
+    """A stored concept dict missing feedback fields loads with their defaults."""
+    p = tmp_path / "history.json"
+    entry = _entry("r1", ["T001"])
+    entry.concepts = [_record("c1", "First", track_ids=["T001"])]
+    p.write_text(json.dumps({"runs": [_history_entry_dict(entry)]}))
+    history = load_history(p)
+    assert history.runs[0].concepts[0].feedback == ""
+    assert history.runs[0].concepts[0].feedback_notes == ""
+
+
+def _history_entry_dict(entry: HistoryEntry) -> dict[str, object]:
+    from dataclasses import asdict
+
+    return asdict(entry)
+
+
+def test_save_history_persists_without_appending(tmp_path: Path) -> None:
+    """save_history writes the file as-is — no append/truncate semantics."""
+    p = tmp_path / "history.json"
+    history = ConceptHistory(runs=[_entry("r1", ["T001"]), _entry("r2", ["T002"])])
+    save_history(history, p)
+    reloaded = load_history(p)
+    assert [r.run_id for r in reloaded.runs] == ["r1", "r2"]
+
+
+def test_save_history_persists_mutated_feedback(tmp_path: Path) -> None:
+    """Round-trips a feedback edit made in-place on a loaded history (the --feedback flow)."""
+    p = tmp_path / "history.json"
+    entry = _entry("r1", ["T001"])
+    entry.concepts = [_record("c1", "First", track_ids=["T001"])]
+    save_history(ConceptHistory(runs=[entry]), p)
+
+    reloaded = load_history(p)
+    reloaded.runs[0].concepts[0].feedback = "played"
+    reloaded.runs[0].concepts[0].feedback_notes = "great opener"
+    save_history(reloaded, p)
+
+    reloaded_again = load_history(p)
+    assert reloaded_again.runs[0].concepts[0].feedback == "played"
+    assert reloaded_again.runs[0].concepts[0].feedback_notes == "great opener"
+
+
+def test_concept_shape_from_record_uses_entry_dominant_lists_and_record_arc_role() -> None:
+    entry = _entry("r1", ["T001", "T002"])
+    record = _record("c1", "T", track_ids=["T001"], arc_type="build-and-drop", role_pattern=["peak"])
+    shape = concept_shape_from_record(record, entry)
+    assert shape.bpm_band == "170-180"
+    assert shape.camelot_zone == "4A"
+    assert shape.energy_path == "build-and-drop"
+    assert shape.has_peak is True
+
+
+# ---------------------------------------------------------------------------
+# format_recent_concepts — lists every concept a run produced (#52)
+# ---------------------------------------------------------------------------
+
+
+def test_format_recent_concepts_lists_all_concepts_in_a_multi_concept_run() -> None:
+    from mixlab.history import format_recent_concepts
+
+    entry = _entry("r1", ["T001"], genre="house")
+    entry.concepts = [
+        _record("c1", "First", track_ids=["T001"], arc_type="wave"),
+        _record("c2", "Second", track_ids=["T002"], arc_type="plateau"),
+        _record("c3", "Third", track_ids=["T003"]),
+    ]
+    block = format_recent_concepts(ConceptHistory(runs=[entry]))
+    assert block is not None
+    assert "First" in block
+    assert "Second" in block
+    assert "Third" in block
+
+
+def test_format_recent_concepts_dedupes_by_lowercased_title_keeping_most_recent() -> None:
+    from mixlab.history import format_recent_concepts
+
+    e1 = _entry("r1", ["T001"], genre="house")
+    e1.concepts = [_record("c1", "Midnight Run", track_ids=["T001"], mood="dark")]
+    e2 = _entry("r2", ["T002"], genre="house")
+    e2.concepts = [_record("c2", "midnight run", track_ids=["T002"], mood="light")]
+    block = format_recent_concepts(ConceptHistory(runs=[e1, e2]))
+    assert block is not None
+    # Only one line for the title overall — the more recent run (e2, "light" mood) wins.
+    assert block.lower().count("midnight run") == 1
+    assert "mood: light" in block
+    assert "mood: dark" not in block
+
+
+def test_format_recent_concepts_respects_limit_across_multiple_concepts_per_run() -> None:
+    from mixlab.history import format_recent_concepts
+
+    entry = _entry("r1", ["T001"], genre="house")
+    entry.concepts = [_record(f"c{i}", f"Concept{i}", track_ids=[f"T{i:03d}"]) for i in range(10)]
+    block = format_recent_concepts(ConceptHistory(runs=[entry]), limit=3)
+    assert block is not None
+    assert "Concept0" in block
+    assert "Concept1" in block
+    assert "Concept2" in block
+    assert "Concept3" not in block
+
+
+def test_format_recent_concepts_falls_back_to_legacy_fields_when_concepts_empty() -> None:
+    from mixlab.history import format_recent_concepts
+
+    entry = _entry("r1", ["T001"], genre="house")
+    entry.concept_title = "Legacy Title"
+    entry.energy_path = "wave"
+    entry.mood = "dark"
+    assert entry.concepts == []
+    block = format_recent_concepts(ConceptHistory(runs=[entry]))
+    assert block is not None
+    assert "Legacy Title" in block
+    assert "arc: wave" in block
+
+
+def test_recent_concepts_limit_constant_is_eight() -> None:
+    from mixlab.history import _RECENT_CONCEPTS_LIMIT
+
+    assert _RECENT_CONCEPTS_LIMIT == 8
+
+
+# ---------------------------------------------------------------------------
+# Shape-novelty over every stored concept, not just the first (#52)
+# ---------------------------------------------------------------------------
+
+
+def test_similarity_breakdown_shape_uses_max_across_concepts_in_a_run() -> None:
+    """A second concept whose shape matches the candidate canvas raises shape_sim above
+    what a single non-matching first concept alone would produce."""
+    canvas = _canvas(["T001", "T002"])
+    canvas.roles.peak = ["T001"]  # canvas_shape.has_peak = True
+
+    entry_single = _entry("r1", ["X001", "X002"])  # disjoint tracks -> track_sim = 0.0
+    entry_single.concepts = [_record("c1", "No Peak", track_ids=["X001"], role_pattern=[])]
+    breakdown_single = similarity_breakdown_to_history(canvas, ConceptHistory(runs=[entry_single]))
+
+    entry_multi = _entry("r1", ["X001", "X002"])
+    entry_multi.concepts = [
+        _record("c1", "No Peak", track_ids=["X001"], role_pattern=[]),
+        _record("c2", "Has Peak", track_ids=["X002"], role_pattern=["peak"]),
+    ]
+    breakdown_multi = similarity_breakdown_to_history(canvas, ConceptHistory(runs=[entry_multi]))
+
+    assert breakdown_multi.shape_similarity > breakdown_single.shape_similarity
+    assert breakdown_multi.combined > breakdown_single.combined
+
+
+def test_similarity_breakdown_falls_back_to_entry_shape_when_concepts_empty() -> None:
+    """No concept records at all (legacy entry) -> behaviour unchanged from pre-#52."""
+    canvas = _canvas(["T001", "T002", "T003"])
+    entry = _entry("r1", ["T001", "T002", "T003"])
+    assert entry.concepts == []
+    breakdown = similarity_breakdown_to_history(canvas, ConceptHistory(runs=[entry]))
+    assert breakdown.combined == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Feedback multiplier (#12 discovery doc / #52)
+# ---------------------------------------------------------------------------
+
+
+def test_feedback_multiplier_played_scales_up() -> None:
+    from mixlab.history import _feedback_multiplier
+
+    entry = _entry("r1", ["T001"])
+    entry.concepts = [_record("c1", "T", track_ids=["T001"], feedback="played")]
+    assert _feedback_multiplier(entry) == pytest.approx(1.5)
+
+
+def test_feedback_multiplier_played_modified_scales_up() -> None:
+    from mixlab.history import _feedback_multiplier
+
+    entry = _entry("r1", ["T001"])
+    entry.concepts = [_record("c1", "T", track_ids=["T001"], feedback="played_modified")]
+    assert _feedback_multiplier(entry) == pytest.approx(1.5)
+
+
+def test_feedback_multiplier_all_rejected_scales_down() -> None:
+    from mixlab.history import _feedback_multiplier
+
+    entry = _entry("r1", ["T001"])
+    entry.concepts = [
+        _record("c1", "A", track_ids=["T001"], feedback="rejected"),
+        _record("c2", "B", track_ids=["T002"], feedback="rejected"),
+    ]
+    assert _feedback_multiplier(entry) == pytest.approx(0.25)
+
+
+def test_feedback_multiplier_rejected_plus_unset_still_scales_down() -> None:
+    """A rejected concept alongside an as-yet-unrated one is still all-rejected among
+    the non-empty verdicts — 0.25x, not diluted back to neutral."""
+    from mixlab.history import _feedback_multiplier
+
+    entry = _entry("r1", ["T001"])
+    entry.concepts = [
+        _record("c1", "A", track_ids=["T001"], feedback="rejected"),
+        _record("c2", "B", track_ids=["T002"], feedback=""),
+    ]
+    assert _feedback_multiplier(entry) == pytest.approx(0.25)
+
+
+def test_feedback_multiplier_mixed_rejected_and_unused_is_neutral() -> None:
+    """A genuinely mixed bag (rejected + unused, neither played) falls through to 1.0 —
+    only an all-rejected set of non-empty verdicts triggers the 0.25x discount."""
+    from mixlab.history import _feedback_multiplier
+
+    entry = _entry("r1", ["T001"])
+    entry.concepts = [
+        _record("c1", "A", track_ids=["T001"], feedback="rejected"),
+        _record("c2", "B", track_ids=["T002"], feedback="unused"),
+    ]
+    assert _feedback_multiplier(entry) == pytest.approx(1.0)
+
+
+def test_feedback_multiplier_no_concepts_is_neutral() -> None:
+    from mixlab.history import _feedback_multiplier
+
+    entry = _entry("r1", ["T001"])
+    assert _feedback_multiplier(entry) == pytest.approx(1.0)
+
+
+def test_similarity_breakdown_clamps_played_multiplier_to_one() -> None:
+    """Perfect track+shape match with a 'played' concept: 1.0 * 1.5 must clamp to 1.0."""
+    canvas = _canvas(["T001", "T002", "T003"])
+    entry = _entry("r1", ["T001", "T002", "T003"])
+    entry.concepts = [
+        _record(
+            "c1",
+            "T",
+            track_ids=["T001", "T002", "T003"],
+            arc_type="single_arc",
+            role_pattern=["opener", "closer"],
+            feedback="played",
+        )
+    ]
+    breakdown = similarity_breakdown_to_history(canvas, ConceptHistory(runs=[entry]))
+    assert breakdown.feedback_multiplier == pytest.approx(1.5)
+    assert breakdown.combined == pytest.approx(1.0)
+
+
+def test_similarity_breakdown_scales_shape_only_match_by_rejected_multiplier() -> None:
+    """Shape-only match (0.35 combined) with an all-rejected concept scales to 0.25x."""
+    canvas = _canvas(["T001"])
+    entry = _entry("r1", ["X999"])  # disjoint tracks -> track_sim = 0.0, shape matches by default
+    entry.concepts = [_record("c1", "T", track_ids=["X999"], feedback="rejected")]
+    breakdown = similarity_breakdown_to_history(canvas, ConceptHistory(runs=[entry]))
+    assert breakdown.feedback_multiplier == pytest.approx(0.25)
+    assert breakdown.combined == pytest.approx(_NOVELTY_SHAPE_WEIGHT * 0.25)

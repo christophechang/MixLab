@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import cast, get_args
+from typing import Literal, cast, get_args
 
+import httpx
 import pytest
 import respx
 from httpx import Response
@@ -12,10 +13,12 @@ from mixlab.models import (
     CanvasScore,
     CompletionVariant,
     ContrastAssets,
+    Critique,
     DJPracticalityScore,
     MixCanvas,
     MixConcept,
     Track,
+    Transition,
 )
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -81,137 +84,167 @@ def _make_tracks(n: int, genre: str = "Drum & Bass") -> list[Track]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 1
+# _call_anthropic_http — retry/backoff, truncation, env config (#50)
 # ---------------------------------------------------------------------------
 
 
 @respx.mock
-async def test_stage1_skips_provider_if_key_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mixlab.llm import make_cascade_state, stage1_concepts
+async def test_call_anthropic_http_retries_after_429_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _call_anthropic_http
 
-    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    sleeps: list[float] = []
 
-    respx.post(_GROQ_URL).mock(return_value=Response(200, json=_chat_response()))
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
 
-    shortlists = await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())
-    assert len(shortlists) == 2
-    assert shortlists[0].title == "Deep 122 BPM / 4A–7A Pool"
+    monkeypatch.setattr("mixlab.llm.asyncio.sleep", fake_sleep)
 
-
-@respx.mock
-async def test_stage1_logs_provider_summary(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from mixlab.llm import make_cascade_state, stage1_concepts
-
-    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-
-    respx.post(_GROQ_URL).mock(return_value=Response(200, json=_chat_response()))
-
-    await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())
-
-    captured = capsys.readouterr()
-    assert "Stage 1 trying provider: _try_groq | genre=Drum & Bass | input=20 tracks" in captured.out
-    assert (
-        "Stage 1 provider: _try_groq | genre=Drum & Bass | input=20 tracks | parsed=2 | cleaned=2 | kept=2"
-        in captured.out
-    )
-    assert "Deep 122 BPM / 4A–7A Pool | raw=9 | kept=9 | kept" in captured.out
-    assert "Liquid 124 BPM / 8A–11A Pool | raw=8 | kept=8 | kept" in captured.out
-
-
-@respx.mock
-async def test_stage1_falls_through_cascade_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mixlab.llm import make_cascade_state, stage1_concepts
-
-    monkeypatch.setenv("GROQ_API_KEY", "bad-key")
-    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
-    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
-
-    respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
-    respx.post(_GEMINI_URL).mock(return_value=Response(200, json=_chat_response()))
-
-    shortlists = await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())
-    assert shortlists[0].title == "Deep 122 BPM / 4A–7A Pool"
-
-
-@respx.mock
-async def test_stage1_chunks_large_clusters(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mixlab.llm import make_cascade_state, stage1_concepts
-
-    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-
-    # 50 tracks → two chunks (40 + 10); each call returns aliases valid for its own chunk.
-    respx.post(_GROQ_URL).mock(
+    route = respx.post(_ANTHROPIC_URL).mock(
         side_effect=[
-            Response(200, json=_chat_response()),
-            Response(200, json=_chat_response()),
+            Response(429, json={"error": "rate_limited"}),
+            Response(200, json=_anthropic_response("hello")),
         ]
     )
 
-    shortlists = await stage1_concepts(_make_tracks(50), "Drum & Bass", make_cascade_state())
-    # Chunk 1 (tracks 0–39, aliases T001–T040): both pools (T001–T009, T010–T017) valid → 2 shortlists.
-    # Chunk 2 (tracks 40–49, aliases T001–T010): first pool (T001–T009) valid → 1 shortlist;
-    # second pool requests T010–T017 but only T010 exists in the 10-track chunk → dropped.
-    assert len(shortlists) == 3
+    text = await _call_anthropic_http("key", "model", "system", "prompt")
+
+    assert text == "hello"
+    assert route.call_count == 2
+    assert sleeps == [1.0]
 
 
 @respx.mock
-async def test_stage1_filters_pools_below_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mixlab.llm import make_cascade_state, stage1_concepts
+async def test_call_anthropic_http_retry_honours_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _call_anthropic_http
 
-    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    sleeps: list[float] = []
 
-    # Pool with only 3 valid aliases (below _MIN_SHORTLIST_TRACKS=8) should be dropped.
-    tiny_pool = json.dumps([{"title": "Tiny", "mood": "x", "track_ids": ["T001", "T002", "T003"]}])
-    respx.post(_GROQ_URL).mock(return_value=Response(200, json={"choices": [{"message": {"content": tiny_pool}}]}))
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
 
-    shortlists = await stage1_concepts(_make_tracks(10), "Drum & Bass", make_cascade_state())
-    assert shortlists == []
+    monkeypatch.setattr("mixlab.llm.asyncio.sleep", fake_sleep)
+
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(429, headers={"retry-after": "5"}, json={"error": "rate_limited"}),
+            Response(200, json=_anthropic_response("hello")),
+        ]
+    )
+
+    await _call_anthropic_http("key", "model", "system", "prompt")
+
+    assert sleeps == [5.0]
 
 
 @respx.mock
-async def test_stage1_logs_when_all_shortlists_are_dropped(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from mixlab.llm import make_cascade_state, stage1_concepts
+async def test_call_anthropic_http_raises_after_exhausting_529_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _call_anthropic_http
 
-    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    async def fake_sleep(_delay: float) -> None:
+        return None
 
-    tiny_pool = json.dumps([{"title": "Tiny", "mood": "x", "track_ids": ["T001", "T002", "T003"]}])
-    respx.post(_GROQ_URL).mock(return_value=Response(200, json={"choices": [{"message": {"content": tiny_pool}}]}))
+    monkeypatch.setattr("mixlab.llm.asyncio.sleep", fake_sleep)
 
-    shortlists = await stage1_concepts(_make_tracks(10), "Drum & Bass", make_cascade_state())
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(529, json={"error": "overloaded"}))
 
-    assert shortlists == []
+    with pytest.raises(httpx.HTTPStatusError):
+        await _call_anthropic_http("key", "model", "system", "prompt")
+
+    assert route.call_count == 3
+
+
+@respx.mock
+async def test_call_anthropic_http_raises_immediately_on_non_retryable_status() -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(400, json={"error": "bad_request"}))
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _call_anthropic_http("key", "model", "system", "prompt")
+
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_call_anthropic_http_warns_on_truncated_response(capsys: pytest.CaptureFixture[str]) -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    respx.post(_ANTHROPIC_URL).mock(
+        return_value=Response(200, json={"content": [{"text": "partial"}], "stop_reason": "max_tokens"})
+    )
+
+    text = await _call_anthropic_http("key", "model", "system", "prompt", max_tokens=256)
+
+    assert text == "partial"
     captured = capsys.readouterr()
-    assert (
-        "Stage 1 provider: _try_groq | genre=Drum & Bass | input=10 tracks | parsed=1 | cleaned=1 | kept=0"
-        in captured.out
-    )
-    assert "Tiny | raw=3 | kept=3 | dropped (<8)" in captured.out
+    assert "WARNING: Anthropic response truncated at max_tokens=256" in captured.err
+
+
+def test_stage2_model_env_override_returns_env_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _stage2_model
+
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-opus-9")
+    assert _stage2_model() == "claude-opus-9"
+
+
+def test_stage2_model_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _stage2_model
+
+    monkeypatch.delenv("MIXLAB_STAGE2_MODEL", raising=False)
+    assert _stage2_model() == "claude-sonnet-4-6"
+
+
+def test_stage2_temperature_env_override_returns_env_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _stage2_temperature
+
+    monkeypatch.setenv("MIXLAB_STAGE2_TEMPERATURE", "0.9")
+    assert _stage2_temperature() == 0.9
+
+
+def test_stage2_temperature_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _stage2_temperature
+
+    monkeypatch.delenv("MIXLAB_STAGE2_TEMPERATURE", raising=False)
+    assert _stage2_temperature() == 0.5
+
+
+def test_stage2_temperature_invalid_falls_back_to_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import _stage2_temperature
+
+    monkeypatch.setenv("MIXLAB_STAGE2_TEMPERATURE", "not-a-float")
+    assert _stage2_temperature() == 0.5
 
 
 @respx.mock
-async def test_stage1_parses_response_with_trailing_prose(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Models that append explanatory text after the JSON array should still parse correctly."""
-    from mixlab.llm import make_cascade_state, stage1_concepts
+async def test_stage2_raw_request_carries_env_override_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Stage 2 selection request payload reflects MIXLAB_STAGE2_MODEL/TEMPERATURE overrides."""
+    from mixlab.llm import stage2_curate_and_report
 
-    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-opus-9")
+    monkeypatch.setenv("MIXLAB_STAGE2_TEMPERATURE", "0.9")
 
-    payload_with_prose = _shortlist_payload() + "\n\nNote: grouped by BPM proximity and harmonic compatibility."
-    respx.post(_GROQ_URL).mock(
-        return_value=Response(200, json={"choices": [{"message": {"content": payload_with_prose}}]})
+    route = respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
     )
 
-    shortlists = await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())
-    assert len(shortlists) == 2
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(
+            track_id=str(i), artist=f"Artist {i}", title=f"Title {i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass"
+        )
+        for i in range(1, 5)
+    }
+
+    _, report = await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    selection_body = json.loads(route.calls[0].request.content)
+    assert selection_body["model"] == "claude-opus-9"
+    assert selection_body["temperature"] == 0.9
+    assert "claude-opus-9" in report
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +278,7 @@ async def test_stage2_returns_curated_concepts_and_report(monkeypatch: pytest.Mo
     assert concepts[0].title == "Dark Rollers"
     assert concepts[0].track_ids == ["1", "2", "3", "4"]
     assert "CONCEPT: Dark Rollers" in report
-    assert "Claude Sonnet 4.6" in report
+    assert "claude-sonnet-4-6" in report
     # Practicality line surfaces in genre-mode reports (#21).
     assert "Practicality" in report
     assert "bpm_smoothness" in report
@@ -333,6 +366,54 @@ async def test_stage2_strips_hallucinated_ids(monkeypatch: pytest.MonkeyPatch) -
 
 
 @respx.mock
+async def test_stage2_pool_scoping_drops_id_valid_in_library_but_not_offered(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only IDs actually offered to the model this run are accepted (#50).
+
+    Track "999" is a real track in ``tracks_by_id`` (the whole library) but was never
+    included in any shortlist offered to Stage 2 — it must be dropped even though the
+    old whole-library ``valid_ids`` check would have accepted it.
+    """
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    payload = json.dumps(
+        [
+            {
+                "title": "Dark Rollers",
+                "name_reason": "n/a",
+                "mood": "m",
+                "track_ids": ["1", "2", "3", "4", "999"],
+                "transitions": [],
+            }
+        ]
+    )
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(payload)),
+            Response(200, json=_anthropic_response("CONCEPT: Dark Rollers\n\nBrief.")),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool", mood="m", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist="A", title="T", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+    # "999" is a real, resolvable library track — but not part of any offered shortlist.
+    tracks_by_id["999"] = Track(
+        track_id="999", artist="Other", title="Other Track", bpm=174.0, camelot_key="8A", genre="Drum & Bass"
+    )
+
+    concepts, _ = await stage2_curate_and_report(shortlists, tracks_by_id)
+
+    assert concepts[0].track_ids == ["1", "2", "3", "4"]
+    captured = capsys.readouterr()
+    assert "dropped 1 track ID(s) outside the offered pool" in captured.err
+
+
+@respx.mock
 async def test_stage2_raises_loudly_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     from mixlab.llm import stage2_curate_and_report
 
@@ -383,6 +464,17 @@ def test_parse_curated_concepts_strips_hallucinated_ids() -> None:
     raw = json.dumps([{"title": "T", "mood": "m", "track_ids": ["1", "999", "2", "3", "4"], "report": "x"}])
     concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
     assert "999" not in concepts[0].track_ids
+
+
+def test_parse_curated_concepts_prints_dropped_count_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    from mixlab.llm import _parse_curated_concepts
+
+    raw = json.dumps([{"title": "Set A", "mood": "dark", "track_ids": ["1", "2", "3", "4", "999"], "report": "x"}])
+    concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
+
+    assert concepts[0].track_ids == ["1", "2", "3", "4"]
+    captured = capsys.readouterr()
+    assert "[Set A] dropped 1 track ID(s) outside the offered pool" in captured.err
 
 
 def test_parse_curated_concepts_drops_below_minimum() -> None:
@@ -573,131 +665,6 @@ def test_shortfall_warning_not_triggered_at_minimum() -> None:
 
 # ---------------------------------------------------------------------------
 # Edge: all providers missing
-# ---------------------------------------------------------------------------
-
-
-async def test_stage1_raises_if_all_providers_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mixlab.llm import make_cascade_state, stage1_concepts
-
-    for key in ("GROQ_API_KEY", "GEMINI_API_KEY", "MISTRAL_API_KEY"):
-        monkeypatch.delenv(key, raising=False)
-
-    with pytest.raises(RuntimeError, match="All Stage 1 providers exhausted"):
-        await stage1_concepts(_make_tracks(3), "Drum & Bass", make_cascade_state())
-
-
-# ---------------------------------------------------------------------------
-# Sticky cascade behaviour
-# ---------------------------------------------------------------------------
-
-
-@respx.mock
-async def test_stage1_sticky_stays_on_successful_provider(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Index stays at 0 when Groq (now first) succeeds on both chunks of a large cluster."""
-    from mixlab.llm import make_cascade_state, stage1_concepts
-
-    monkeypatch.setenv("GROQ_API_KEY", "key")
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-
-    respx.post(_GROQ_URL).mock(
-        side_effect=[
-            Response(200, json=_chat_response()),
-            Response(200, json=_chat_response()),
-        ]
-    )
-
-    state = make_cascade_state()
-    await stage1_concepts(_make_tracks(50), "Drum & Bass", state)
-
-    assert state.index == 0  # sticky on Groq (index 0)
-    assert state.consecutive_failures == 0
-
-
-@respx.mock
-async def test_stage1_advances_on_failure_and_stays_on_next(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Groq fails on chunk 1 → Gemini takes over → index stays on Gemini for chunk 2."""
-    from mixlab.llm import make_cascade_state, stage1_concepts
-
-    monkeypatch.setenv("GROQ_API_KEY", "key")
-    monkeypatch.setenv("GEMINI_API_KEY", "key")
-
-    respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
-    respx.post(_GEMINI_URL).mock(
-        side_effect=[
-            Response(200, json=_chat_response()),
-            Response(200, json=_chat_response()),
-        ]
-    )
-
-    state = make_cascade_state()
-    await stage1_concepts(_make_tracks(50), "Drum & Bass", state)
-
-    assert state.index == 1  # sticky on Gemini after Groq failed
-    assert state.consecutive_failures == 0
-
-
-@respx.mock
-async def test_stage1_skips_unconfigured_without_counting_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """None return (unconfigured provider) advances index but does not count as a failure."""
-    from mixlab.llm import make_cascade_state, stage1_concepts
-
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    monkeypatch.setenv("GEMINI_API_KEY", "key")
-    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
-
-    respx.post(_GEMINI_URL).mock(return_value=Response(200, json=_chat_response()))
-
-    state = make_cascade_state()
-    await stage1_concepts(_make_tracks(20), "Drum & Bass", state)
-
-    assert state.consecutive_failures == 0
-    assert state.index == 1  # advanced past unconfigured Groq to Gemini (index 1)
-
-
-@respx.mock
-async def test_stage1_raises_after_n_consecutive_failures(monkeypatch: pytest.MonkeyPatch) -> None:
-    """All five providers fail → RuntimeError after len(_CASCADE) consecutive failures."""
-    from mixlab.llm import make_cascade_state, stage1_concepts
-
-    monkeypatch.setenv("GROQ_API_KEY", "key")
-    monkeypatch.setenv("GEMINI_API_KEY", "key")
-    monkeypatch.setenv("MISTRAL_API_KEY", "key")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "key")
-
-    respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
-    respx.post(_GEMINI_URL).mock(return_value=Response(500, text="error"))
-    respx.post(_MISTRAL_URL).mock(return_value=Response(500, text="error"))
-    respx.post(_OPENROUTER_URL).mock(return_value=Response(500, text="error"))
-
-    with pytest.raises(RuntimeError, match="consecutive failures"):
-        await stage1_concepts(_make_tracks(20), "Drum & Bass", make_cascade_state())
-
-
-@respx.mock
-async def test_stage1_consecutive_failures_reset_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Failures before the first success are cleared; state ends clean on Gemini."""
-    from mixlab.llm import make_cascade_state, stage1_concepts
-
-    monkeypatch.setenv("GROQ_API_KEY", "key")
-    monkeypatch.setenv("GEMINI_API_KEY", "key")
-
-    # Chunk 1: Groq fails → Gemini succeeds (consecutive_failures reset to 0).
-    # Chunk 2: Gemini is sticky and succeeds again.
-    respx.post(_GROQ_URL).mock(return_value=Response(500, text="error"))
-    respx.post(_GEMINI_URL).mock(
-        side_effect=[
-            Response(200, json=_chat_response()),
-            Response(200, json=_chat_response()),
-        ]
-    )
-
-    state = make_cascade_state()
-    await stage1_concepts(_make_tracks(50), "Drum & Bass", state)
-
-    assert state.consecutive_failures == 0
-    assert state.index == 1  # sticky on Gemini
-
-
 # ---------------------------------------------------------------------------
 # _tracks_to_text — Stage 1 track line formatting
 # ---------------------------------------------------------------------------
@@ -993,9 +960,11 @@ async def test_stage2_genre_intent_block_absent_when_not_supplied(monkeypatch: p
 
 
 @respx.mock
-async def test_stage2_genre_intent_ignored_in_playlist_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Playlist mode runs Stage 0; --intent must be ignored even when threaded through."""
+async def test_stage2_genre_intent_present_in_playlist_mode_overrides_brief(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Playlist mode now honours --intent (#54): USER INTENT block appears after the DJ
+    INTENT BRIEF and states it overrides that brief on conflict."""
     from mixlab.llm import stage2_curate_and_report
+    from mixlab.models import IntentBrief
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     route = respx.post(_ANTHROPIC_URL).mock(
@@ -1010,6 +979,16 @@ async def test_stage2_genre_intent_ignored_in_playlist_mode(monkeypatch: pytest.
         str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
         for i in range(1, 5)
     }
+    intent_brief = IntentBrief(
+        overall_vibe="A relentless rollers set.",
+        energy_shape="unclear",
+        risk_tolerance="medium",
+        is_coherent_set=True,
+        seed_analyses=[],
+        missing_roles=[],
+        strong_adjacencies=[],
+        bpm_range=(170.0, 178.0),
+    )
 
     await stage2_curate_and_report(
         shortlists,
@@ -1017,13 +996,17 @@ async def test_stage2_genre_intent_ignored_in_playlist_mode(monkeypatch: pytest.
         playlist_name="Monday Night",
         seed_ids=frozenset({"1"}),
         seed_track_ids=["1"],
-        genre_intent="should not appear in playlist mode prompt",
+        intent_brief=intent_brief,
+        genre_intent="surprise me with something bold",
     )
 
     body = json.loads(route.calls[0].request.content)
     user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
-    assert "USER INTENT" not in user_prompt
-    assert "should not appear in playlist mode prompt" not in user_prompt
+    assert "USER INTENT" in user_prompt
+    assert "surprise me with something bold" in user_prompt
+    assert "OVERRIDES the inferred DJ INTENT BRIEF" in user_prompt
+    # USER INTENT must follow the Stage 0 DJ INTENT BRIEF, not precede it.
+    assert user_prompt.index("DJ INTENT BRIEF") < user_prompt.index("USER INTENT")
 
 
 @respx.mock
@@ -1452,10 +1435,11 @@ async def test_stage2_intent_parsed_signals_include_precedence_caveat(
 
 
 @respx.mock
-async def test_stage2_genre_intent_suppressed_in_playlist_mode(
+async def test_stage2_genre_intent_present_in_playlist_mode_without_brief(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When playlist_name is set, genre_intent must be ignored — USER INTENT block absent."""
+    """Playlist mode without an IntentBrief still surfaces --intent (#54): the USER INTENT
+    block appears (with no preceding DJ INTENT BRIEF to override)."""
     from mixlab.llm import stage2_curate_and_report
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
@@ -1477,7 +1461,11 @@ async def test_stage2_genre_intent_suppressed_in_playlist_mode(
 
     body = json.loads(route.calls[0].request.content)
     user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
-    assert "USER INTENT" not in user_prompt
+    assert "USER INTENT" in user_prompt
+    assert "dark and hypnotic" in user_prompt
+    # No IntentBrief was supplied, so the Stage 0 brief section itself (identified by its
+    # "Vibe:" field) must be absent — only the override sentence mentions "DJ INTENT BRIEF".
+    assert "Vibe:" not in user_prompt
 
 
 def test_parse_user_intent_negation_does_not_suppress_signal() -> None:
@@ -1492,6 +1480,46 @@ def test_parse_user_intent_negation_does_not_suppress_signal() -> None:
     mood = signals.get("mood", "")
     assert "dark" in mood
     assert "hypnotic" in mood
+
+
+# ---------------------------------------------------------------------------
+# _parse_user_intent — risk signal (#54)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_user_intent_safe_and_cautious_detected_as_low_risk() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("keep it safe and cautious, smooth transitions only")
+    assert signals.get("risk") == "low"
+
+
+def test_parse_user_intent_no_risks_phrase_detected_as_low_risk() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("no risks please, low risk only")
+    assert signals.get("risk") == "low"
+
+
+def test_parse_user_intent_bold_and_adventurous_detected_as_high_risk() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("go bold, be adventurous, take risky moves")
+    assert signals.get("risk") == "high"
+
+
+def test_parse_user_intent_surprise_me_phrase_detected_as_high_risk() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("surprise me with something weird")
+    assert signals.get("risk") == "high"
+
+
+def test_parse_user_intent_no_risk_keyword_leaves_risk_signal_absent() -> None:
+    from mixlab.llm import _parse_user_intent  # noqa: PLC2701
+
+    signals = _parse_user_intent("late-night radio showcase, dark and hypnotic")
+    assert "risk" not in signals
 
 
 @respx.mock
@@ -1620,6 +1648,110 @@ async def test_stage2_mode_fragment_not_injected_in_playlist_mode(monkeypatch: p
     assert "MODE: PLAYED" not in system_prompt
     assert "MODE: UNPLAYED" not in system_prompt
     assert "MODE: ALL" not in system_prompt
+
+
+@respx.mock
+async def test_stage2_risk_fragment_high(monkeypatch: pytest.MonkeyPatch) -> None:
+    """risk='high' must append the RISK: HIGH framing to the genre-mode system prompt."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, risk="high")
+
+    body = json.loads(route.calls[0].request.content)
+    system_prompt: str = body["system"]
+    assert "RISK: HIGH" in system_prompt
+    assert "asked to be surprised" in system_prompt
+    assert "RISK: LOW" not in system_prompt
+
+
+@respx.mock
+async def test_stage2_risk_fragment_low(monkeypatch: pytest.MonkeyPatch) -> None:
+    """risk='low' must append the RISK: LOW framing to the genre-mode system prompt."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, risk="low")
+
+    body = json.loads(route.calls[0].request.content)
+    system_prompt: str = body["system"]
+    assert "RISK: LOW" in system_prompt
+    assert "Restraint is the brief" in system_prompt
+    assert "RISK: HIGH" not in system_prompt
+
+
+@respx.mock
+async def test_stage2_risk_fragment_absent_at_medium(monkeypatch: pytest.MonkeyPatch) -> None:
+    """risk='medium' (explicit or default) must leave the system prompt without any
+    RISK: fragment — byte-stable default (#42).
+    """
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(shortlists, tracks_by_id, risk="medium")
+
+    body = json.loads(route.calls[0].request.content)
+    system_prompt: str = body["system"]
+    assert "RISK: HIGH" not in system_prompt
+    assert "RISK: LOW" not in system_prompt
+
+
+@respx.mock
+async def test_stage2_risk_fragment_not_injected_in_playlist_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Playlist mode ignores the risk knob — it has its own Stage 0 risk-tolerance path (#54)."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(_curated_payload())),
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),
+        ]
+    )
+
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset({"1"}),
+        seed_track_ids=["1"],
+        risk="high",
+    )
+
+    body = json.loads(route.calls[0].request.content)
+    system_prompt: str = body["system"]
+    assert "RISK: HIGH" not in system_prompt
+    assert "RISK: LOW" not in system_prompt
 
 
 def _critique_payload(verdict: str = "needs_attention") -> str:
@@ -1816,47 +1948,6 @@ async def test_stage2_unenriched_track_produces_clean_line(monkeypatch: pytest.M
     # No empty fields or junk separators
     assert "| |" not in user_prompt
     assert "[unverified]" not in user_prompt
-
-
-# ---------------------------------------------------------------------------
-# select_stage1_window — random contiguous window for custom genre pools
-# ---------------------------------------------------------------------------
-
-
-def test_select_stage1_window_returns_all_when_at_or_below_max() -> None:
-    from mixlab.llm import select_stage1_window
-
-    tracks = _make_tracks(10)
-    result = select_stage1_window(tracks, 120)
-    assert result == tracks
-
-
-def test_select_stage1_window_limits_to_max_count() -> None:
-    from mixlab.llm import select_stage1_window
-
-    tracks = _make_tracks(200)
-    result = select_stage1_window(tracks, 120)
-    assert len(result) == 120
-
-
-def test_select_stage1_window_returns_contiguous_slice() -> None:
-    from mixlab.llm import select_stage1_window
-
-    tracks = _make_tracks(200)
-    result = select_stage1_window(tracks, 120)
-    # The returned slice must be a contiguous subsequence of the input.
-    result_ids = [t.track_id for t in result]
-    all_ids = [t.track_id for t in tracks]
-    start = all_ids.index(result_ids[0])
-    assert all_ids[start : start + 120] == result_ids
-
-
-def test_select_stage1_window_varies_across_runs() -> None:
-    from mixlab.llm import select_stage1_window
-
-    tracks = _make_tracks(500)
-    starts = {select_stage1_window(tracks, 60)[0].track_id for _ in range(30)}
-    assert len(starts) > 1  # different starting positions across runs
 
 
 # ---------------------------------------------------------------------------
@@ -2412,6 +2503,146 @@ async def test_stage2_playlist_mode_returns_winner_first_with_labeled_titles(
         "adventurous (practicality: 0.60, anchor retention: 100%) — not selected."
     ) in report
     assert "Alternative strategies considered: practical" not in report
+    assert "Selection tolerance: low." in report
+
+
+# ---------------------------------------------------------------------------
+# _adventure_dividend (#54) — reward density for justified risky transitions
+# ---------------------------------------------------------------------------
+
+
+def _transition(risky: bool, risk_type: str) -> Transition:
+    return Transition(from_id="a", to_id="b", is_risky=risky, risk_type=risk_type)
+
+
+def test_adventure_dividend_no_risky_transitions_returns_zero() -> None:
+    from mixlab.llm import _adventure_dividend  # noqa: PLC2701
+
+    concept = MixConcept(title="T", mood="adventurous", track_ids=["1", "2"], transitions=[])
+    assert _adventure_dividend(concept) == 0.0
+
+
+def test_adventure_dividend_two_justified_returns_half() -> None:
+    from mixlab.llm import _adventure_dividend  # noqa: PLC2701
+
+    concept = MixConcept(
+        title="T",
+        mood="adventurous",
+        track_ids=["1", "2", "3"],
+        transitions=[
+            _transition(True, "chapter_pivot"),
+            _transition(True, "peak_impact"),
+        ],
+    )
+    assert _adventure_dividend(concept) == pytest.approx(0.5)
+
+
+def test_adventure_dividend_four_justified_caps_at_one() -> None:
+    from mixlab.llm import _adventure_dividend  # noqa: PLC2701
+
+    concept = MixConcept(
+        title="T",
+        mood="adventurous",
+        track_ids=["1", "2", "3", "4", "5"],
+        transitions=[
+            _transition(True, "chapter_pivot"),
+            _transition(True, "peak_impact"),
+            _transition(True, "deliberate_reset"),
+            _transition(True, "closer_move"),
+        ],
+    )
+    assert _adventure_dividend(concept) == pytest.approx(1.0)
+
+
+def test_adventure_dividend_two_justified_plus_cut_only_returns_quarter() -> None:
+    from mixlab.llm import _adventure_dividend  # noqa: PLC2701
+
+    concept = MixConcept(
+        title="T",
+        mood="adventurous",
+        track_ids=["1", "2", "3", "4"],
+        transitions=[
+            _transition(True, "chapter_pivot"),
+            _transition(True, "peak_impact"),
+            _transition(True, "cut_only"),
+        ],
+    )
+    assert _adventure_dividend(concept) == pytest.approx(0.25)
+
+
+# ---------------------------------------------------------------------------
+# _select_best_variant (#54) — tolerance-aware winner selection
+# ---------------------------------------------------------------------------
+
+
+def _variant_with(strategy: str, practicality: float, dividend_transitions: list[Transition]) -> CompletionVariant:
+    concept = MixConcept(
+        title=strategy.title(),
+        mood=strategy,
+        track_ids=["1", "2", "3", "4"],
+        transitions=dividend_transitions,
+    )
+    return CompletionVariant(
+        strategy=cast("Literal['practical', 'balanced', 'adventurous']", strategy),
+        concept=concept,
+        anchor_retention_rate=1.0,
+        practicality_score=DJPracticalityScore(practicality, practicality, practicality, practicality),
+    )
+
+
+def test_select_best_variant_low_tolerance_prefers_practicality_over_risk() -> None:
+    from mixlab.llm import _select_best_variant  # noqa: PLC2701
+
+    practical = _variant_with("practical", 0.90, [])
+    adventurous = _variant_with(
+        "adventurous",
+        0.70,
+        [_transition(True, "chapter_pivot"), _transition(True, "peak_impact"), _transition(True, "deliberate_reset")],
+    )
+    winner = _select_best_variant([practical, adventurous], "low")
+    assert winner.strategy == "practical"
+
+
+def test_select_best_variant_medium_tolerance_still_prefers_practicality() -> None:
+    from mixlab.llm import _select_best_variant  # noqa: PLC2701
+
+    practical = _variant_with("practical", 0.90, [])
+    adventurous = _variant_with(
+        "adventurous",
+        0.70,
+        [_transition(True, "chapter_pivot"), _transition(True, "peak_impact"), _transition(True, "deliberate_reset")],
+    )
+    winner = _select_best_variant([practical, adventurous], "medium")
+    assert winner.strategy == "practical"
+
+
+def test_select_best_variant_high_tolerance_rewards_justified_risk() -> None:
+    from mixlab.llm import _select_best_variant  # noqa: PLC2701
+
+    practical = _variant_with("practical", 0.90, [])
+    adventurous = _variant_with(
+        "adventurous",
+        0.70,
+        [_transition(True, "chapter_pivot"), _transition(True, "peak_impact"), _transition(True, "deliberate_reset")],
+    )
+    winner = _select_best_variant([practical, adventurous], "high")
+    assert winner.strategy == "adventurous"
+
+
+def test_select_best_variant_default_argument_matches_pre_54_behaviour() -> None:
+    """No tolerance passed must behave exactly like the pre-#54 practicality-only ranking,
+    including the practical > balanced > adventurous tie-break."""
+    from mixlab.llm import _select_best_variant  # noqa: PLC2701
+
+    practical = _variant_with("practical", 0.5, [])
+    balanced = _variant_with("balanced", 0.5, [])
+    adventurous = _variant_with(
+        "adventurous",
+        0.5,
+        [_transition(True, "chapter_pivot"), _transition(True, "peak_impact")],
+    )
+    winner = _select_best_variant([adventurous, balanced, practical])
+    assert winner.strategy == "practical"
 
 
 # ---------------------------------------------------------------------------
@@ -3168,6 +3399,91 @@ def test_validate_stage2_output_camelot_jump_still_warns_when_is_risky_but_risk_
     assert any("Camelot jump" in w for w in warnings)
 
 
+# ---------------------------------------------------------------------------
+# validate_stage2_output — risk knob (#42): risk-aware BPM/Camelot jump thresholds
+# ---------------------------------------------------------------------------
+
+
+def test_validate_stage2_output_18bpm_annotated_risky_warns_at_medium_silent_at_high() -> None:
+    """An 18 BPM jump on a transition flagged is_risky=True (but not fully justified —
+    empty risk_type) exceeds the medium threshold (15) but not the relaxed high
+    threshold (20), since high relaxation applies to any annotated-risky transition.
+    """
+    from mixlab.llm import validate_stage2_output
+    from mixlab.models import Transition
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=192.0, camelot_key="8A", genre="DnB"),  # jump=18
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=192.0, camelot_key="8A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(
+        title="T",
+        mood="dark",
+        track_ids=ids,
+        transitions=[Transition(from_id="1", to_id="2", is_risky=True, risk_type="")],
+    )
+    canvas = _make_canvas(ids)
+
+    warnings_medium = validate_stage2_output([concept], [canvas], lib, set(), set(), risk="medium")
+    assert any("BPM jump" in w for w in warnings_medium)
+
+    warnings_high = validate_stage2_output([concept], [canvas], lib, set(), set(), risk="high")
+    assert not any("BPM jump" in w for w in warnings_high)
+
+
+def test_validate_stage2_output_18bpm_unannotated_warns_at_both_medium_and_high() -> None:
+    """An 18 BPM jump with NO transition annotation always uses the medium thresholds,
+    even at risk='high' — the high relaxation requires an explicit is_risky flag.
+    """
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=192.0, camelot_key="8A", genre="DnB"),  # jump=18
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=192.0, camelot_key="8A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)  # no transitions — tr is None
+    canvas = _make_canvas(ids)
+
+    warnings_medium = validate_stage2_output([concept], [canvas], lib, set(), set(), risk="medium")
+    assert any("BPM jump" in w for w in warnings_medium)
+
+    warnings_high = validate_stage2_output([concept], [canvas], lib, set(), set(), risk="high")
+    assert any("BPM jump" in w for w in warnings_high)
+
+
+def test_validate_stage2_output_12bpm_warns_at_low_silent_at_medium() -> None:
+    """A 12 BPM jump clears the low threshold (10) but not the medium threshold (15)."""
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=186.0, camelot_key="8A", genre="DnB"),  # jump=12
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=186.0, camelot_key="8A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+
+    warnings_low = validate_stage2_output([concept], [canvas], lib, set(), set(), risk="low")
+    assert any("BPM jump" in w for w in warnings_low)
+
+    warnings_medium = validate_stage2_output([concept], [canvas], lib, set(), set(), risk="medium")
+    assert not any("BPM jump" in w for w in warnings_medium)
+
+
 def test_validate_stage2_output_artist_repeat_warning() -> None:
     from mixlab.llm import validate_stage2_output
 
@@ -3696,8 +4012,8 @@ async def test_stage2_mix_length_absent_from_playlist_prompt_when_not_set(monkey
 
 
 @respx.mock
-async def test_stage2_mix_length_ignored_in_genre_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """mix_length has no effect in standard (genre) mode — no target injected."""
+async def test_stage2_mix_length_applies_in_genre_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mix_length also injects a set-length target in standard (genre) mode (issue #49)."""
     from mixlab.llm import stage2_curate_and_report
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
@@ -3713,4 +4029,736 @@ async def test_stage2_mix_length_ignored_in_genre_mode(monkeypatch: pytest.Monke
 
     body = json.loads(route.calls[0].request.content)
     user_prompt: str = next(m["content"] for m in body["messages"] if m["role"] == "user")
-    assert "Set length target" not in user_prompt
+    assert "Set length target" in user_prompt
+    assert "60 minutes" in user_prompt
+    assert "per concept" in user_prompt
+
+
+# ---------------------------------------------------------------------------
+# _format_duration (issue #49)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("secs", "expected"),
+    [
+        (65, "1:05"),
+        (272, "4:32"),
+        (3600, "60:00"),
+    ],
+)
+def test_format_duration_formats_mss(secs: int, expected: str) -> None:
+    from mixlab.llm import _format_duration
+
+    assert _format_duration(secs) == expected
+
+
+# ---------------------------------------------------------------------------
+# _duration_target_tracks (issue #49)
+# ---------------------------------------------------------------------------
+
+
+def test_duration_target_tracks_uses_mean_real_duration_when_available() -> None:
+    from mixlab.llm import _duration_target_tracks
+
+    tracks = [
+        Track(track_id=str(i), artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB", duration_secs=240)
+        for i in range(4)
+    ]
+    # mean duration 240s (4 min) -> 60 min set / 4 min per track = 15 tracks
+    assert _duration_target_tracks(60, tracks) == 15
+
+
+def test_duration_target_tracks_falls_back_to_heuristic_without_duration_data() -> None:
+    from mixlab.llm import _duration_target_tracks
+
+    tracks = [Track(track_id=str(i), artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB") for i in range(4)]
+    assert _duration_target_tracks(60, tracks) == max(10, round(60 / 4.0))
+
+
+def test_duration_target_tracks_enforces_floor_of_six() -> None:
+    from mixlab.llm import _duration_target_tracks
+
+    # Very long tracks (20 min each) over a short 20-minute set would compute to 1 track —
+    # the floor of 6 must still apply.
+    tracks = [
+        Track(track_id=str(i), artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB", duration_secs=1200)
+        for i in range(3)
+    ]
+    assert _duration_target_tracks(20, tracks) == 6
+
+
+def test_duration_target_tracks_ignores_tracks_without_duration_in_mean() -> None:
+    from mixlab.llm import _duration_target_tracks
+
+    tracks = [
+        Track(track_id="1", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB", duration_secs=240),
+        Track(track_id="2", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB", duration_secs=240),
+        Track(track_id="3", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="DnB"),
+    ]
+    # Only tracks 1 and 2 (240s each) count towards the mean — track 3 is excluded.
+    assert _duration_target_tracks(60, tracks) == 15
+
+
+# ---------------------------------------------------------------------------
+# Duration token in Stage 2 prompt track lines (issue #49)
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_stage2_prompt_includes_duration_token_in_canvas_section(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Duration token appears as the first extras element on canvas candidate lines."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    ids = ["1", "2", "3", "4"]
+    concept = MixConcept(title="Pool", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    tracks_by_id = _lib(ids)
+    tracks_by_id["1"] = tracks_by_id["1"].model_copy(update={"duration_secs": 272, "year": 2020})
+
+    await stage2_curate_and_report(shortlists=[concept], tracks_by_id=tracks_by_id, canvases=[canvas])
+
+    body = route.calls[0].request.content.decode()
+    assert "4:32" in body
+    # duration token must precede the year token on that track's candidate line
+    line = next(text_line for text_line in body.splitlines() if "Artist_1 —" in text_line)
+    assert line.index("4:32") < line.index("2020")
+
+
+@respx.mock
+async def test_stage2_prompt_omits_duration_token_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+
+    ids = ["1", "2", "3", "4"]
+    concept = MixConcept(title="Pool", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    tracks_by_id = _lib(ids)  # no track carries duration_secs
+
+    await stage2_curate_and_report(shortlists=[concept], tracks_by_id=tracks_by_id, canvases=[canvas])
+    # No assertion error means no exception raised formatting extras with missing durations —
+    # combined with the presence test above, this establishes the token is conditional.
+
+
+# ---------------------------------------------------------------------------
+# _append_runtime_to_report (issue #49)
+# ---------------------------------------------------------------------------
+
+
+def test_append_runtime_to_report_appends_footer_when_durations_known() -> None:
+    from mixlab.llm import _append_runtime_to_report
+
+    ids = ["1", "2", "3"]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    tracks_by_id = _lib(ids)
+    tracks_by_id["1"] = tracks_by_id["1"].model_copy(update={"duration_secs": 240})
+    tracks_by_id["2"] = tracks_by_id["2"].model_copy(update={"duration_secs": 300})
+    # track "3" has no duration_secs
+
+    original = "CONCEPT: T\n\nSome report body."
+    result = _append_runtime_to_report(original, concept, tracks_by_id)
+
+    assert result.startswith(original)
+    assert "**Runtime**: ~9m (2/3 tracks with durations)" in result
+
+
+def test_append_runtime_to_report_unchanged_when_no_durations_known() -> None:
+    from mixlab.llm import _append_runtime_to_report
+
+    ids = ["1", "2", "3"]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    tracks_by_id = _lib(ids)  # no track carries duration_secs
+
+    original = "CONCEPT: T\n\nSome report body."
+    result = _append_runtime_to_report(original, concept, tracks_by_id)
+
+    assert result == original
+
+
+# ---------------------------------------------------------------------------
+# _format_canvas_section — Strong transitions line + demoted role hints (#51)
+# ---------------------------------------------------------------------------
+
+
+def _canvas_with_role_candidates(track_ids: list[str], roles: CanvasRoleCandidates) -> MixCanvas:
+    concept = MixConcept(title="T", mood="dark", track_ids=track_ids)
+    return MixCanvas(
+        canvas_id="dnb_172.0_8A",
+        genre="Drum & Bass",
+        bpm_range=(86.0, 172.0),
+        dominant_bpm=172.0,
+        dominant_camelot="8A",
+        core_track_ids=track_ids,
+        bridge_track_ids=[],
+        wildcard_track_ids=[],
+        roles=roles,
+        contrast=ContrastAssets(
+            vocal_moments=[], texture_changes=[], darker_turns=[], brighter_lifts=[], lower_pressure_resets=[]
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=concept,
+    )
+
+
+def test_format_canvas_section_renders_strong_transitions_line_with_mechanism() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="Drum & Bass"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=86.0, camelot_key="8A", genre="Drum & Bass"),
+    }
+    roles = CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[])
+    canvas = _canvas_with_role_candidates(["1", "2"], roles)
+
+    section = _format_canvas_section(canvas, tracks_by_id)
+
+    assert "Strong transitions:" in section
+    assert "halftime lock 172→86" in section
+    assert "ID:1→ID:2" in section
+
+
+def test_format_canvas_section_keeps_opener_closer_drops_other_role_hints() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist="A", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="Drum & Bass")
+        for i in range(1, 5)
+    }
+    roles = CanvasRoleCandidates(
+        opener=["1"], groove_locker=["2"], builder=["2"], pivot=["3"], peak=["3"], closer=["4"]
+    )
+    canvas = _canvas_with_role_candidates(["1", "2", "3", "4"], roles)
+
+    section = _format_canvas_section(canvas, tracks_by_id)
+
+    assert "Opener: ID:1" in section
+    assert "Closer: ID:4" in section
+    assert "Groove-locker:" not in section
+    assert "Builder:" not in section
+    assert "Peak:" not in section
+    assert "Pivot:" not in section
+
+
+# ---------------------------------------------------------------------------
+# validate_stage2_output — tempo-relation-aware BPM jump + arc verification (#51)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_stage2_output_halftime_pair_does_not_warn_bpm_jump() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=86.0, camelot_key="8A", genre="DnB"),  # halftime lock
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert not any("BPM jump" in w for w in warnings)
+
+
+def test_validate_stage2_output_straight_20_bpm_jump_still_warns() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=174.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=194.0, camelot_key="8A", genre="DnB"),  # +20, no ratio
+        **{
+            str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=194.0, camelot_key="8A", genre="DnB")
+            for i in range(3, 9)
+        },
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("BPM jump" in w for w in warnings)
+
+
+def test_validate_stage2_output_arc_mismatch_warning_for_monotonic_wave() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    # Declared 'wave' but energy climbs monotonically — a factual mismatch.
+    energies = [2, 3, 4, 5, 6, 7, 8, 8]
+    lib = {
+        str(i): Track(track_id=str(i), artist="C", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="DnB", energy=e)
+        for i, e in enumerate(energies, start=1)
+    }
+    ids = [str(i) for i in range(1, 9)]
+    concept = MixConcept(title="T", mood="dark", track_ids=ids, arc_type="wave")
+    canvas = _make_canvas(ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("arc mismatch" in w and "monotonic rising" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# _compute_practicality_score — residual-stretch bpm_smoothness (#51)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_practicality_clean_halftime_smoothness_matches_tight_straight() -> None:
+    from mixlab.llm import _compute_practicality_score
+
+    halftime_ids = ["1", "2", "3", "4"]
+    halftime_lib = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="DnB"),
+        "2": Track(track_id="2", artist="A", title="T2", bpm=86.0, camelot_key="8A", genre="DnB"),
+        "3": Track(track_id="3", artist="A", title="T3", bpm=172.0, camelot_key="8A", genre="DnB"),
+        "4": Track(track_id="4", artist="A", title="T4", bpm=86.0, camelot_key="8A", genre="DnB"),
+    }
+    halftime_concept = MixConcept(title="H", mood="dark", track_ids=halftime_ids)
+    halftime_score = _compute_practicality_score(halftime_concept, halftime_lib, intent_brief=None)
+
+    straight_ids = ["10", "11", "12", "13"]
+    straight_lib = {
+        tid: Track(track_id=tid, artist="A", title=f"T{tid}", bpm=128.0, camelot_key="8A", genre="DnB")
+        for tid in straight_ids
+    }
+    straight_concept = MixConcept(title="S", mood="dark", track_ids=straight_ids)
+    straight_score = _compute_practicality_score(straight_concept, straight_lib, intent_brief=None)
+
+    assert halftime_score.bpm_smoothness > 0.9
+    assert abs(halftime_score.bpm_smoothness - straight_score.bpm_smoothness) < 0.05
+
+
+# ---------------------------------------------------------------------------
+# Concept directions (#53) — DIRECTION BRIEF + Target line + B8 fix + suppression
+# ---------------------------------------------------------------------------
+
+
+def _direction_canvas(
+    track_ids: list[str],
+    *,
+    genre: str = "Drum & Bass",
+    brief: str = "",
+    direction_type: str = "",
+    thread_artist: str = "",
+) -> MixCanvas:
+    concept = MixConcept(title="Mood journey: dark -> euphoric", mood="dark to euphoric", track_ids=track_ids)
+    return MixCanvas(
+        canvas_id="dir_172.0_8A",
+        genre=genre,
+        bpm_range=(170.0, 174.0),
+        dominant_bpm=172.0,
+        dominant_camelot="8A",
+        core_track_ids=track_ids,
+        bridge_track_ids=[],
+        wildcard_track_ids=[],
+        roles=CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[]),
+        contrast=ContrastAssets(
+            vocal_moments=[], texture_changes=[], darker_turns=[], brighter_lifts=[], lower_pressure_resets=[]
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=concept,
+        brief=brief,
+        direction_type=direction_type,
+        thread_artist=thread_artist,
+    )
+
+
+def test_format_canvas_section_renders_direction_brief_block() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {"1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="Drum & Bass")}
+    canvas = _direction_canvas(["1"], brief="Open dark, land euphoric.", direction_type="mood_journey")
+    section = _format_canvas_section(canvas, tracks_by_id)
+    assert "DIRECTION BRIEF (mood_journey):" in section
+    assert "Open dark, land euphoric." in section
+    # The brief precedes the canvas header line.
+    assert section.index("DIRECTION BRIEF") < section.index("[Canvas ")
+
+
+def test_format_canvas_section_renders_target_track_count_from_genre() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {"1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="Drum & Bass")}
+    canvas = _direction_canvas(["1"], genre="Drum & Bass")
+    section = _format_canvas_section(canvas, tracks_by_id)
+    assert "Target: 10-14 tracks" in section
+
+
+def test_format_canvas_section_target_falls_back_to_default_for_unknown_genre() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {"1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="Mystery")}
+    canvas = _direction_canvas(["1"], genre="Mystery")
+    section = _format_canvas_section(canvas, tracks_by_id)
+    assert "Target: 8-12 tracks" in section
+
+
+def test_format_canvas_section_classic_canvas_has_no_direction_brief() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {"1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="Drum & Bass")}
+    canvas = _direction_canvas(["1"])  # brief defaults to ""
+    section = _format_canvas_section(canvas, tracks_by_id)
+    assert "DIRECTION BRIEF" not in section
+
+
+def test_stage2_system_no_longer_hardcodes_eight_to_twelve_tracks() -> None:
+    from mixlab.llm import _STAGE2_SYSTEM
+
+    assert "8–12 tracks" not in _STAGE2_SYSTEM
+    assert "target track-count range" in _STAGE2_SYSTEM
+
+
+def test_stage2_canvas_rules_mention_direction_brief() -> None:
+    from mixlab.llm import _STAGE2_CANVAS_RULES
+
+    assert "DIRECTION BRIEF" in _STAGE2_CANVAS_RULES
+
+
+def test_validate_stage2_output_suppresses_thread_artist_repeat() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        str(i): Track(track_id=str(i), artist="SpineGuy", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 4)
+    }
+    ids = [str(i) for i in range(1, 4)]
+    concept = MixConcept(title="Artist thread: SpineGuy", mood="spine", track_ids=ids)
+    canvas = _direction_canvas(ids, direction_type="artist_thread", thread_artist="SpineGuy")
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert not any("SpineGuy" in w and "appears" in w for w in warnings)
+
+
+def test_validate_stage2_output_still_warns_non_thread_artist_repeat() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        str(i): Track(track_id=str(i), artist="Other Artist", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 4)
+    }
+    ids = [str(i) for i in range(1, 4)]
+    concept = MixConcept(title="Artist thread: SpineGuy", mood="spine", track_ids=ids)
+    canvas = _direction_canvas(ids, direction_type="artist_thread", thread_artist="SpineGuy")
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("Other Artist" in w and "appears 3 times" in w for w in warnings)
+
+
+def test_validate_stage2_output_thread_artist_four_plus_still_warns() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        str(i): Track(track_id=str(i), artist="SpineGuy", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+    ids = [str(i) for i in range(1, 5)]
+    concept = MixConcept(title="Artist thread: SpineGuy", mood="spine", track_ids=ids)
+    canvas = _direction_canvas(ids, direction_type="artist_thread", thread_artist="SpineGuy")
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("SpineGuy" in w and "appears 4 times" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# Bounded self-revision (#55)
+# ---------------------------------------------------------------------------
+
+
+def _revision_lib(key_by_id: dict[str, str], bpm: float = 174.0) -> dict[str, Track]:
+    """Library where each id gets an explicit Camelot key (defaults to 8A)."""
+    return {
+        i: Track(
+            track_id=i,
+            artist=f"Artist_{i}",
+            title=f"Title_{i}",
+            bpm=bpm,
+            camelot_key=key_by_id.get(i, "8A"),
+            genre="house",
+        )
+        for i in key_by_id
+    }
+
+
+def test_qualifies_for_revision_single_hard_finding_returns_false() -> None:
+    from mixlab.llm import _qualifies_for_revision
+
+    concept = MixConcept(title="X", mood="m", track_ids=["1", "2", "3", "4"])
+    warnings = ["[X] track ID 5 not found in library"]
+    assert _qualifies_for_revision(concept, warnings) is False
+
+
+def test_qualifies_for_revision_two_hard_findings_returns_true() -> None:
+    from mixlab.llm import _qualifies_for_revision
+
+    concept = MixConcept(title="X", mood="m", track_ids=["1", "2", "3", "4"])
+    warnings = [
+        "[X] track ID 5 not found in library",
+        "[X] BPM jump 22.0 between A — a and B — b",
+    ]
+    assert _qualifies_for_revision(concept, warnings) is True
+
+
+def test_qualifies_for_revision_soft_only_warnings_returns_false() -> None:
+    from mixlab.llm import _qualifies_for_revision
+
+    concept = MixConcept(title="X", mood="m", track_ids=["1", "2", "3", "4"])
+    warnings = [
+        "[X] no wind-down in final 3 tracks (all energy >4/8)",
+        "[X] all tracks high-energy (≥6/8) — no dynamic range",
+        "Concept title 'X' matches generic [Adjective][Noun] pattern — review for distinctiveness",
+    ]
+    assert _qualifies_for_revision(concept, warnings) is False
+
+
+def test_qualifies_for_revision_weak_critique_returns_true() -> None:
+    from mixlab.llm import _qualifies_for_revision
+
+    concept = MixConcept(title="X", mood="m", track_ids=["1", "2", "3", "4"], critique=Critique(verdict="weak"))
+    assert _qualifies_for_revision(concept, []) is True
+
+
+def test_qualifies_for_revision_needs_attention_with_substitution_returns_true() -> None:
+    from mixlab.llm import _qualifies_for_revision
+
+    concept = MixConcept(
+        title="X",
+        mood="m",
+        track_ids=["1", "2", "3", "4"],
+        critique=Critique(verdict="needs_attention", suggested_substitution="track 3 → ID:9"),
+    )
+    assert _qualifies_for_revision(concept, []) is True
+
+
+def test_qualifies_for_revision_needs_attention_without_substitution_returns_false() -> None:
+    from mixlab.llm import _qualifies_for_revision
+
+    concept = MixConcept(
+        title="X",
+        mood="m",
+        track_ids=["1", "2", "3", "4"],
+        critique=Critique(verdict="needs_attention", suggested_substitution=None),
+    )
+    assert _qualifies_for_revision(concept, []) is False
+
+
+def _revision_canvas(pool_ids: list[str]) -> MixCanvas:
+    concept = MixConcept(title="pool", mood="m", track_ids=pool_ids)
+    return MixCanvas(
+        canvas_id="rev_canvas",
+        genre="house",
+        bpm_range=(170.0, 178.0),
+        dominant_bpm=174.0,
+        dominant_camelot="8A",
+        core_track_ids=pool_ids,
+        bridge_track_ids=[],
+        wildcard_track_ids=[],
+        roles=CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[]),
+        contrast=ContrastAssets(
+            vocal_moments=[], texture_changes=[], darker_turns=[], brighter_lifts=[], lower_pressure_resets=[]
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=concept,
+    )
+
+
+@respx.mock
+async def test_revise_concepts_happy_path_accepts_and_annotates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import revise_concepts, validate_stage2_output
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    # Pool ids 1..9 all 8A except id 3 (2A) — the offending track. Id 9 is a spare 8A.
+    pool = [str(i) for i in range(1, 10)]
+    lib = _revision_lib({i: ("2A" if i == "3" else "8A") for i in pool})
+    canvas = _revision_canvas(pool)
+    original = MixConcept(title="Jump Fix", mood="steady", track_ids=[str(i) for i in range(1, 9)])
+
+    warnings = validate_stage2_output([original], [canvas], lib, played_ids=set(), denylist_ids=set(), genre="house")
+    assert len([w for w in warnings if "Camelot jump" in w]) == 2
+
+    # Revision swaps the 2A track (3) for the spare 8A track (9) → no jumps.
+    revision_payload = json.dumps(
+        [
+            {
+                "title": "Jump Fix",
+                "name_reason": "steady",
+                "mood": "steady",
+                "track_ids": ["1", "2", "9", "4", "5", "6", "7", "8"],
+                "transitions": [],
+            }
+        ]
+    )
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(revision_payload)))
+
+    concepts, report, final_warnings = await revise_concepts(
+        [original],
+        "PROSE REPORT",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+
+    assert route.call_count == 1
+    assert concepts[0].track_ids == ["1", "2", "9", "4", "5", "6", "7", "8"]
+    assert "**Revised**" in report
+    assert not any("Camelot jump" in w for w in final_warnings)
+    assert len(final_warnings) < len(warnings)
+
+
+@respx.mock
+async def test_revise_concepts_worse_revision_keeps_original(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mixlab.llm import revise_concepts, validate_stage2_output
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    pool = [str(i) for i in range(1, 11)]
+    lib = _revision_lib({i: ("2A" if i in ("3", "6") else "8A") for i in pool})
+    canvas = _revision_canvas(pool)
+    original = MixConcept(title="Steady", mood="steady", track_ids=["1", "2", "3", "4", "5", "7", "8", "9"])
+
+    warnings = validate_stage2_output([original], [canvas], lib, played_ids=set(), denylist_ids=set(), genre="house")
+    assert len([w for w in warnings if "Camelot jump" in w]) == 2
+
+    # Revision scatters BOTH 2A tracks (3 and 6) between 8A tracks → four jumps (worse).
+    revision_payload = json.dumps(
+        [
+            {
+                "title": "Steady",
+                "name_reason": "steady",
+                "mood": "steady",
+                "track_ids": ["1", "3", "2", "6", "4", "5", "7", "8"],
+                "transitions": [],
+            }
+        ]
+    )
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(revision_payload)))
+
+    concepts, report, _final = await revise_concepts(
+        [original],
+        "PROSE REPORT",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+
+    assert concepts[0].track_ids == original.track_ids
+    assert "**Revised**" not in report
+    assert "did not improve" in capsys.readouterr().err
+
+
+@respx.mock
+async def test_revise_concepts_unparseable_response_keeps_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import revise_concepts, validate_stage2_output
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    pool = [str(i) for i in range(1, 10)]
+    lib = _revision_lib({i: ("2A" if i == "3" else "8A") for i in pool})
+    canvas = _revision_canvas(pool)
+    original = MixConcept(title="Jump Fix", mood="steady", track_ids=[str(i) for i in range(1, 9)])
+    warnings = validate_stage2_output([original], [canvas], lib, played_ids=set(), denylist_ids=set(), genre="house")
+
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response("sorry, cannot help")))
+
+    concepts, report, _final = await revise_concepts(
+        [original],
+        "PROSE REPORT",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+
+    assert concepts[0].track_ids == original.track_ids
+    assert "**Revised**" not in report
+
+
+@respx.mock
+async def test_revise_concepts_calls_once_per_qualifying_concept_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import revise_concepts, validate_stage2_output
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    pool = [str(i) for i in range(1, 10)]
+    lib = _revision_lib({i: ("2A" if i == "3" else "8A") for i in pool})
+    canvas = _revision_canvas(pool)
+    # Qualifying: two Camelot jumps around id 3.
+    flagged = MixConcept(title="Flagged", mood="m", track_ids=[str(i) for i in range(1, 9)])
+    # Clean: no jumps, no critique — must NOT be revised.
+    clean = MixConcept(title="Clean", mood="m", track_ids=["1", "2", "4", "5", "6", "7", "8", "9"])
+
+    warnings = validate_stage2_output(
+        [flagged, clean], [canvas], lib, played_ids=set(), denylist_ids=set(), genre="house"
+    )
+    revision_payload = json.dumps(
+        [
+            {
+                "title": "Flagged",
+                "name_reason": "m",
+                "mood": "m",
+                "track_ids": ["1", "2", "4", "5", "6", "7", "8", "9"],
+                "transitions": [],
+            }
+        ]
+    )
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(revision_payload)))
+
+    await revise_concepts(
+        [flagged, clean],
+        "PROSE REPORT",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_revise_concepts_no_api_key_returns_inputs_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import revise_concepts
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    pool = [str(i) for i in range(1, 10)]
+    lib = _revision_lib({i: "8A" for i in pool})
+    canvas = _revision_canvas(pool)
+    original = MixConcept(title="X", mood="m", track_ids=[str(i) for i in range(1, 9)])
+    warnings = ["[X] BPM jump 20.0 between a and b", "[X] Camelot jump 6 between 8A and 2A"]
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response("[]")))
+
+    concepts, report, final_warnings = await revise_concepts(
+        [original],
+        "PROSE REPORT",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+
+    assert route.call_count == 0
+    assert concepts[0] is original
+    assert report == "PROSE REPORT"
+    assert final_warnings == warnings
