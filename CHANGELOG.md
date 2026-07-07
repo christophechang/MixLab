@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.2 — 2026-07-07
+
+- **Revised concepts get regenerated prose.** When the self-revision pass (#55) accepts a repair, the concept's report section is now regenerated so the card's prose describes the shipped track list (previously the HTML card showed the revised table next to pre-revision prose). One extra report call per accepted revision; a regeneration failure keeps the repair and falls back to the old pre-revision disclaimer. Found via live run: a revised concept's prose still narrated a track that revision had swapped out.
+
+---
+
 ## v1.5.1 — 2026-07-07
 
 Three fixes from the first real production run of the v1.5.0 HTML report (house crate, live feedback).
