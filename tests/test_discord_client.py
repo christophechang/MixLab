@@ -5,7 +5,7 @@ import pytest
 import respx
 
 from mixlab.config import shortfall_warning
-from mixlab.discord_client import DiscordClient, format_report
+from mixlab.discord_client import DiscordClient, _attachment_mime, format_report
 from mixlab.models import MixConcept, Track
 
 
@@ -128,6 +128,34 @@ def test_shortfall_warning_returns_message_when_shortfall_large() -> None:
     assert result is not None
     assert "2 tracks found" in result
     assert "more to fill" in result
+
+
+def test_attachment_mime_html() -> None:
+    assert _attachment_mime("mixlab-house-2026-07-07.html") == "text/html"
+
+
+def test_attachment_mime_xml() -> None:
+    assert _attachment_mime("rekordbox_export.xml") == "application/xml"
+
+
+def test_attachment_mime_other_falls_back_to_octet_stream() -> None:
+    assert _attachment_mime("notes.txt") == "application/octet-stream"
+
+
+async def test_post_with_files_infers_mime_per_extension() -> None:
+    client = DiscordClient(bot_token="tok", guild_id="g", channel_id="c123", channel_name="mix-lab")
+    with respx.mock:
+        route = respx.post("https://discord.com/api/v10/channels/c123/messages").mock(
+            return_value=httpx.Response(200, json={})
+        )
+        async with httpx.AsyncClient(timeout=5) as http:
+            await client._post_with_files(
+                http, "c123", "content", [("report.html", b"<html>"), ("export.xml", b"<xml/>")]
+            )
+    body = route.calls.last.request.content
+    # httpx encodes each attachment's Content-Type into the multipart body.
+    assert b"Content-Type: text/html" in body
+    assert b"Content-Type: application/xml" in body
 
 
 async def test_post_raw_raises_after_max_retries_on_429() -> None:

@@ -226,6 +226,10 @@ Report context: 140 (custom genre, All Tracks)
 
 For standard and custom genre runs, a Rekordbox-compatible merged XML file can be attached to the Discord message or written to disk. It contains one playlist per concept plus an **All Unplayed Tunes** playlist with the full scoped unplayed pool when played-track history was used.
 
+### HTML report
+
+Every genre and playlist run also writes a standalone HTML report to `output/reports/` (override the directory with the `MIXLAB_REPORT_DIR` environment variable) and attaches it to the Discord message. The file is fully self-contained and offline — inline CSS and JS, a system font stack, no images, CDNs, fonts, or any external request — so it opens straight from disk and renders identically in light and dark mode. Each concept gets a card carrying everything the text report holds (title, arc type, mood, name reason, track table, and the full prose) plus computed transition intelligence: an energy sparkline across the set, per-transition mechanism labels (halftime locks, energy lifts), blend headroom, and a colour-coded mixability score for each consecutive pair. Click any track row to copy its `artist — title`. The rendered output is deterministic for identical inputs.
+
 ### Steer genre mode with a free-text intent
 
 ```bash
