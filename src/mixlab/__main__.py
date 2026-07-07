@@ -429,6 +429,9 @@ def run_prep(genre: str | None, top: int) -> int:
 
     tracks = parse_collection(_XML_PATH)
     tracks = apply_bpm_corrections(tracks)
+    # Denylisted tracks are never recommended, so cueing them is wasted prep time —
+    # exclude them exactly as the concept pipeline does.
+    tracks, _ = _apply_do_not_recommend_filter(tracks, _XML_PATH)
     history = load_history(_HISTORY_PATH)
 
     items, totals = rank_prep_targets(tracks, history, bucket=bucket, top=top)

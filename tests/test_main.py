@@ -1153,6 +1153,58 @@ _PREP_ALL_CUED_XML = textwrap.dedent("""\
 """)
 
 
+# _PREP_XML plus a DO NOT RECOMMEND playlist denylisting track 2 ("No Cue").
+_PREP_DENYLIST_XML = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <DJ_PLAYLISTS Version="1.0.0">
+      <COLLECTION Entries="4">
+        <TRACK TrackID="1" Name="Full Cue" Artist="Artist A" AverageBpm="124.00" Tonality="8A"
+               Genre="House" TotalTime="300">
+          <POSITION_MARK Name="" Type="0" Start="20.0" Num="0"/>
+          <POSITION_MARK Name="" Type="0" Start="250.0" Num="1"/>
+        </TRACK>
+        <TRACK TrackID="2" Name="No Cue" Artist="Artist B" AverageBpm="124.00" Tonality="8A"
+               Genre="House" TotalTime="300"/>
+        <TRACK TrackID="3" Name="Half Cue" Artist="Artist C" AverageBpm="124.00" Tonality="8A"
+               Genre="House" TotalTime="300">
+          <POSITION_MARK Name="" Type="0" Start="20.0" Num="0"/>
+        </TRACK>
+        <TRACK TrackID="4" Name="No Cue Too" Artist="Artist D" AverageBpm="125.00" Tonality="9A"
+               Genre="House" TotalTime="300"/>
+      </COLLECTION>
+      <PLAYLISTS>
+        <NODE Type="0" Name="ROOT" Count="1">
+          <NODE Type="1" Name="DO NOT RECOMMEND" KeyType="0" Entries="1">
+            <TRACK Key="2"/>
+          </NODE>
+        </NODE>
+      </PLAYLISTS>
+    </DJ_PLAYLISTS>
+""")
+
+
+def test_run_prep_denylisted_track_excluded_from_ranking_and_totals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--prep must not rank tracks in DO NOT RECOMMEND — cueing them is wasted time.
+
+    Live finding: --prep reported 414 house tracks where the concept pipeline
+    (which applies the denylist) sees 370.
+    """
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_PREP_DENYLIST_XML)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", tmp_path / "history.json")
+
+    exit_code = run_prep(None, 20)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Artist B — No Cue" not in out  # denylisted
+    assert "Artist D — No Cue Too" in out  # still ranked
+    assert "  house: 2 of 3 tracks lack cue data" in out  # denominator excludes the denylisted track
+
+
 def test_run_prep_prints_table_footer_and_hint_and_exits_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
