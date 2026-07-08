@@ -3,6 +3,7 @@
 ## v1.8.0 — 2026-07-07
 
 - **Genre Traverse (#82).** A seventh concept direction: cross-genre journey sets that travel between tempo regimes (house → UKG → jungle/DnB) via pitch-locked ratio bridges. The builder splits the pool into BPM regimes (sorted-neighbour gap > 12), chains regimes reachable through verified halftime/double-time/3:4/4:3 bridge pairs (≥2 per hop, Camelot-compatible preferred, unreachable regimes skipped), seed-flips climb vs descend, selects bridge endpoints plus centrality fill per chapter, and writes a DIRECTION BRIEF naming each hop's bridge pairs with their mechanisms. Fires only when the material genuinely supports it — single-regime pools (every standard-genre run) are unaffected. New `traverse` custom genre label pools the whole collection to feed it: `./mixlab --genre traverse`.
+- **Flags guide.** `docs/flags-guide.md` — a tutorial covering every lever by use case (gig prep, playlist completion, cross-genre journeys, the cue-prep loop, feedback verdicts, reproduction/debugging, exports), with a quick-reference table and the flag-composition rules. Linked from the README.
 
 ---
 
