@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.8.2 — 2026-07-08
+
+- **Regime-crossing awareness for every concept.** The first badge-equipped run (v1.8.1) revealed that other direction types (fresh_crate, artist_thread) build traverse-shaped sets over cross-genre pools too — the traverse-scoped hard finding couldn't see them. Non-traverse concepts now draw a warn-only "regime crossing without a ratio bridge … plan a cut or a reorder" note for incompatible crossings — fired only when the BPM-jump warning doesn't already cover the pair (justified-risk or sub-threshold), so no pair ever draws two warnings, and never a hard finding.
+
+---
+
 ## v1.8.1 — 2026-07-08
 
 Four tuning fixes from the first two production traverse runs.
