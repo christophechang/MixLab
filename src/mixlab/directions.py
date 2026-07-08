@@ -491,12 +491,12 @@ def _build_genre_traverse(pool: list[Track], *, seed: int) -> Direction | None:
 
     # Chain regimes ascending by BPM; a regime joins only if it has enough verified
     # bridges from the current chain end. Camelot-compatible bridges sort first.
-    chain: list[list[Track]] = [regimes[0]]
-    hops: list[list[tuple[Track, Track]]] = []
-    for candidate in regimes[1:]:
-        if len(chain) >= _TRAVERSE_MAX_CHAPTERS:
-            break
-        prev = chain[-1]
+    # Live finding (three consecutive non-firings on the traverse pool): a chain
+    # anchored to regimes[0] dies whenever the lowest regime bridges to nothing —
+    # a ~77 BPM hip-hop block has no ratio partner even when 124↔170 bridges are
+    # plentiful further up. Try every regime as the chain start and keep the
+    # longest chain (ties → earliest start, deterministic).
+    def _bridge_pairs(prev: list[Track], candidate: list[Track]) -> list[tuple[Track, Track]]:
         pairs = [
             (a, b)
             for a in prev
@@ -510,9 +510,29 @@ def _build_genre_traverse(pool: list[Track], *, seed: int) -> Direction | None:
                 p[1].track_id,
             )
         )
-        if len(pairs) >= _TRAVERSE_MIN_BRIDGES:
-            chain.append(candidate)
-            hops.append(pairs)
+        return pairs
+
+    chain: list[list[Track]] = []
+    hops: list[list[tuple[Track, Track]]] = []
+    best_key = (0, 0)
+    for start in range(len(regimes)):
+        cand_chain: list[list[Track]] = [regimes[start]]
+        cand_hops: list[list[tuple[Track, Track]]] = []
+        for candidate in regimes[start + 1 :]:
+            if len(cand_chain) >= _TRAVERSE_MAX_CHAPTERS:
+                break
+            pairs = _bridge_pairs(cand_chain[-1], candidate)
+            if len(pairs) >= _TRAVERSE_MIN_BRIDGES:
+                cand_chain.append(candidate)
+                cand_hops.append(pairs)
+        # More chapters wins; ties break to the chain with more material (a
+        # two-chapter journey over 16 tracks beats one over 14 that would then
+        # die at the MIN_DIRECTION_POOL floor), then to the earliest start.
+        cand_key = (len(cand_chain), sum(len(c) for c in cand_chain))
+        if cand_key > best_key:
+            best_key = cand_key
+            chain = cand_chain
+            hops = cand_hops
     if len(chain) < 2:
         return None
 
