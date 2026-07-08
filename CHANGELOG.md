@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.8.4 — 2026-07-08
+
+- **Fix: genre_traverse regime detection now uses tempo-density peaks.** v1.8.3's chain fix wasn't enough — the run log proved the builder still returned None on the real pool. Root cause: gap-based regime splitting needs a >12 BPM hole between sorted neighbours, and a full collection's BPMs form a near-continuum with no holes, so the builder saw one giant regime. Regimes are now density peaks: a smoothed 1-BPM histogram, peaks picked by mass with ≥20 BPM separation, regime = tracks within ±8 BPM of the peak. In-between material simply doesn't join a chapter. Regression test uses exactly the failing shape: a 77–180 continuum plus heavy house/DnB concentrations.
+- **Direction observability.** The run log now prints `Directions proposed: … (N/7 builders)` so a silently non-firing builder is visible immediately — genre_traverse returning None took three production runs to notice.
+
+---
+
 ## v1.8.3 — 2026-07-08
 
 - **Fix: the genre_traverse chain was anchored to the lowest tempo regime.** Three consecutive production runs on the traverse pool produced zero genre_traverse concepts (confirmed by the v1.8.1 direction badges — every journey-shaped concept came from other directions). The chain-builder started at the lowest-BPM regime and skipped everything unreachable from it, so a low block with no ratio partner (the ~77 BPM hip-hop shelf) could starve the whole direction even with plentiful 126↔168 bridges above. The builder now tries every regime as the chain start and keeps the best chain — most chapters, ties broken by total material (avoiding chains that die at the 15-track pool floor), then earliest start. Deterministic as before.

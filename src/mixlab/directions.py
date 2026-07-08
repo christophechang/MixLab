@@ -442,8 +442,16 @@ def _build_fresh_crate(pool: list[Track], *, seed: int) -> Direction | None:
     )
 
 
-_TRAVERSE_REGIME_GAP = 12.0  # BPM gap between sorted neighbours that splits tempo regimes
 _TRAVERSE_REGIME_MIN = 5  # tracks required for a regime to be a viable chapter
+# Live finding (v1.8.3 still not firing on the real pool): gap-based regime splitting
+# needs a >12 BPM hole between sorted neighbours, and a full collection's BPMs form a
+# near-continuum — no holes, one giant "regime", builder bails. Regimes are now tempo
+# DENSITY PEAKS: a smoothed 1-BPM histogram, peaks greedily picked by mass with a
+# minimum separation, regime = tracks within a half-width of the peak. In-between
+# material simply doesn't join a chapter, which is what a journey wants.
+_TRAVERSE_PEAK_SEPARATION = 20.0  # min BPM distance between regime peaks
+_TRAVERSE_REGIME_HALF_WIDTH = 8.0  # regime membership: within this of the peak
+_TRAVERSE_SMOOTH_WINDOW = 3  # histogram smoothing: +-N BPM bins
 _TRAVERSE_MIN_BRIDGES = 2  # verified ratio-bridge pairs required per regime hop
 _TRAVERSE_MAX_CHAPTERS = 4  # journey length cap — quota per chapter stays >= 6 tracks
 
@@ -465,27 +473,52 @@ def _regime_label(regime: list[Track]) -> str:
     return f"{genre} {span}"
 
 
+def _tempo_regimes(usable: list[Track]) -> list[list[Track]]:
+    """Density-peak tempo regimes, ascending by peak BPM.
+
+    Builds a 1-BPM histogram smoothed over ±:data:`_TRAVERSE_SMOOTH_WINDOW` bins,
+    greedily picks peaks by smoothed mass (ties → lower BPM) with at least
+    :data:`_TRAVERSE_PEAK_SEPARATION` between peaks, then forms each regime from the
+    tracks within :data:`_TRAVERSE_REGIME_HALF_WIDTH` of its peak. Regimes are
+    disjoint because the separation exceeds twice the half-width. Peaks whose
+    membership falls under :data:`_TRAVERSE_REGIME_MIN` are dropped. Deterministic.
+    """
+    if not usable:
+        return []
+    counts = Counter(round(t.bpm) for t in usable)
+    lo, hi = min(counts), max(counts)
+    smoothed = {
+        b: sum(counts.get(b + d, 0) for d in range(-_TRAVERSE_SMOOTH_WINDOW, _TRAVERSE_SMOOTH_WINDOW + 1))
+        for b in range(lo, hi + 1)
+    }
+    peaks: list[int] = []
+    for bpm_bin, mass in sorted(smoothed.items(), key=lambda kv: (-kv[1], kv[0])):
+        if mass < _TRAVERSE_REGIME_MIN:
+            break
+        if all(abs(bpm_bin - p) >= _TRAVERSE_PEAK_SEPARATION for p in peaks):
+            peaks.append(bpm_bin)
+        if len(peaks) >= _TRAVERSE_MAX_CHAPTERS + 2:  # spares — chaining may skip some
+            break
+    regimes: list[list[Track]] = []
+    for peak in sorted(peaks):
+        members = [t for t in usable if abs(t.bpm - peak) <= _TRAVERSE_REGIME_HALF_WIDTH]
+        if len(members) >= _TRAVERSE_REGIME_MIN:
+            regimes.append(members)
+    return regimes
+
+
 def _build_genre_traverse(pool: list[Track], *, seed: int) -> Direction | None:
     """Cross-genre journey through distinct tempo regimes linked by ratio bridges (type index 6).
 
-    Fires only when the pool splits into two or more BPM regimes (sorted-neighbour gap
-    over :data:`_TRAVERSE_REGIME_GAP`) that are chained by verified pitch-lock bridges —
-    halftime/double-time/3:4/4:3 pairs within the ±6% window. Single-regime pools
-    (every standard-genre run) return ``None``, so this direction only surfaces for
-    cross-genre pools (``4x4``, ``traverse``). Regimes that cannot be bridged from the
-    chain are skipped rather than forced.
+    Fires only when the pool's tempo-density peaks (see :func:`_tempo_regimes`) form
+    two or more regimes chained by verified pitch-lock bridges — halftime/double-time/
+    3:4/4:3 pairs within the ±6% window. Single-regime pools (every standard-genre
+    run) return ``None``, so this direction only surfaces for cross-genre pools
+    (``4x4``, ``traverse``). Regimes that cannot be bridged from the chain are skipped
+    rather than forced.
     """
     usable = sorted((t for t in pool if t.bpm > 0), key=lambda t: (t.bpm, t.track_id))
-    regimes: list[list[Track]] = []
-    current: list[Track] = []
-    for track in usable:
-        if current and track.bpm - current[-1].bpm > _TRAVERSE_REGIME_GAP:
-            regimes.append(current)
-            current = []
-        current.append(track)
-    if current:
-        regimes.append(current)
-    regimes = [r for r in regimes if len(r) >= _TRAVERSE_REGIME_MIN]
+    regimes = _tempo_regimes(usable)
     if len(regimes) < 2:
         return None
 
@@ -625,6 +658,10 @@ def generate_directions(
     Deterministic: same pool + same seed → identical output.
     """
     candidates = [direction for builder in _BUILDERS if (direction := builder(pool, seed=seed)) is not None]
+    # One diagnostic line so non-firing builders are visible in the run log —
+    # genre_traverse silently returning None took three production runs to notice.
+    proposed = ", ".join(sorted(d.direction_type for d in candidates)) if candidates else "none"
+    print(f"Directions proposed: {proposed} ({len(candidates)}/{len(_BUILDERS)} builders)")
     if not candidates:
         return []
 
