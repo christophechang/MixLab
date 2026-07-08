@@ -74,7 +74,9 @@ from mixlab.playlist_mode import (
 )
 from mixlab.prep import PrepItem, rank_prep_targets
 from mixlab.reader import apply_bpm_corrections, parse_collection, parse_playlists
+from mixlab.remote import MixLabRemote, RemoteConfig, RemoteConfigError
 from mixlab.summary import build_run_summary
+from mixlab.worker import WorkerConfig, run_worker
 
 _XML_PATH = Path("import/rekordbox.xml")
 _HISTORY_PATH = Path(".mixlab/concept-history.json")
@@ -1206,6 +1208,25 @@ def _warn_intent(intent: str | None) -> None:
         )
 
 
+def _run_worker_cli(*, once: bool) -> None:
+    """Handle ``mixlab --worker`` / ``--worker-once`` (#91 / M3).
+
+    Builds the remote config from the environment (``MIXLAB_API_URL`` /
+    ``MIXLAB_API_SECRET``) — a missing value prints the reason to stderr and exits 1 —
+    then drives the worker loop. ``MIXLAB_WORKER_POLL_SECONDS`` (default 30) sets the
+    empty-poll cadence.
+    """
+    try:
+        remote_config = RemoteConfig.from_env()
+    except RemoteConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+    remote = MixLabRemote(remote_config)
+    worker_config = WorkerConfig.from_env()
+    poll_seconds = float(os.environ.get("MIXLAB_WORKER_POLL_SECONDS", "30"))
+    sys.exit(run_worker(remote, worker_config, poll_seconds=poll_seconds, once=once))
+
+
 def main() -> None:
     # Line-buffer stdout even when piped (tee/log capture) so progress lines interleave
     # correctly with unbuffered stderr diagnostics instead of flushing in one late block.
@@ -1487,7 +1508,27 @@ examples:
         metavar="N",
         help="With --prep: number of top targets to show (default 20).",
     )
+    parser.add_argument(
+        "--worker",
+        action="store_true",
+        help=(
+            "Run the MixLab Anywhere worker loop (#91): poll the API for queued runs, "
+            "execute each as a subprocess, and push artifacts back. Requires MIXLAB_API_URL "
+            "and MIXLAB_API_SECRET. Poll cadence: MIXLAB_WORKER_POLL_SECONDS (default 30)."
+        ),
+    )
+    parser.add_argument(
+        "--worker-once",
+        action="store_true",
+        dest="worker_once",
+        help="Run a single worker poll cycle then exit (for cron/agent/manual use). Takes precedence over --worker.",
+    )
     args = parser.parse_args()
+
+    if args.worker or args.worker_once:
+        _run_worker_cli(once=args.worker_once)
+        return
+
     _validate_range_args(
         min_bpm=args.min_bpm,
         max_bpm=args.max_bpm,

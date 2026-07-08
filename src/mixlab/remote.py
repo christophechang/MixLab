@@ -156,6 +156,11 @@ class MixLabRemote:
     def __init__(self, config: RemoteConfig) -> None:
         self._config = config
 
+    @property
+    def base_url(self) -> str:
+        """Base URL of the configured API (read-only; used by the worker's startup log)."""
+        return self._config.base_url
+
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._config.api_secret}"}
 
