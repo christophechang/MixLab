@@ -1275,6 +1275,7 @@ examples:
   mixlab --feedback --concept "Title" --verdict played --notes "great opener"  record concept feedback
   mixlab --prep                       rank uncued tracks by cue-prep payoff (offline, no LLM)
   mixlab --prep --genre house --top 10  scope to house genre, top 10 targets
+  mixlab --worker                     run as a MixLab Anywhere worker (see README)
 """,
     )
     parser.add_argument(

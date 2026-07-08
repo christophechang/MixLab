@@ -427,6 +427,32 @@ Ranks every track with missing or partial cue-point data (no `mix_points` at all
 Cue up the top entries in Rekordbox, re-export, and booth sheets gain clock times.
 ```
 
+### MixLab Anywhere worker
+
+Run MixLab as a remote worker that pulls queued runs from the MixLab Anywhere API, executes the normal pipeline as a subprocess, and uploads report + summary artifacts:
+
+```bash
+./mixlab --worker                 # persistent loop, polls API every 30s
+./mixlab --worker-once            # one cycle, then exit (for cron/manual)
+```
+
+The worker mode is purely additive — your normal CLI workflow (`./mixlab --genre house`, etc.) is unchanged. All other pipeline flags are ignored when `--worker` is active; the run's flags come from the queued manifest instead.
+
+**Required environment variables:**
+
+- `MIXLAB_API_URL` — base URL of the MixLab Anywhere API (e.g. `https://api.example.com`)
+- `MIXLAB_API_SECRET` — shared bearer secret for API authentication
+
+**Optional variables:**
+
+- `MIXLAB_WORKER_POLL_SECONDS` (default `30`) — empty-poll cadence in seconds
+- `MIXLAB_WORKER_XML_PATH` (default `import/rekordbox.xml`) — where the worker writes the downloaded collection
+- `MIXLAB_WORKER_RUN_TIMEOUT` (default `1200`) — hard per-run subprocess timeout in seconds
+
+The worker also syncs concept history and feedback with the API: it pulls pending feedback events, applies them to the local history, and pushes back any changes — bidirectional sync so verdicts and ratings you record in the web UI feed into future runs.
+
+For production setup on macOS, see [`docs/ops/worker-launchd.md`](docs/ops/worker-launchd.md). Architecture and failure policies: [`docs/architecture/mixlab-anywhere.md`](docs/architecture/mixlab-anywhere.md).
+
 ---
 
 ## Available genres
