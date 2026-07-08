@@ -81,6 +81,11 @@ TRACK_COUNT_TARGETS: dict[str, tuple[int, int]] = {
     "Deep House": (8, 12),
     "UK Garage": (10, 13),
     "Jungle": (12, 16),
+    # genre_traverse journey concepts (#82) legitimately need more tracks — 3+ per
+    # chapter across up to 4 tempo-regime chapters plus ratio-bridge tracks. Keyed
+    # lowercase to match the CLI's "traverse" genre label (see __main__'s genre arg),
+    # unlike the Title Case keys above which mirror Rekordbox genre tags.
+    "traverse": (8, 16),
     "_default": (8, 12),
 }
 

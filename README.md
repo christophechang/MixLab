@@ -190,6 +190,8 @@ In Rekordbox:
 
 ## Running MixLab
 
+> **New to the levers?** [`docs/flags-guide.md`](docs/flags-guide.md) is a tutorial covering every flag by use case — gig prep, playlist completion, cross-genre journeys, the cue-prep loop, feedback verdicts, and how flags compose — with copy-paste examples for each. The sections below cover the core workflows; the guide covers everything.
+
 ### View crate availability (no LLM calls)
 
 ```bash
