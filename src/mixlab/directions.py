@@ -442,6 +442,136 @@ def _build_fresh_crate(pool: list[Track], *, seed: int) -> Direction | None:
     )
 
 
+_TRAVERSE_REGIME_GAP = 12.0  # BPM gap between sorted neighbours that splits tempo regimes
+_TRAVERSE_REGIME_MIN = 5  # tracks required for a regime to be a viable chapter
+_TRAVERSE_MIN_BRIDGES = 2  # verified ratio-bridge pairs required per regime hop
+_TRAVERSE_MAX_CHAPTERS = 4  # journey length cap — quota per chapter stays >= 6 tracks
+
+_TRAVERSE_RELATION_LABELS: dict[str, str] = {
+    "halftime": "halftime lock",
+    "double": "double-time lock",
+    "three_four": "3:4 shuffle",
+    "four_three": "4:3 push",
+}
+
+
+def _regime_label(regime: list[Track]) -> str:
+    """Dominant genre tag plus BPM span, e.g. ``House 122-130``."""
+    dominant = Counter(t.genre for t in regime if t.genre).most_common(1)
+    genre = dominant[0][0] if dominant else "mixed"
+    lo = min(t.bpm for t in regime)
+    hi = max(t.bpm for t in regime)
+    span = f"{lo:g}" if round(lo) == round(hi) else f"{lo:.0f}-{hi:.0f}"
+    return f"{genre} {span}"
+
+
+def _build_genre_traverse(pool: list[Track], *, seed: int) -> Direction | None:
+    """Cross-genre journey through distinct tempo regimes linked by ratio bridges (type index 6).
+
+    Fires only when the pool splits into two or more BPM regimes (sorted-neighbour gap
+    over :data:`_TRAVERSE_REGIME_GAP`) that are chained by verified pitch-lock bridges —
+    halftime/double-time/3:4/4:3 pairs within the ±6% window. Single-regime pools
+    (every standard-genre run) return ``None``, so this direction only surfaces for
+    cross-genre pools (``4x4``, ``traverse``). Regimes that cannot be bridged from the
+    chain are skipped rather than forced.
+    """
+    usable = sorted((t for t in pool if t.bpm > 0), key=lambda t: (t.bpm, t.track_id))
+    regimes: list[list[Track]] = []
+    current: list[Track] = []
+    for track in usable:
+        if current and track.bpm - current[-1].bpm > _TRAVERSE_REGIME_GAP:
+            regimes.append(current)
+            current = []
+        current.append(track)
+    if current:
+        regimes.append(current)
+    regimes = [r for r in regimes if len(r) >= _TRAVERSE_REGIME_MIN]
+    if len(regimes) < 2:
+        return None
+
+    # Chain regimes ascending by BPM; a regime joins only if it has enough verified
+    # bridges from the current chain end. Camelot-compatible bridges sort first.
+    chain: list[list[Track]] = [regimes[0]]
+    hops: list[list[tuple[Track, Track]]] = []
+    for candidate in regimes[1:]:
+        if len(chain) >= _TRAVERSE_MAX_CHAPTERS:
+            break
+        prev = chain[-1]
+        pairs = [
+            (a, b)
+            for a in prev
+            for b in candidate
+            if tempo_relation(a.bpm, b.bpm)[0] not in ("incompatible", "straight")
+        ]
+        pairs.sort(
+            key=lambda p: (
+                not camelot_compatible(p[0].camelot_key, p[1].camelot_key),
+                p[0].track_id,
+                p[1].track_id,
+            )
+        )
+        if len(pairs) >= _TRAVERSE_MIN_BRIDGES:
+            chain.append(candidate)
+            hops.append(pairs)
+    if len(chain) < 2:
+        return None
+
+    # Seed-flip the journey direction: half the days climb, half descend.
+    rng = random.Random(seed * _SEED_K + 6)
+    descending = rng.random() < 0.5
+    chapters = list(reversed(chain)) if descending else chain
+    chapter_hops = [[(b, a) for a, b in pairs] for pairs in reversed(hops)] if descending else hops
+
+    # Per-chapter selection: bridge endpoints first (they make the hops physically
+    # possible), then centrality fill to an even quota.
+    quota = max(_TRAVERSE_REGIME_MIN, MAX_DIRECTION_POOL // len(chapters))
+    chosen: list[Track] = []
+    for i, chapter in enumerate(chapters):
+        endpoint_ids: list[str] = []
+        if i > 0:
+            endpoint_ids.extend(b.track_id for _a, b in chapter_hops[i - 1][:2])
+        if i < len(chapter_hops):
+            endpoint_ids.extend(a.track_id for a, _b in chapter_hops[i][:2])
+        endpoints = [t for t in chapter if t.track_id in set(endpoint_ids)]
+        fill = [t for t in _rank(chapter) if t.track_id not in {e.track_id for e in endpoints}]
+        chosen.extend((endpoints + fill)[:quota])
+
+    labels = [_regime_label(c) for c in chapters]
+    journey = " → ".join(labels)
+    bridge_lines: list[str] = []
+    for i, pairs in enumerate(chapter_hops):
+        for a, b in pairs[:2]:
+            relation, _ = tempo_relation(a.bpm, b.bpm)
+            mechanism = _TRAVERSE_RELATION_LABELS.get(relation, relation)
+            bridge_lines.append(
+                f"  hop {i + 1} ({labels[i]} → {labels[i + 1]}): {a.artist} — {a.title} ({a.bpm:g}) → "
+                f"{b.artist} — {b.title} ({b.bpm:g}) via {mechanism}"
+            )
+
+    min_bridges = min(len(pairs) for pairs in chapter_hops)
+    size_balance = min(len(c) for c in chapters) / max(len(c) for c in chapters)
+    signal = 0.6 * min(min_bridges / 5.0, 1.0) + 0.4 * size_balance
+
+    brief = (
+        f"GENRE TRAVERSE. This set travels {journey} — one chapter per tempo regime, in this order. "
+        f"Every regime change must be executed on a ratio bridge (pitch-locked halftime, double-time, "
+        f"3:4 or 4:3 blend within the pitch window) — never a raw tempo ride. Verified bridges "
+        f"(use these or equivalents from the pool):\n" + "\n".join(bridge_lines) + "\n"
+        "Spend at least three tracks establishing each chapter before hopping, land every hop as a "
+        "named chapter pivot with its mechanism, and keep the energy arc continuous across the "
+        "boundary. The journey is the thesis: the room should feel it crossed genres without ever "
+        "losing the pulse."
+    )
+    return _finalise(
+        direction_type="genre_traverse",
+        title=f"Genre traverse: {labels[0]} -> {labels[-1]}",
+        mood=f"cross-genre journey in {len(chapters)} chapters",
+        chosen=chosen,
+        brief=brief,
+        signal=signal,
+    )
+
+
 _BUILDERS = (
     _build_mood_journey,
     _build_era_dialogue,
@@ -449,6 +579,7 @@ _BUILDERS = (
     _build_artist_thread,
     _build_energy_shape_first,
     _build_fresh_crate,
+    _build_genre_traverse,
 )
 
 

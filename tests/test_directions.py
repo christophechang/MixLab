@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from mixlab.directions import (
     MAX_DIRECTION_POOL,
     MIN_DIRECTION_POOL,
@@ -7,6 +9,7 @@ from mixlab.directions import (
     _build_energy_shape_first,
     _build_era_dialogue,
     _build_fresh_crate,
+    _build_genre_traverse,
     _build_label_spotlight,
     _build_mood_journey,
     _path_feasible,
@@ -307,3 +310,60 @@ def test_generate_directions_artist_thread_canvas_carries_thread_artist() -> Non
 def test_generate_directions_empty_when_nothing_viable() -> None:
     pool = [_track(track_id=str(i), bpm=172.0) for i in range(30)]
     assert generate_directions(pool, _tbi(pool), seed=1) == []
+
+
+# ---------------------------------------------------------------------------
+# _build_genre_traverse (#82) — cross-genre journeys via ratio bridges
+# ---------------------------------------------------------------------------
+
+
+def _traverse_pool() -> list[Track]:
+    """Two tempo regimes bridged by a valid 4:3 relation: house ~126-128, DnB ~168-172."""
+    house = [_track(track_id=f"h{i}", bpm=126.0 + i * 0.25, genre="House", camelot_key="8A") for i in range(8)]
+    dnb = [_track(track_id=f"d{i}", bpm=168.0 + i * 0.5, genre="Drum & Bass", camelot_key="8A") for i in range(8)]
+    return house + dnb
+
+
+def test_build_genre_traverse_two_bridged_regimes_fires() -> None:
+    direction = _build_genre_traverse(_traverse_pool(), seed=7)
+    assert direction is not None
+    assert direction.direction_type == "genre_traverse"
+    assert "GENRE TRAVERSE" in direction.brief
+    assert "hop 1" in direction.brief
+    assert "via " in direction.brief
+    assert "House" in direction.brief and "Drum & Bass" in direction.brief
+    assert MIN_DIRECTION_POOL <= len(direction.track_ids) <= MAX_DIRECTION_POOL
+
+
+def test_build_genre_traverse_single_regime_returns_none() -> None:
+    pool = [_track(track_id=str(i), bpm=122.0 + i, genre="House") for i in range(20)]
+    assert _build_genre_traverse(pool, seed=7) is None
+
+
+def test_build_genre_traverse_unbridgeable_regimes_returns_none() -> None:
+    # 124 vs 146: gap splits regimes, but 146/124 = 1.177 matches no pitch-locked ratio.
+    a = [_track(track_id=f"a{i}", bpm=124.0, genre="House") for i in range(8)]
+    b = [_track(track_id=f"b{i}", bpm=146.0, genre="Breakbeat") for i in range(8)]
+    assert _build_genre_traverse(a + b, seed=7) is None
+
+
+def test_build_genre_traverse_same_seed_deterministic() -> None:
+    assert _build_genre_traverse(_traverse_pool(), seed=42) == _build_genre_traverse(_traverse_pool(), seed=42)
+
+
+def test_build_genre_traverse_bridge_endpoints_included_in_pool() -> None:
+    direction = _build_genre_traverse(_traverse_pool(), seed=7)
+    assert direction is not None
+    # Every track named in a bridge line must be in the direction pool.
+    named_ids = set()
+    for m in re.finditer(r"Artist_(\w+) — Title_", direction.brief):
+        named_ids.add(m.group(1))
+    assert named_ids, "brief names no bridge tracks"
+    assert named_ids <= {tid for tid in direction.track_ids}
+
+
+def test_generate_directions_traverse_pool_materialises_traverse_canvas() -> None:
+    pool = _traverse_pool()
+    canvases = generate_directions(pool, _tbi(pool), seed=7, max_directions=6)
+    types = {c.direction_type for c in canvases}
+    assert "genre_traverse" in types

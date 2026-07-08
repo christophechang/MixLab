@@ -457,6 +457,7 @@ Custom genres merge multiple standard genres into a single pool. They are design
 ./mixlab --genre 4x4
 ./mixlab --genre 170
 ./mixlab --genre 140
+./mixlab --genre traverse
 ```
 
 | Label | Sub-genres | BPM range | Rationale |
@@ -464,6 +465,7 @@ Custom genres merge multiple standard genres into a single pool. They are design
 | `170` | drum_and_bass + jungle | 165–175 BPM | Hardcore continuum genres that live at the same tempo and share rhythmic DNA — the richest cross-genre territory in the collection |
 | `140` | breakbeat + uk_bass + uk_garage | 130–140 BPM | UK underground genres that occupy the same tempo bracket; blends can range from technical to percussive to bass-heavy |
 | `4x4` | house + electronica + disco + progressive + techno | none | The full 4/4 spectrum from deep house to techno, with a wide BPM range (~90–140); the creative challenge is the journey across that arc |
+| `traverse` | all standard genres | none | Full-collection pool that unlocks the **genre traverse** direction: journey concepts that cross tempo regimes (house → UKG → jungle/DnB) via pitch-locked ratio bridges — halftime, double-time, 3:4 and 4:3 blends. The direction only fires when the pool actually splits into bridgeable regimes; each verified bridge pair is named in the Stage 2 brief with its mechanism |
 
 Custom genres behave differently from standard genres in two key ways:
 

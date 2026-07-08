@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.8.0 — 2026-07-07
+
+- **Genre Traverse (#82).** A seventh concept direction: cross-genre journey sets that travel between tempo regimes (house → UKG → jungle/DnB) via pitch-locked ratio bridges. The builder splits the pool into BPM regimes (sorted-neighbour gap > 12), chains regimes reachable through verified halftime/double-time/3:4/4:3 bridge pairs (≥2 per hop, Camelot-compatible preferred, unreachable regimes skipped), seed-flips climb vs descend, selects bridge endpoints plus centrality fill per chapter, and writes a DIRECTION BRIEF naming each hop's bridge pairs with their mechanisms. Fires only when the material genuinely supports it — single-regime pools (every standard-genre run) are unaffected. New `traverse` custom genre label pools the whole collection to feed it: `./mixlab --genre traverse`.
+
+---
+
 ## v1.7.5 — 2026-07-07
 
 - **Title re-roll (#75).** Prompt pressure alone cannot stop exact title repeats — the v1.7.4 live run still reproduced two forbidden titles verbatim ('Ladbroke Spine', 'Rej & The Room') for the same canvases. Exact collisions (casefolded match against the avoid list) now trigger one bounded rename-only LLM call for just the colliding concepts, before the report pass so prose uses the final titles. Replacements that fail, collide with the avoid list, or duplicate another title are rejected — the original stays and the echo warning stands. Accepted renames appear in run notes ("**Renamed**: 'old' → 'new'").
