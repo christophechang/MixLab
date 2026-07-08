@@ -1264,16 +1264,38 @@ def validate_stage2_output(
 
         seq = [tracks_by_id[tid] for tid in concept.track_ids if tid in tracks_by_id]
         # Artist-thread canvases (#53) name a spine artist whose repetition is the whole
-        # point — suppress the repeat warning for that artist at up to 3 tracks (the
-        # thread cap). Every other artist, and a thread artist appearing 4+ times, warns.
+        # point — suppress the repeat warning for that artist at up to 5 tracks (the
+        # thread cap). A thread artist exceeding the cap gets a clearer, thread-specific
+        # message instead of the generic one. Every other artist keeps the generic warning.
         thread_canvas = _match_canvas_for_concept(concept, canvases)
         thread_artist = thread_canvas.thread_artist if thread_canvas is not None else ""
         artist_counts = Counter(t.artist for t in seq)
         for artist, count in artist_counts.items():
             if count >= 3:
-                if thread_artist and artist == thread_artist and count <= 3:
+                if thread_artist and artist == thread_artist:
+                    if count <= 5:
+                        continue
+                    warnings.append(
+                        f"{label} thread artist '{artist}' appears {count} times — thread cap is 5, trim the spine"
+                    )
                     continue
                 warnings.append(f"{label} artist '{artist}' appears {count} times")
+
+        # genre_traverse concepts (#82) ride tempo-regime crossings on pitch-locked ratio
+        # bridges by design — a raw jump across regimes with no bridge relation is a hard
+        # structural error, not an annotatable risk, so this is never suppressed by
+        # justified_risk (unlike the BPM/Camelot jump checks below).
+        if thread_canvas is not None and thread_canvas.direction_type == "genre_traverse":
+            for i in range(len(seq) - 1):
+                a, b = seq[i], seq[i + 1]
+                if abs(a.bpm - b.bpm) > 12.0:
+                    rel, _stretch = tempo_relation(a.bpm, b.bpm)
+                    if rel == "incompatible":
+                        warnings.append(
+                            f"{label} unbridged regime crossing {a.bpm:g}→{b.bpm:g} between "
+                            f"{a.artist} — {a.title} and {b.artist} — {b.title} — "
+                            "traverse hops must be ratio bridges"
+                        )
 
         # Suppress BPM/Camelot jump warnings when the corresponding transition is annotated
         # as a justified risk (is_risky=True with non-empty risk_type). Mirrors the
@@ -2607,6 +2629,7 @@ _HARD_FINDING_MARKERS: tuple[str, ...] = (
     "arc mismatch",
     "used without a justified transition",
     "blend risk",
+    "unbridged regime crossing",
 )
 
 # Hard-finding marker → short human label used in the report annotation's resolved list.
@@ -2619,6 +2642,7 @@ _HARD_FINDING_KIND_LABELS: tuple[tuple[str, str], ...] = (
     ("arc mismatch", "arc mismatch"),
     ("used without a justified transition", "unjustified transition"),
     ("blend risk", "blend risk"),
+    ("unbridged regime crossing", "unbridged crossing"),
 )
 
 _STAGE2_REVISION_SYSTEM = """\

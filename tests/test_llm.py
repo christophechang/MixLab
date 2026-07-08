@@ -4959,18 +4959,146 @@ def test_validate_stage2_output_still_warns_non_thread_artist_repeat() -> None:
     assert any("Other Artist" in w and "appears 3 times" in w for w in warnings)
 
 
-def test_validate_stage2_output_thread_artist_four_plus_still_warns() -> None:
+def _thread_artist_case(count: int) -> tuple[MixConcept, MixCanvas, dict[str, Track]]:
+    lib = {
+        str(i): Track(track_id=str(i), artist="SpineGuy", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="DnB")
+        for i in range(1, count + 1)
+    }
+    ids = [str(i) for i in range(1, count + 1)]
+    concept = MixConcept(title="Artist thread: SpineGuy", mood="spine", track_ids=ids)
+    canvas = _direction_canvas(ids, direction_type="artist_thread", thread_artist="SpineGuy")
+    return concept, canvas, lib
+
+
+def test_validate_stage2_output_thread_artist_four_times_silent() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    concept, canvas, lib = _thread_artist_case(4)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert not any("appears" in w for w in warnings)
+
+
+def test_validate_stage2_output_thread_artist_five_times_silent() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    concept, canvas, lib = _thread_artist_case(5)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert not any("appears" in w for w in warnings)
+
+
+def test_validate_stage2_output_thread_artist_six_times_warns_thread_cap_message() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    concept, canvas, lib = _thread_artist_case(6)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any(
+        "SpineGuy" in w and "appears 6 times" in w and "thread cap is 5" in w and "trim the spine" in w
+        for w in warnings
+    )
+    # The generic message must not also fire for the thread artist.
+    assert not any("SpineGuy" in w and "thread cap is 5" not in w and "appears" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# genre_traverse unbridged regime crossings (#82 live-finding fix)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_stage2_output_traverse_incompatible_crossing_warns() -> None:
     from mixlab.llm import validate_stage2_output
 
     lib = {
-        str(i): Track(track_id=str(i), artist="SpineGuy", title=f"T{i}", bpm=172.0, camelot_key="8A", genre="DnB")
-        for i in range(1, 5)
+        "1": Track(track_id="1", artist="A", title="Slow One", bpm=77.0, camelot_key="8A", genre="house"),
+        "2": Track(track_id="2", artist="B", title="Fast One", bpm=174.0, camelot_key="8A", genre="jungle"),
     }
-    ids = [str(i) for i in range(1, 5)]
-    concept = MixConcept(title="Artist thread: SpineGuy", mood="spine", track_ids=ids)
-    canvas = _direction_canvas(ids, direction_type="artist_thread", thread_artist="SpineGuy")
+    ids = ["1", "2"]
+    concept = MixConcept(title="Genre traverse: low -> high", mood="journey", track_ids=ids)
+    canvas = _direction_canvas(ids, direction_type="genre_traverse")
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
-    assert any("SpineGuy" in w and "appears 4 times" in w for w in warnings)
+    assert any("unbridged regime crossing" in w and "77" in w and "174" in w for w in warnings)
+
+
+def test_validate_stage2_output_non_traverse_incompatible_crossing_silent() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="Slow One", bpm=77.0, camelot_key="8A", genre="house"),
+        "2": Track(track_id="2", artist="B", title="Fast One", bpm=174.0, camelot_key="8A", genre="jungle"),
+    }
+    ids = ["1", "2"]
+    concept = MixConcept(title="Genre traverse: low -> high", mood="journey", track_ids=ids)
+    canvas = _direction_canvas(ids, direction_type="")
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert not any("unbridged regime crossing" in w for w in warnings)
+
+
+def test_validate_stage2_output_traverse_valid_ratio_crossing_silent() -> None:
+    from mixlab.llm import validate_stage2_output
+    from mixlab.transitions import tempo_relation
+
+    # 128 -> 170.66 is a 4:3 ratio bridge within the pitch window — not a raw jump.
+    rel, _stretch = tempo_relation(128.0, 170.66)
+    assert rel == "four_three"
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="House One", bpm=128.0, camelot_key="8A", genre="house"),
+        "2": Track(track_id="2", artist="B", title="DnB One", bpm=170.66, camelot_key="8A", genre="jungle"),
+    }
+    ids = ["1", "2"]
+    concept = MixConcept(title="Genre traverse: bridged", mood="journey", track_ids=ids)
+    canvas = _direction_canvas(ids, direction_type="genre_traverse")
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert not any("unbridged regime crossing" in w for w in warnings)
+
+
+def test_validate_stage2_output_traverse_crossing_not_suppressed_by_justified_risk() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="Slow One", bpm=77.0, camelot_key="8A", genre="house"),
+        "2": Track(track_id="2", artist="B", title="Fast One", bpm=174.0, camelot_key="8A", genre="jungle"),
+    }
+    ids = ["1", "2"]
+    concept = MixConcept(
+        title="Genre traverse: low -> high",
+        mood="journey",
+        track_ids=ids,
+        transitions=[Transition(from_id="1", to_id="2", is_risky=True, risk_type="chapter_pivot")],
+    )
+    canvas = _direction_canvas(ids, direction_type="genre_traverse")
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
+    assert any("unbridged regime crossing" in w for w in warnings)
+
+
+def test_hard_finding_markers_includes_unbridged_regime_crossing() -> None:
+    from mixlab.llm import _HARD_FINDING_MARKERS
+
+    assert "unbridged regime crossing" in _HARD_FINDING_MARKERS
+
+
+# ---------------------------------------------------------------------------
+# traverse track-count target (#82 live-finding fix)
+# ---------------------------------------------------------------------------
+
+
+def test_track_count_targets_traverse_is_eight_to_sixteen() -> None:
+    from mixlab.config import TRACK_COUNT_TARGETS
+
+    assert TRACK_COUNT_TARGETS["traverse"] == (8, 16)
+
+
+def test_validate_stage2_output_traverse_genre_fourteen_tracks_no_max_count_warning() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        str(i): Track(track_id=str(i), artist=f"Artist_{i}", title=f"T{i}", bpm=128.0, camelot_key="8A", genre="house")
+        for i in range(1, 15)
+    }
+    ids = [str(i) for i in range(1, 15)]
+    concept = MixConcept(title="Genre traverse: fourteen", mood="journey", track_ids=ids)
+    canvas = _direction_canvas(ids, direction_type="genre_traverse")
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="traverse")
+    assert not any("maximum is" in w for w in warnings)
 
 
 # ---------------------------------------------------------------------------

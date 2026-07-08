@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mixlab.__main__ import (
+    _annotate_direction_types,
     _apply_do_not_recommend_filter,
     _apply_range_filters,
     _build_filter_desc,
@@ -24,7 +25,15 @@ from mixlab.__main__ import (
     run_prep,
 )
 from mixlab.history import ConceptHistory, ConceptRecord, HistoryEntry, append_run, load_history
-from mixlab.models import MixConcept, PlayedTrack, Track
+from mixlab.models import (
+    CanvasRoleCandidates,
+    CanvasScore,
+    ContrastAssets,
+    MixCanvas,
+    MixConcept,
+    PlayedTrack,
+    Track,
+)
 from mixlab.playlist_exporter import build_merged_xml, parse_raw_tracks
 from mixlab.reader import parse_collection
 
@@ -1312,3 +1321,71 @@ def test_main_prep_flag_runs_via_cli(
     assert exc_info.value.code == 0
     out = capsys.readouterr().out
     assert _count_prep_rows(out) == 1
+
+
+# ---------------------------------------------------------------------------
+# _annotate_direction_types (#84)
+# ---------------------------------------------------------------------------
+
+
+def _concept(track_ids: list[str], **kwargs: object) -> MixConcept:
+    return MixConcept(title="Test Concept", mood="tense", track_ids=track_ids, **kwargs)  # type: ignore[arg-type]
+
+
+def _canvas(
+    canvas_id: str,
+    core_ids: list[str],
+    concept: MixConcept,
+    *,
+    direction_type: str = "",
+) -> MixCanvas:
+    return MixCanvas(
+        canvas_id=canvas_id,
+        genre="Drum & Bass",
+        bpm_range=(160.0, 180.0),
+        dominant_bpm=172.0,
+        dominant_camelot="4A",
+        core_track_ids=core_ids,
+        bridge_track_ids=[],
+        wildcard_track_ids=[],
+        roles=CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[]),
+        contrast=ContrastAssets(
+            vocal_moments=[],
+            texture_changes=[],
+            darker_turns=[],
+            brighter_lifts=[],
+            lower_pressure_resets=[],
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=concept,
+        direction_type=direction_type,
+    )
+
+
+def test_annotate_direction_types_matching_direction_canvas_stamps_concept() -> None:
+    concept = _concept(["1", "2", "3"])
+    canvas = _canvas("c1", ["1", "2", "3"], concept, direction_type="genre_traverse")
+
+    _annotate_direction_types([concept], [canvas])
+
+    assert concept.direction_type == "genre_traverse"
+
+
+def test_annotate_direction_types_matching_classic_canvas_stays_empty() -> None:
+    concept = _concept(["1", "2", "3"])
+    canvas = _canvas("c1", ["1", "2", "3"], concept, direction_type="")
+
+    _annotate_direction_types([concept], [canvas])
+
+    assert concept.direction_type == ""
+
+
+def test_annotate_direction_types_no_matching_canvas_stays_empty() -> None:
+    concept = _concept(["1", "2", "3"])
+    other_concept = _concept(["9"])
+    canvas = _canvas("c1", ["9"], other_concept, direction_type="mood_journey")
+
+    _annotate_direction_types([concept], [canvas])
+
+    assert concept.direction_type == ""
