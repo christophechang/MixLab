@@ -298,6 +298,51 @@ def save_history(history: ConceptHistory, path: Path) -> None:
         logger.warning("Failed to write concept-history.json")
 
 
+def _find_feedback_concept(history: ConceptHistory, query: str) -> tuple[HistoryEntry, ConceptRecord] | None:
+    """Find the most recent run containing a concept matching ``query``.
+
+    Matches case-insensitively on title, or as a prefix of ``concept_id``. Runs are
+    walked newest-first so the first hit is the most recent match.
+    """
+    query_lower = query.lower()
+    for entry in reversed(history.runs):
+        for record in entry.concepts:
+            if record.title.lower() == query_lower or (record.concept_id and record.concept_id.startswith(query)):
+                return entry, record
+    return None
+
+
+def apply_feedback_verdict(
+    history: ConceptHistory, concept_ref: str, verdict: str | None, notes: str
+) -> ConceptRecord | None:
+    """Apply a feedback verdict + notes update to the concept matching ``concept_ref``.
+
+    Shared by ``mixlab --feedback`` (CLI, #52) and the worker's history sync (#92) so
+    both paths use exactly the same match-and-mutate semantics. Matching mirrors
+    :func:`_find_feedback_concept`: case-insensitive title match, or ``concept_id``
+    prefix match, most recent run wins.
+
+    ``verdict=None`` means "leave the existing verdict alone, just refresh the notes
+    and recorded-at timestamp" — used by the sync path (#92) for feedback events that
+    carry only a rating/notes/publishedMixSlug and no explicit verdict.
+
+    Idempotent: applying the same verdict/notes twice yields the same record state
+    (only ``feedback_recorded_at`` moves forward; last application wins).
+
+    Returns the mutated record, or ``None`` when no concept matches ``concept_ref``.
+    Does not persist to disk — callers are responsible for calling ``save_history``.
+    """
+    match = _find_feedback_concept(history, concept_ref)
+    if match is None:
+        return None
+    _, record = match
+    if verdict is not None:
+        record.feedback = verdict
+    record.feedback_notes = notes
+    record.feedback_recorded_at = datetime.now(UTC).isoformat()
+    return record
+
+
 _RECENT_CONCEPTS_LIMIT = 8
 
 
