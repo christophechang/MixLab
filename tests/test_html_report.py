@@ -109,6 +109,29 @@ def test_render_html_report_shows_card_title_arc_and_track_fields() -> None:
     assert ">7<" in html  # energy cell
 
 
+def test_render_html_report_shows_dirtype_badge_when_direction_type_set() -> None:
+    t = _track("1", energy=5)
+    concept = _concept(["1"], arc_type="wave", direction_type="genre_traverse")
+    html = render_html_report([concept], _tracks_by_id([t]), report_text="", report_context="", validation_warnings=[])
+    assert 'class="arc dirtype"' in html
+    assert ">genre_traverse<" in html
+
+
+def test_render_html_report_omits_dirtype_badge_when_direction_type_empty() -> None:
+    t = _track("1", energy=5)
+    concept = _concept(["1"], arc_type="wave", direction_type="")
+    html = render_html_report([concept], _tracks_by_id([t]), report_text="", report_context="", validation_warnings=[])
+    assert 'class="arc dirtype"' not in html
+
+
+def test_render_html_report_escapes_dirtype_badge() -> None:
+    t = _track("1", energy=5)
+    concept = _concept(["1"], direction_type="<script>alert(2)</script>")
+    html = render_html_report([concept], _tracks_by_id([t]), report_text="", report_context="", validation_warnings=[])
+    assert "<script>alert(2)</script>" not in html
+    assert "&lt;script&gt;alert(2)&lt;/script&gt;" in html
+
+
 def test_render_html_report_shows_intro_outro_bars_when_present() -> None:
     t = _track("1", intro=8, outro=16, energy=5)
     html = render_html_report(

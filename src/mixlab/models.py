@@ -103,6 +103,10 @@ class MixConcept(BaseModel):
     transitions: list[Transition] = Field(default_factory=list)
     name_reason: str = ""
     arc_type: ArcType | None = None
+    # Direction-canvas provenance (#84). Populated post-Stage-2 from the matched
+    # canvas's direction_type (mood_journey, era_dialogue, etc.); "" for concepts
+    # born from a classic BPM-stratum canvas or when no canvas match is found.
+    direction_type: str = ""
     critique: Critique | None = None
 
 

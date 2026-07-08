@@ -44,6 +44,7 @@ from mixlab.history import (
 )
 from mixlab.html_report import render_html_report, report_filename
 from mixlab.llm import (
+    _match_canvas_for_concept,  # noqa: PLC2701 — reused here to stamp direction_type on cards (#84)
     _parse_user_intent,  # noqa: PLC2701 — reused here for playlist-mode risk override (#54)
     _qualifies_for_revision,  # noqa: PLC2701 — reused for the revision-gate decision (#55)
     make_cascade_state,
@@ -95,6 +96,14 @@ def _write_html_report(html: str, genre: str | None, playlist_name: str | None) 
 
 def _title_case_label(label: str) -> str:
     return label.replace("_", " ").title()
+
+
+def _annotate_direction_types(concepts: list[MixConcept], canvases: list[MixCanvas]) -> None:
+    """Stamp each concept with its matched canvas's direction_type (#84)."""
+    for concept in concepts:
+        canvas = _match_canvas_for_concept(concept, canvases)
+        if canvas is not None and canvas.direction_type:
+            concept.direction_type = canvas.direction_type
 
 
 def _format_report_context(
@@ -1068,6 +1077,7 @@ async def run(
             print(f"Exported: {out_path}")
 
     # 8b. Standalone HTML report (#45) — self-contained artifact written to disk and attached.
+    _annotate_direction_types(all_concepts, selected_canvases)
     html = render_html_report(
         all_concepts,
         tracks_by_id,

@@ -228,7 +228,10 @@ def _render_concept(
     tracks = _resolved_tracks(concept, tracks_by_id)
     parts: list[str] = ['<details class="card" open>']
     badge = f'<span class="arc">{_esc(concept.arc_type)}</span>' if concept.arc_type else ""
-    parts.append(f'<summary class="card-head"><span class="title">{_esc(concept.title)}</span>{badge}</summary>')
+    dirtype_badge = f'<span class="arc dirtype">{_esc(concept.direction_type)}</span>' if concept.direction_type else ""
+    parts.append(
+        f'<summary class="card-head"><span class="title">{_esc(concept.title)}</span>{badge}{dirtype_badge}</summary>'
+    )
     parts.append('<div class="card-body">')
     if concept.mood:
         parts.append(f'<p class="mood">{_esc(concept.mood)}</p>')
@@ -335,6 +338,7 @@ table.snap td { padding: 4px 8px; border-bottom: 1px solid var(--border); font-s
   font-size: 12px; color: var(--accent); border: 1px solid var(--accent);
   border-radius: 999px; padding: 1px 9px; font-weight: 600;
 }
+.arc.dirtype { border-style: dashed; color: var(--muted); border-color: var(--muted); }
 .card-body { padding-bottom: 12px; }
 .mood { margin: 2px 0 4px; }
 .reason { margin: 2px 0 10px; color: var(--muted); }

@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.8.1 — 2026-07-08
+
+Four tuning fixes from the first two production traverse runs.
+
+- **Direction badges on report cards.** Each concept card now shows which direction produced it (dashed badge next to the arc: `genre_traverse`, `artist_thread`, …) — a three-regime concept with no bridges appeared in a live report and its origin couldn't be identified. Classic-canvas concepts show no badge.
+- **Unbridged regime crossings are a hard finding for traverse concepts.** A traverse-brief concept shipped spanning 77–174 BPM with raw jumps across regimes. Crossings over 12 BPM whose tempo relation is incompatible now warn ("unbridged regime crossing … traverse hops must be ratio bridges"), count as hard findings (triggering self-revision), and are never suppressed by risk annotations.
+- **Thread-artist cap 3 → 5 with a clearer message.** An artist-thread concept ran its spine artist on 11 of 14 tracks; the generic repeat warning read as noise. The spine artist is now quiet up to 5 tracks and over-cap draws "thread artist 'X' appears N times — thread cap is 5, trim the spine".
+- **Traverse track limits (8, 16).** Journey concepts legitimately need more than the default 12 tracks — 3+ per chapter across up to 4 regimes plus bridges.
+
+---
+
 ## v1.8.0 — 2026-07-07
 
 - **Genre Traverse (#82).** A seventh concept direction: cross-genre journey sets that travel between tempo regimes (house → UKG → jungle/DnB) via pitch-locked ratio bridges. The builder splits the pool into BPM regimes (sorted-neighbour gap > 12), chains regimes reachable through verified halftime/double-time/3:4/4:3 bridge pairs (≥2 per hop, Camelot-compatible preferred, unreachable regimes skipped), seed-flips climb vs descend, selects bridge endpoints plus centrality fill per chapter, and writes a DIRECTION BRIEF naming each hop's bridge pairs with their mechanisms. Fires only when the material genuinely supports it — single-regime pools (every standard-genre run) are unaffected. New `traverse` custom genre label pools the whole collection to feed it: `./mixlab --genre traverse`.
