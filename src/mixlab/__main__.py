@@ -37,9 +37,9 @@ from mixlab.directions import generate_directions
 from mixlab.discord_client import send_report
 from mixlab.history import (
     ConceptHistory,
-    ConceptRecord,
     HistoryEntry,
     append_run,
+    apply_feedback_verdict,
     load_history,
     recent_concept_titles,
     save_history,
@@ -349,22 +349,12 @@ def _print_feedback_listing(history: ConceptHistory) -> None:
         print(f"  [{i}] {record.title} — feedback: {feedback_label}")
 
 
-def _find_feedback_concept(history: ConceptHistory, query: str) -> tuple[HistoryEntry, ConceptRecord] | None:
-    """Find the most recent run containing a concept matching ``query``.
-
-    Matches case-insensitively on title, or as a prefix of ``concept_id``. Runs are
-    walked newest-first so the first hit is the most recent match.
-    """
-    query_lower = query.lower()
-    for entry in reversed(history.runs):
-        for record in entry.concepts:
-            if record.title.lower() == query_lower or (record.concept_id and record.concept_id.startswith(query)):
-                return entry, record
-    return None
-
-
 def run_feedback(concept: str | None, verdict: str | None, notes: str, history_path: Path) -> int:
     """Handle ``mixlab --feedback`` (#52). No LLM calls, no network — pure history-file edit.
+
+    Thin CLI wrapper around :func:`mixlab.history.apply_feedback_verdict` (#92), which
+    also backs the worker's history sync so both paths use one match-and-mutate
+    implementation.
 
     Returns the process exit code: 0 for a successful listing or feedback update,
     1 for a usage error or an unmatched concept title.
@@ -381,19 +371,16 @@ def run_feedback(concept: str | None, verdict: str | None, notes: str, history_p
         print("ERROR: --concept is required when --verdict is given.", file=sys.stderr)
         return 1
 
-    match = _find_feedback_concept(history, concept)
-    if match is None:
-        all_titles = [record.title for entry in history.runs for record in entry.concepts]
+    record = apply_feedback_verdict(history, concept, verdict, notes)
+    if record is None:
+        all_titles = [c.title for entry in history.runs for c in entry.concepts]
         suggestions = difflib.get_close_matches(concept, all_titles, n=3)
         print(f'No concept found matching "{concept}".', file=sys.stderr)
         if suggestions:
             print("Did you mean: " + ", ".join(suggestions), file=sys.stderr)
         return 1
 
-    entry, record = match
-    record.feedback = verdict
-    record.feedback_notes = notes
-    record.feedback_recorded_at = datetime.datetime.now(datetime.UTC).isoformat()
+    entry = next(e for e in history.runs if any(c is record for c in e.concepts))
     save_history(history, history_path)
     print(f'Recorded feedback "{verdict}" for concept "{record.title}" (run {entry.created_at[:10]}, {entry.genre}).')
     return 0
