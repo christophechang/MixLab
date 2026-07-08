@@ -2858,9 +2858,12 @@ async def revise_concepts(
             print(f"Revision: {original.title} — no usable repair returned, keeping original", file=sys.stderr)
             continue
         # Preserve identity: the repair swaps/reorders tracks, it does not re-theme.
+        # concept_id must survive revision too (#89) — it is the join key between the
+        # history record and summary.json, minted once before revision ever runs.
         revised.title = original.title
         revised.name_reason = original.name_reason
         revised.mood = original.mood
+        revised.concept_id = original.concept_id
 
         revised_warnings = validate_stage2_output(
             [revised],

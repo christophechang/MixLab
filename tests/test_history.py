@@ -288,6 +288,27 @@ def test_history_entry_from_run() -> None:
     assert "T002" in entry.closer_candidates
 
 
+def test_from_run_uses_prestamped_concept_id_verbatim() -> None:
+    """conceptId unification (#89): a concept_id stamped by run() before from_run is
+    called must flow into the ConceptRecord unchanged — it is the join key between the
+    history record and summary.json."""
+    concept = MixConcept(
+        title="Midnight", mood="dark", track_ids=["T001", "T002"], concept_id="11111111-1111-1111-1111-111111111111"
+    )
+    canvas = _canvas(["T001", "T002"])
+    entry = HistoryEntry.from_run([canvas], [concept], genre="house", mode="standard")
+    assert entry.concepts[0].concept_id == "11111111-1111-1111-1111-111111111111"
+
+
+def test_from_run_mints_uuid_when_concept_id_empty() -> None:
+    """Regression: callers that never stamp concept_id (e.g. playlist mode, older
+    tests) must still get a minted uuid, matching pre-#89 behaviour."""
+    concept = MixConcept(title="Midnight", mood="dark", track_ids=["T001", "T002"])
+    canvas = _canvas(["T001", "T002"])
+    entry = HistoryEntry.from_run([canvas], [concept], genre="house", mode="standard")
+    assert entry.concepts[0].concept_id != ""
+
+
 # ---------------------------------------------------------------------------
 # v0.10 schema additions — canvas score breakdown, risk notes, bpm band,
 # role pattern, energy_path fix (#6)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import textwrap
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -1108,6 +1109,52 @@ async def test_run_genre_mode_attaches_html_report(
     written = list(report_dir.glob("*.html"))
     assert len(written) == 1
     assert written[0].name.startswith("mixlab-house-")
+
+
+# ---------------------------------------------------------------------------
+# run() — summary.json run artifact + conceptId unification (#89 / M1)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_genre_mode_writes_summary_json_next_to_html_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full genre run writes summary.json next to report.html (same stem), and the
+    concept carries a non-empty conceptId stamped post-Stage-2 (#89)."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_house_collection_xml())
+    report_dir = tmp_path / "reports"
+
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setenv("MIXLAB_REPORT_DIR", str(report_dir))
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", tmp_path / "history.json")
+    monkeypatch.chdir(tmp_path)
+
+    concepts = [MixConcept(title="Deep Cuts", mood="warm", track_ids=["1", "2", "3", "4"])]
+    stage2 = AsyncMock(return_value=(concepts, "concept prose\n\n---\n\nmain-brain note"))
+    send_report_mock = AsyncMock()
+
+    with (
+        patch("mixlab.__main__.stage2_curate_and_report", stage2),
+        patch("mixlab.__main__.validate_stage2_output", return_value=[]),
+        patch("mixlab.__main__.send_report", send_report_mock),
+    ):
+        await run(genre="house", export_dir=None, directions="off")
+
+    written_html = list(report_dir.glob("*.html"))
+    written_json = list(report_dir.glob("*.json"))
+    assert len(written_html) == 1
+    assert len(written_json) == 1
+    assert written_json[0].stem == written_html[0].stem
+
+    summary = json.loads(written_json[0].read_text())
+    assert summary["schemaVersion"] == 1
+    assert summary["concepts"][0]["title"] == "Deep Cuts"
+    assert summary["concepts"][0]["conceptId"]  # stamped non-empty by run() (#89)
+    assert summary["flags"]["genre"] == "house"
+    assert summary["flags"]["directions"] == "off"
 
 
 # ---------------------------------------------------------------------------

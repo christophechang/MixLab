@@ -147,7 +147,12 @@ class HistoryEntry:
                 concept_role_pattern = [_role_for_track(tid, matched_canvas) for tid in concept.track_ids]
             concept_records.append(
                 ConceptRecord(
-                    concept_id=str(uuid.uuid4()),
+                    # conceptId unification (#89): the caller (run()) stamps
+                    # concept.concept_id right after Stage 2 returns, before this is
+                    # ever called, so the history record and summary.json agree on
+                    # the same id. Minting here is only a backcompat fallback for
+                    # callers that never stamped (e.g. existing tests/playlist mode).
+                    concept_id=concept.concept_id or str(uuid.uuid4()),
                     title=concept.title,
                     mood=concept.mood,
                     track_ids=list(concept.track_ids),

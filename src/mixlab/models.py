@@ -103,6 +103,11 @@ class MixConcept(BaseModel):
     transitions: list[Transition] = Field(default_factory=list)
     name_reason: str = ""
     arc_type: ArcType | None = None
+    # Stable identity (#89 / M1). Minted once, immediately after Stage 2 returns
+    # concepts and before validation/revision — never regenerated after that. Shared
+    # verbatim by this concept's history record (ConceptRecord.concept_id) and its
+    # summary.json entry so API feedback can join back onto history. "" until stamped.
+    concept_id: str = ""
     # Direction-canvas provenance (#84). Populated post-Stage-2 from the matched
     # canvas's direction_type (mood_journey, era_dialogue, etc.); "" for concepts
     # born from a classic BPM-stratum canvas or when no canvas match is found.

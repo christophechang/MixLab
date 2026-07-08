@@ -5,9 +5,11 @@ import asyncio
 import datetime
 import difflib
 import io
+import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import cast
 
@@ -42,7 +44,11 @@ from mixlab.history import (
     recent_concept_titles,
     save_history,
 )
-from mixlab.html_report import render_html_report, report_filename
+from mixlab.html_report import (
+    _split_prose,  # noqa: PLC2701 — reused to build the summary.json run-notes trailer (#89)
+    render_html_report,
+    report_filename,
+)
 from mixlab.llm import (
     _match_canvas_for_concept,  # noqa: PLC2701 — reused here to stamp direction_type on cards (#84)
     _parse_user_intent,  # noqa: PLC2701 — reused here for playlist-mode risk override (#54)
@@ -68,6 +74,7 @@ from mixlab.playlist_mode import (
 )
 from mixlab.prep import PrepItem, rank_prep_targets
 from mixlab.reader import apply_bpm_corrections, parse_collection, parse_playlists
+from mixlab.summary import build_run_summary
 
 _XML_PATH = Path("import/rekordbox.xml")
 _HISTORY_PATH = Path(".mixlab/concept-history.json")
@@ -980,6 +987,13 @@ async def run(
         print(report, file=sys.stderr)
         sys.exit(1)
 
+    # conceptId unification (#89 / M1): mint each concept's stable identity here, once,
+    # immediately post-Stage-2 and before validation/revision. This id is shared verbatim
+    # by the concept's history record (HistoryEntry.from_run) and its summary.json entry
+    # so API feedback can join back onto history — see docs/architecture/mixlab-anywhere.md §5.2.
+    for concept in all_concepts:
+        concept.concept_id = str(uuid.uuid4())
+
     # Post-Stage-2 validation (warn-only — never aborts the run).
     validation_warnings = validate_stage2_output(
         all_concepts,
@@ -1089,6 +1103,38 @@ async def run(
     )
     html_path = _write_html_report(html, genre, None)
     attachments: list[tuple[str, bytes]] = [*xml_attachments, (html_path.name, html.encode("utf-8"))]
+
+    # 8c. Structured run summary (#89) — same filename stem as the HTML report, .json
+    # extension. Genre mode only (run_playlist_mode has no counterpart yet).
+    # Effective flags mirror the run.json "flags" shape from the architecture doc (§5.1).
+    run_flags: dict[str, object] = {
+        "genre": genre,
+        "mode": mode,
+        "risk": risk,
+        "directions": directions,
+        "intent": intent,
+        "mixLength": mix_length,
+        "resequence": resequence,
+        "deep": deep,
+        "stage1Seed": stage1_seed,
+    }
+    # run_notes v1 (documented interpretation): the report's trailing sections — the
+    # same text html_report renders under "Run notes" — reconstructed via the same
+    # _split_prose the HTML report uses so the two artifacts never disagree.
+    _, run_notes_sections = _split_prose(report, len(all_concepts))
+    run_notes = "\n\n".join(section for section in run_notes_sections if section.strip())
+    summary = build_run_summary(
+        all_concepts,
+        tracks_by_id,
+        flags=run_flags,
+        seed=effective_seed,
+        validation_warnings=validation_warnings,
+        run_notes=run_notes,
+        generated_at=today,
+    )
+    summary_path = html_path.with_suffix(".json")
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"Run summary: {summary_path}")
 
     # 9. Discord delivery.
     filtered_outliers = [t for t in outliers if t.genre not in IGNORED_GENRES]
