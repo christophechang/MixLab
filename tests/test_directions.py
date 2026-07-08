@@ -367,3 +367,27 @@ def test_generate_directions_traverse_pool_materialises_traverse_canvas() -> Non
     canvases = generate_directions(pool, _tbi(pool), seed=7, max_directions=6)
     types = {c.direction_type for c in canvases}
     assert "genre_traverse" in types
+
+
+def test_build_genre_traverse_unbridgeable_lowest_regime_does_not_poison_chain() -> None:
+    """Live finding (three consecutive production non-firings): the chain was anchored
+    to the lowest regime, so a ~77 BPM block with no ratio partner killed the whole
+    direction even when 126↔168 4:3 bridges were plentiful above it."""
+    # 105-107.5 bridges nowhere: x2 -> 210+ (no tracks), 4:3 -> 140-143 (no tracks),
+    # and 126/105 = 1.2 sits outside the 4:3 pitch window (stretch 0.90 < 0.94).
+    poison = [_track(track_id=f"p{i}", bpm=105.0 + i * 0.5, genre="Hip Hop", camelot_key="8A") for i in range(6)]
+    house = [_track(track_id=f"h{i}", bpm=126.0 + i * 0.25, genre="House", camelot_key="8A") for i in range(8)]
+    dnb = [_track(track_id=f"d{i}", bpm=168.0 + i * 0.5, genre="Drum & Bass", camelot_key="8A") for i in range(8)]
+    # Make the fixture's intent explicit: the poison block must bridge to nothing.
+    from mixlab.transitions import tempo_relation
+
+    for a in poison:
+        for b in house + dnb:
+            assert tempo_relation(a.bpm, b.bpm)[0] in ("incompatible", "straight")
+    direction = _build_genre_traverse(poison + house + dnb, seed=7)
+    assert direction is not None
+    assert "House" in direction.brief and "Drum & Bass" in direction.brief
+    assert "Hip Hop" not in direction.brief  # unreachable regime excluded, not fatal
+    # No poison-block tracks in the journey pool.
+    poison_ids = {t.track_id for t in poison}
+    assert not (set(direction.track_ids) & poison_ids)

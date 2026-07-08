@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.8.3 — 2026-07-08
+
+- **Fix: the genre_traverse chain was anchored to the lowest tempo regime.** Three consecutive production runs on the traverse pool produced zero genre_traverse concepts (confirmed by the v1.8.1 direction badges — every journey-shaped concept came from other directions). The chain-builder started at the lowest-BPM regime and skipped everything unreachable from it, so a low block with no ratio partner (the ~77 BPM hip-hop shelf) could starve the whole direction even with plentiful 126↔168 bridges above. The builder now tries every regime as the chain start and keeps the best chain — most chapters, ties broken by total material (avoiding chains that die at the 15-track pool floor), then earliest start. Deterministic as before.
+
+---
+
 ## v1.8.2 — 2026-07-08
 
 - **Regime-crossing awareness for every concept.** The first badge-equipped run (v1.8.1) revealed that other direction types (fresh_crate, artist_thread) build traverse-shaped sets over cross-genre pools too — the traverse-scoped hard finding couldn't see them. Non-traverse concepts now draw a warn-only "regime crossing without a ratio bridge … plan a cut or a reorder" note for incompatible crossings — fired only when the BPM-jump warning doesn't already cover the pair (justified-risk or sub-threshold), so no pair ever draws two warnings, and never a hard finding.
