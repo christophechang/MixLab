@@ -15,6 +15,25 @@ CUSTOM_GENRES: dict[str, CustomGenre] = {
     "170": CustomGenre(genres=["drum_and_bass", "jungle"], bpm_range=(165.0, 175.0)),
     "140": CustomGenre(genres=["breakbeat", "uk_bass", "uk_garage"], bpm_range=(130.0, 140.0)),
     "4x4": CustomGenre(genres=["house", "electronica", "disco", "progressive", "techno"], bpm_range=None),
+    # Full-collection pool for cross-genre journey concepts (#82): the genre_traverse
+    # direction needs material spanning multiple tempo regimes (house → UKG →
+    # jungle/DnB) linked by pitch-lock ratio bridges. No BPM filter by design.
+    "traverse": CustomGenre(
+        genres=[
+            "house",
+            "electronica",
+            "disco",
+            "progressive",
+            "techno",
+            "uk_garage",
+            "uk_bass",
+            "breakbeat",
+            "hip_hop",
+            "jungle",
+            "drum_and_bass",
+        ],
+        bpm_range=None,
+    ),
 }
 
 GENRE_MAP: dict[str, list[str]] = {
