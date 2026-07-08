@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.8.2 — 2026-07-08
+
+- **Regime-crossing awareness for every concept.** The first badge-equipped run (v1.8.1) revealed that other direction types (fresh_crate, artist_thread) build traverse-shaped sets over cross-genre pools too — the traverse-scoped hard finding couldn't see them. Non-traverse concepts now draw a warn-only "regime crossing without a ratio bridge … plan a cut or a reorder" note for incompatible crossings — fired only when the BPM-jump warning doesn't already cover the pair (justified-risk or sub-threshold), so no pair ever draws two warnings, and never a hard finding.
+
+---
+
 ## v1.8.1 — 2026-07-08
 
 Four tuning fixes from the first two production traverse runs.
@@ -8,7 +14,6 @@ Four tuning fixes from the first two production traverse runs.
 - **Unbridged regime crossings are a hard finding for traverse concepts.** A traverse-brief concept shipped spanning 77–174 BPM with raw jumps across regimes. Crossings over 12 BPM whose tempo relation is incompatible now warn ("unbridged regime crossing … traverse hops must be ratio bridges"), count as hard findings (triggering self-revision), and are never suppressed by risk annotations.
 - **Thread-artist cap 3 → 5 with a clearer message.** An artist-thread concept ran its spine artist on 11 of 14 tracks; the generic repeat warning read as noise. The spine artist is now quiet up to 5 tracks and over-cap draws "thread artist 'X' appears N times — thread cap is 5, trim the spine".
 - **Traverse track limits (8, 16).** Journey concepts legitimately need more than the default 12 tracks — 3+ per chapter across up to 4 regimes plus bridges.
-- **Regime-crossing awareness for every concept.** The first badge-equipped run revealed that other direction types (fresh_crate, artist_thread) build traverse-shaped sets over cross-genre pools too. Non-traverse concepts now draw a warn-only "regime crossing without a ratio bridge … plan a cut or a reorder" note for incompatible crossings — fired only when the BPM-jump warning doesn't already cover the pair (justified-risk or sub-threshold), so no pair ever draws two warnings, and never a hard finding.
 
 ---
 
