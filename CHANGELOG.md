@@ -1,12 +1,17 @@
 # Changelog
 
+## v1.8.4 — 2026-07-08
+
+The second (and decisive) half of making genre_traverse fire — v1.8.3 shipped only the chain-start fix; the verification log proved it insufficient on its own.
+
+- **Regime detection now uses tempo-density peaks.** Gap-based regime splitting needed a >12 BPM hole between sorted neighbours, and a full collection's BPMs form a near-continuum with no holes — the builder saw one giant regime and bailed before the chain logic ever ran. Regimes are now density peaks: a smoothed 1-BPM histogram, peaks picked by mass with ≥20 BPM separation, regime = tracks within ±8 BPM of the peak. In-between material simply doesn't join a chapter. Regression test uses exactly the failing shape: a 77–180 continuum plus heavy house/DnB concentrations.
+- **Direction observability.** The run log now prints `Directions proposed: … (N/7 builders)` so a silently non-firing builder is visible immediately — this took four production runs to notice.
+
+---
+
 ## v1.8.3 — 2026-07-08
 
-Making genre_traverse actually fire. Four consecutive production runs on the traverse pool produced zero genre_traverse concepts (proved by the v1.8.1 direction badges and the run log's Direction lines) — two independent bugs, both fixed here.
-
-- **Regime detection now uses tempo-density peaks.** Gap-based regime splitting needed a >12 BPM hole between sorted neighbours, and a full collection's BPMs form a near-continuum with no holes — the builder saw one giant regime and bailed. Regimes are now density peaks: a smoothed 1-BPM histogram, peaks picked by mass with ≥20 BPM separation, regime = tracks within ±8 BPM of the peak. In-between material simply doesn't join a chapter. Regression test uses exactly the failing shape: a 77–180 continuum plus heavy house/DnB concentrations.
-- **The chain is no longer anchored to the lowest regime.** Even with regimes detected, the journey chain started at the lowest-BPM regime and skipped everything unreachable from it — a low block with no ratio partner could starve the whole direction despite plentiful 126↔168 bridges above. The builder now tries every regime as the chain start and keeps the best chain (most chapters, ties broken by total material, then earliest start).
-- **Direction observability.** The run log now prints `Directions proposed: … (N/7 builders)` so a silently non-firing builder is visible immediately — this took four production runs to notice.
+- **Fix: the genre_traverse chain was anchored to the lowest tempo regime.** The chain-builder started at the lowest-BPM regime and skipped everything unreachable from it, so a low block with no ratio partner could starve the whole direction even with plentiful 126↔168 bridges above. The builder now tries every regime as the chain start and keeps the best chain — most chapters, ties broken by total material (avoiding chains that die at the 15-track pool floor), then earliest start. (Necessary but not sufficient — see v1.8.4.)
 
 ---
 
