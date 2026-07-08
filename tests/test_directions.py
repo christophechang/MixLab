@@ -391,3 +391,41 @@ def test_build_genre_traverse_unbridgeable_lowest_regime_does_not_poison_chain()
     # No poison-block tracks in the journey pool.
     poison_ids = {t.track_id for t in poison}
     assert not (set(direction.track_ids) & poison_ids)
+
+
+def test_build_genre_traverse_dense_continuum_pool_fires_on_density_peaks() -> None:
+    """Live finding (v1.8.3 still not firing in production): a full collection's BPMs
+    form a near-continuum with no >12 BPM holes, so gap-based regime splitting saw one
+    giant regime. Density-peak regimes must fire on exactly that shape: a continuum
+    plus heavy house/DnB concentrations."""
+    continuum = [_track(track_id=f"c{b}", bpm=float(b), genre="Electronica", camelot_key="8A") for b in range(77, 181)]
+    house = [_track(track_id=f"h{i}", bpm=126.0, genre="House", camelot_key="8A") for i in range(10)]
+    dnb = [_track(track_id=f"d{i}", bpm=172.0, genre="Drum & Bass", camelot_key="8A") for i in range(10)]
+
+    direction = _build_genre_traverse(continuum + house + dnb, seed=7)
+    assert direction is not None
+    assert direction.direction_type == "genre_traverse"
+    assert "GENRE TRAVERSE" in direction.brief
+    assert "hop 1" in direction.brief
+    assert MIN_DIRECTION_POOL <= len(direction.track_ids) <= MAX_DIRECTION_POOL
+
+
+def test_tempo_regimes_dense_pool_peaks_are_disjoint_and_ordered() -> None:
+    from mixlab.directions import _tempo_regimes
+
+    continuum = [_track(track_id=f"c{b}", bpm=float(b), genre="Electronica", camelot_key="8A") for b in range(77, 181)]
+    house = [_track(track_id=f"h{i}", bpm=126.0, genre="House", camelot_key="8A") for i in range(10)]
+    dnb = [_track(track_id=f"d{i}", bpm=172.0, genre="Drum & Bass", camelot_key="8A") for i in range(10)]
+    regimes = _tempo_regimes(sorted(continuum + house + dnb, key=lambda t: (t.bpm, t.track_id)))
+
+    assert len(regimes) >= 2
+    peaks_order = [min(t.bpm for t in r) for r in regimes]
+    assert peaks_order == sorted(peaks_order)  # ascending
+    seen: set[str] = set()
+    for regime in regimes:
+        ids = {t.track_id for t in regime}
+        assert not (ids & seen)  # disjoint
+        seen |= ids
+    # The two heavy concentrations must each anchor a regime.
+    assert any(any(t.track_id == "h0" for t in r) for r in regimes)
+    assert any(any(t.track_id == "d0" for t in r) for r in regimes)
