@@ -38,8 +38,14 @@ from mixlab.sync import sync_down, sync_up
 # Local history file synced around each run (mirrors ``mixlab.__main__._HISTORY_PATH``).
 _HISTORY_REL_PATH = Path(".mixlab/concept-history.json")
 
-# The pipeline's default collection import path (mirrors ``mixlab.__main__._XML_PATH``).
-_DEFAULT_XML_PATH = "import/rekordbox.xml"
+# Where the worker downloads each run's collection. Deliberately NOT ``import/rekordbox.xml``
+# (what a local run/automation uses) so remote runs never clobber the local collection; the
+# pipeline is pointed here via MIXLAB_COLLECTION_PATH on the subprocess env.
+_DEFAULT_XML_PATH = ".mixlab/worker-collection.xml"
+
+# Env var the pipeline reads to override its input collection path (see
+# ``mixlab.__main__._XML_PATH``).
+_COLLECTION_PATH_ENV = "MIXLAB_COLLECTION_PATH"
 
 # Log tails posted to the API are bounded so a runaway pipeline can't PUT megabytes.
 _TAIL_LEN = 4000
@@ -289,7 +295,10 @@ def _run_claimed(remote: MixLabRemote, config: WorkerConfig, manifest: RunManife
     export_dir.mkdir(parents=True, exist_ok=True)
     argv = [*argv, "--export", str(export_dir)]
 
-    # Step 5 — run the pipeline as an isolated subprocess with a hard timeout.
+    # Step 5 — run the pipeline as an isolated subprocess with a hard timeout. cwd stays the
+    # repo root (so .env + .mixlab/ history resolve as normal); the collection path is
+    # redirected via the environment to the worker's isolated download.
+    run_env = {**os.environ, _COLLECTION_PATH_ENV: str(config.xml_path)}
     try:
         completed = subprocess.run(  # argv is built from a strict allow-list
             [sys.executable, "-m", "mixlab", *argv],
@@ -297,6 +306,7 @@ def _run_claimed(remote: MixLabRemote, config: WorkerConfig, manifest: RunManife
             text=True,
             timeout=config.run_timeout,
             cwd=config.repo_root,
+            env=run_env,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:

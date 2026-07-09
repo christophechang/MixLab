@@ -41,6 +41,17 @@ def _config(tmp_path: Path) -> WorkerConfig:
     )
 
 
+def test_worker_config_from_env_defaults_collection_off_the_local_import_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Default download target is isolated under .mixlab/, NOT import/rekordbox.xml, so a
+    # remote run never clobbers the collection a local run/automation uses.
+    monkeypatch.delenv("MIXLAB_WORKER_XML_PATH", raising=False)
+    config = WorkerConfig.from_env(repo_root=tmp_path)
+    assert config.xml_path == tmp_path / ".mixlab" / "worker-collection.xml"
+    assert config.xml_path != tmp_path / "import" / "rekordbox.xml"
+
+
 def _manifest_dict(
     *,
     run_id: str = "r1",
@@ -234,6 +245,8 @@ def test_process_one_happy_cycle_completes_and_syncs(tmp_path: Path) -> None:
     assert (tmp_path / "output" / "worker-export").is_dir()
     assert run_mock.call_args.kwargs["cwd"] == tmp_path
     assert run_mock.call_args.kwargs["timeout"] == 1200.0
+    # the pipeline is pointed at the worker's isolated collection via the environment
+    assert run_mock.call_args.kwargs["env"]["MIXLAB_COLLECTION_PATH"] == str(config.xml_path)
     # complete posted, then sync_up ran
     assert complete_route.called
     sync_up_mock.assert_called_once_with(remote, history_path)

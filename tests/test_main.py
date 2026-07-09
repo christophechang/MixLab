@@ -17,6 +17,7 @@ from mixlab.__main__ import (
     _print_availability,
     _print_pipeline_summary,
     _report_stage1_window,
+    _resolve_collection_path,
     _validate_range_args,
     _warn_intent,
     main,
@@ -461,6 +462,16 @@ _EXPORT_UNPLAYED_XML = textwrap.dedent("""\
       </PLAYLISTS>
     </DJ_PLAYLISTS>
 """)
+
+
+def test_resolve_collection_path_defaults_to_local_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MIXLAB_COLLECTION_PATH", raising=False)
+    assert _resolve_collection_path() == Path("import/rekordbox.xml")
+
+
+def test_resolve_collection_path_honours_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIXLAB_COLLECTION_PATH", "/srv/runs/r1/collection.xml")
+    assert _resolve_collection_path() == Path("/srv/runs/r1/collection.xml")
 
 
 async def test_run_export_unplayed_exits_without_catalog_url(
