@@ -16,6 +16,7 @@ from mixlab.sync import SyncReport
 from mixlab.worker import (
     WorkerConfig,
     WorkerFlagError,
+    _resolve_optional_export,
     build_argv,
     process_one,
     run_worker,
@@ -217,15 +218,95 @@ def test_process_one_happy_cycle_completes_and_syncs(tmp_path: Path) -> None:
     sync_down_mock.assert_called_once_with(remote, history_path)
     # collection downloaded + gunzipped to xml_path
     assert config.xml_path.read_bytes() == b"<COLLECTION/>"
-    # subprocess invoked with the exact expected argv
+    # subprocess invoked with the manifest flags followed by the worker's own --export flag
     run_argv = run_mock.call_args.args[0]
     assert run_argv[:3] == [run_argv[0], "-m", "mixlab"]
-    assert run_argv[3:] == ["--genre", "house", "--mode", "all", "--resequence"]
+    assert run_argv[3:] == [
+        "--genre",
+        "house",
+        "--mode",
+        "all",
+        "--resequence",
+        "--export",
+        str(tmp_path / "output" / "worker-export"),
+    ]
+    # the export dir is created up-front so the pipeline writes into an existing directory
+    assert (tmp_path / "output" / "worker-export").is_dir()
     assert run_mock.call_args.kwargs["cwd"] == tmp_path
     assert run_mock.call_args.kwargs["timeout"] == 1200.0
     # complete posted, then sync_up ran
     assert complete_route.called
     sync_up_mock.assert_called_once_with(remote, history_path)
+
+
+def test_resolve_optional_export_absent_line_returns_none(tmp_path: Path) -> None:
+    assert _resolve_optional_export("HTML report: x\nRun summary: y\n", tmp_path) is None
+
+
+def test_resolve_optional_export_present_but_missing_file_returns_none(tmp_path: Path) -> None:
+    # The line names a file the pipeline claims it wrote, but it isn't on disk — treat as
+    # absent rather than failing an otherwise-good run.
+    assert _resolve_optional_export("Exported: output/worker-export/gone.xml\n", tmp_path) is None
+
+
+def test_resolve_optional_export_present_file_resolves_against_repo_root(tmp_path: Path) -> None:
+    export = tmp_path / "output" / "worker-export" / "rekordbox_export.xml"
+    export.parent.mkdir(parents=True, exist_ok=True)
+    export.write_text("<DJ_PLAYLISTS/>", encoding="utf-8")
+    assert _resolve_optional_export("Exported: output/worker-export/rekordbox_export.xml\n", tmp_path) == export
+
+
+@respx.mock
+def test_process_one_uploads_export_when_pipeline_writes_one(tmp_path: Path) -> None:
+    remote = _remote()
+    config = _config(tmp_path)
+    respx.post(_CLAIM_URL).mock(return_value=Response(200, json=_manifest_dict(flags={"genre": "house"})))
+    respx.get(f"{_BASE}/api/mixlab/uploads/u1").mock(
+        return_value=Response(200, content=gzip.compress(b"<COLLECTION/>"))
+    )
+
+    # Report + summary, plus an exported playlist XML that actually exists on disk.
+    stdout = _write_artifacts(tmp_path)
+    export_dir = tmp_path / "output" / "worker-export"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    export_file = export_dir / "rekordbox_export.xml"
+    export_file.write_text("<DJ_PLAYLISTS/>", encoding="utf-8")
+    stdout += f"Exported: {export_file}\n"
+
+    with (
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
+        patch("mixlab.worker.sync_up"),
+        patch("mixlab.worker.subprocess.run", return_value=_completed(stdout=stdout)),
+        patch.object(remote, "complete") as complete_mock,
+    ):
+        assert process_one(remote, config) is True
+
+    complete_mock.assert_called_once()
+    assert complete_mock.call_args.kwargs["export_path"] == export_file
+
+
+@respx.mock
+def test_process_one_completes_without_export_when_pipeline_writes_none(tmp_path: Path) -> None:
+    remote = _remote()
+    config = _config(tmp_path)
+    respx.post(_CLAIM_URL).mock(return_value=Response(200, json=_manifest_dict(flags={"genre": "house"})))
+    respx.get(f"{_BASE}/api/mixlab/uploads/u1").mock(
+        return_value=Response(200, content=gzip.compress(b"<COLLECTION/>"))
+    )
+
+    # No "Exported:" line — a run that produced no playlist. Completion still succeeds.
+    stdout = _write_artifacts(tmp_path)
+
+    with (
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
+        patch("mixlab.worker.sync_up"),
+        patch("mixlab.worker.subprocess.run", return_value=_completed(stdout=stdout)),
+        patch.object(remote, "complete") as complete_mock,
+    ):
+        assert process_one(remote, config) is True
+
+    complete_mock.assert_called_once()
+    assert complete_mock.call_args.kwargs["export_path"] is None
 
 
 @respx.mock

@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.9.1 — 2026-07-09
+
+- **Remote worker now uploads the Rekordbox playlist export.** The worker runs the pipeline with `--export`, so every remote run writes the merged `rekordbox_export.xml` and passes it to the API's `complete` endpoint — the SPA's "Download export.xml" button now works instead of reporting "no export for this run." The export is optional (a run with no concepts produces none), so completion still succeeds when there's nothing to write. Past runs stay export-less; the change applies to new runs after the worker pulls this release.
+
 ## v1.9.0 — 2026-07-09
 
 MixLab Anywhere: the engine can now run as a pull-based remote worker for the Changsta API, so runs can be triggered, archived, and fed back from mixlab.changsta.com. Strictly additive — every existing CLI path is unchanged.

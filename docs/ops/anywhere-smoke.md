@@ -426,7 +426,7 @@ mixlab/
 │       ├── run.json                   # status=succeeded
 │       ├── summary.json               # schemaVersion=1
 │       ├── report.html                # rendered artifact
-│       ├── export.xml                 # playlist XML (if requested)
+│       ├── export.xml                 # merged Rekordbox playlist XML (always produced)
 ├── history/
 │   └── concept-history.json           # ≥2 runs; feedback applied on recent run
 └── feedback/
