@@ -12,6 +12,7 @@ from httpx import Response
 
 from mixlab.__main__ import main
 from mixlab.remote import MixLabRemote, RemoteConfig
+from mixlab.sync import SyncReport
 from mixlab.worker import (
     WorkerConfig,
     WorkerFlagError,
@@ -205,7 +206,7 @@ def test_process_one_happy_cycle_completes_and_syncs(tmp_path: Path) -> None:
     history_path = tmp_path / ".mixlab" / "concept-history.json"
 
     with (
-        patch("mixlab.worker.sync_down") as sync_down_mock,
+        patch("mixlab.worker.sync_down", return_value=SyncReport()) as sync_down_mock,
         patch("mixlab.worker.sync_up") as sync_up_mock,
         patch("mixlab.worker.subprocess.run", return_value=_completed(stdout=stdout)) as run_mock,
     ):
@@ -237,7 +238,7 @@ def test_process_one_pipeline_nonzero_fails_with_truncated_log_tail(tmp_path: Pa
     oversized = _completed(returncode=1, stdout="x" * 5000, stderr="y" * 5000)
 
     with (
-        patch("mixlab.worker.sync_down"),
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
         patch.object(remote, "download_collection", return_value=config.xml_path),
         patch("mixlab.worker.subprocess.run", return_value=oversized),
     ):
@@ -262,7 +263,7 @@ def test_process_one_timeout_fails_mentioning_timeout(tmp_path: Path) -> None:
     timeout_exc = subprocess.TimeoutExpired(cmd="mixlab", timeout=1200.0, output="partial-out", stderr="partial-err")
 
     with (
-        patch("mixlab.worker.sync_down"),
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
         patch.object(remote, "download_collection", return_value=config.xml_path),
         patch("mixlab.worker.subprocess.run", side_effect=timeout_exc),
     ):
@@ -284,7 +285,7 @@ def test_process_one_unknown_flag_fails_without_running_subprocess(tmp_path: Pat
     fail_route = respx.post(f"{_BASE}/api/mixlab/runs/r1/fail").mock(return_value=Response(200))
 
     with (
-        patch("mixlab.worker.sync_down"),
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
         patch.object(remote, "download_collection", return_value=config.xml_path),
         patch("mixlab.worker.subprocess.run") as run_mock,
     ):
@@ -297,13 +298,61 @@ def test_process_one_unknown_flag_fails_without_running_subprocess(tmp_path: Pat
 
 
 @respx.mock
+def test_process_one_sync_report_with_activity_printed_to_stdout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    remote = _remote()
+    config = _config(tmp_path)
+    respx.post(_CLAIM_URL).mock(return_value=Response(200, json=_manifest_dict(flags={"genre": "house"})))
+    respx.get(f"{_BASE}/api/mixlab/uploads/u1").mock(
+        return_value=Response(200, content=gzip.compress(b"<COLLECTION/>"))
+    )
+    respx.post(f"{_BASE}/api/mixlab/runs/r1/complete").mock(return_value=Response(200))
+    stdout = _write_artifacts(tmp_path)
+
+    with (
+        patch("mixlab.worker.sync_down", return_value=SyncReport(applied=1, skipped=0, acked=1)),
+        patch("mixlab.worker.sync_up"),
+        patch("mixlab.worker.subprocess.run", return_value=_completed(stdout=stdout)),
+    ):
+        assert process_one(remote, config) is True
+
+    # The smoke runbook (docs/ops/anywhere-smoke.md step 7) greps the launchd stdout
+    # log for exactly this line.
+    assert "sync: applied 1 verdict(s), skipped 0, acked 1" in capsys.readouterr().out
+
+
+@respx.mock
+def test_process_one_sync_report_without_activity_stays_silent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    remote = _remote()
+    config = _config(tmp_path)
+    respx.post(_CLAIM_URL).mock(return_value=Response(200, json=_manifest_dict(flags={"genre": "house"})))
+    respx.get(f"{_BASE}/api/mixlab/uploads/u1").mock(
+        return_value=Response(200, content=gzip.compress(b"<COLLECTION/>"))
+    )
+    respx.post(f"{_BASE}/api/mixlab/runs/r1/complete").mock(return_value=Response(200))
+    stdout = _write_artifacts(tmp_path)
+
+    with (
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
+        patch("mixlab.worker.sync_up"),
+        patch("mixlab.worker.subprocess.run", return_value=_completed(stdout=stdout)),
+    ):
+        assert process_one(remote, config) is True
+
+    assert "sync:" not in capsys.readouterr().out
+
+
+@respx.mock
 def test_process_one_empty_queue_returns_false_and_does_nothing(tmp_path: Path) -> None:
     remote = _remote()
     config = _config(tmp_path)
     respx.post(_CLAIM_URL).mock(return_value=Response(204))
 
     with (
-        patch("mixlab.worker.sync_down") as sync_down_mock,
+        patch("mixlab.worker.sync_down", return_value=SyncReport()) as sync_down_mock,
         patch("mixlab.worker.subprocess.run") as run_mock,
     ):
         result = process_one(remote, config)
@@ -320,7 +369,7 @@ def test_process_one_claim_transport_error_returns_false_without_fail(tmp_path: 
     respx.post(_CLAIM_URL).mock(return_value=Response(500, text="down"))
     fail_route = respx.post(f"{_BASE}/api/mixlab/runs/r1/fail").mock(return_value=Response(200))
 
-    with patch("mixlab.worker.sync_down") as sync_down_mock:
+    with patch("mixlab.worker.sync_down", return_value=SyncReport()) as sync_down_mock:
         result = process_one(remote, config)
 
     assert result is False
@@ -337,7 +386,7 @@ def test_process_one_download_transport_error_returns_false_without_fail(tmp_pat
     fail_route = respx.post(f"{_BASE}/api/mixlab/runs/r1/fail").mock(return_value=Response(200))
 
     with (
-        patch("mixlab.worker.sync_down"),
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
         patch("mixlab.worker.subprocess.run") as run_mock,
     ):
         result = process_one(remote, config)
@@ -355,7 +404,7 @@ def test_process_one_download_oserror_fails_and_returns_true(tmp_path: Path) -> 
     fail_route = respx.post(f"{_BASE}/api/mixlab/runs/r1/fail").mock(return_value=Response(200))
 
     with (
-        patch("mixlab.worker.sync_down"),
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
         patch.object(remote, "download_collection", side_effect=OSError("disk full")),
         patch("mixlab.worker.subprocess.run") as run_mock,
     ):
@@ -379,7 +428,7 @@ def test_process_one_missing_summary_line_fails_descriptively(tmp_path: Path) ->
     stdout = "HTML report: output/reports/run.html\nDone\n"
 
     with (
-        patch("mixlab.worker.sync_down"),
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
         patch.object(remote, "download_collection", return_value=config.xml_path),
         patch("mixlab.worker.subprocess.run", return_value=_completed(stdout=stdout)),
     ):
@@ -401,7 +450,7 @@ def test_process_one_sync_up_failure_after_complete_still_true_with_warning(
     stdout = _write_artifacts(tmp_path)
 
     with (
-        patch("mixlab.worker.sync_down"),
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
         patch("mixlab.worker.sync_up", side_effect=RuntimeError("history push boom")),
         patch.object(remote, "download_collection", return_value=config.xml_path),
         patch("mixlab.worker.subprocess.run", return_value=_completed(stdout=stdout)),
@@ -445,7 +494,7 @@ def test_process_one_unexpected_error_in_body_best_effort_fails_loop_safe(tmp_pa
     # complete() succeeds at the network layer, but sync_up isn't reached because we make
     # the post-parse complete call blow up unexpectedly via a patched remote.complete.
     with (
-        patch("mixlab.worker.sync_down"),
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
         patch.object(remote, "download_collection", return_value=config.xml_path),
         patch.object(remote, "complete", side_effect=RuntimeError("kaboom")),
         patch("mixlab.worker.subprocess.run", return_value=_completed(stdout=stdout)),

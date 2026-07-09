@@ -226,13 +226,17 @@ def _run_claimed(remote: MixLabRemote, config: WorkerConfig, manifest: RunManife
     # (it would fail too); leave the claim to lease expiry (§8). Any other failure is a
     # job-infrastructure failure we can and should report.
     try:
-        sync_down(remote, history_path)
+        sync_report = sync_down(remote, history_path)
     except RemoteError as exc:
         print(f"worker: sync_down transport error; leaving run {run_id} to lease expiry: {exc}", file=sys.stderr)
         return False
     except Exception as exc:  # any non-transport failure is reportable
         _safe_fail(remote, run_id, error=f"sync_down failed: {exc}", log_tail=traceback.format_exc()[-_TAIL_LEN:])
         return True
+    if sync_report.applied or sync_report.skipped or sync_report.acked:
+        # Surface feedback application in the launchd stdout log — the smoke runbook
+        # (docs/ops/anywhere-smoke.md step 7) greps for this line. Quiet when nothing synced.
+        print(sync_report, flush=True)
 
     # Step 3 — download the collection. Same failure taxonomy as step 2.
     try:
