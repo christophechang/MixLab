@@ -446,7 +446,7 @@ The worker mode is purely additive — your normal CLI workflow (`./mixlab --gen
 **Optional variables:**
 
 - `MIXLAB_WORKER_POLL_SECONDS` (default `30`) — empty-poll cadence in seconds
-- `MIXLAB_WORKER_XML_PATH` (default `import/rekordbox.xml`) — where the worker writes the downloaded collection
+- `MIXLAB_WORKER_XML_PATH` (default `.mixlab/worker-collection.xml`) — where the worker writes each run's downloaded collection. Deliberately off `import/rekordbox.xml` so a remote run never overwrites the collection a local run uses; the worker points the pipeline at this path via `MIXLAB_COLLECTION_PATH`.
 - `MIXLAB_WORKER_RUN_TIMEOUT` (default `1200`) — hard per-run subprocess timeout in seconds
 
 The worker also syncs concept history and feedback with the API: it pulls pending feedback events, applies them to the local history, and pushes back any changes — bidirectional sync so verdicts and ratings you record in the web UI feed into future runs.

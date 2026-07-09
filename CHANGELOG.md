@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.9.2 — 2026-07-09
+
+- **Worker no longer shares the local collection file.** The MixLab Anywhere worker now downloads each run's collection to `.mixlab/worker-collection.xml` (was `import/rekordbox.xml`) and points the pipeline at it via a new `MIXLAB_COLLECTION_PATH` env var, so a remote run can never overwrite the `import/rekordbox.xml` a local run or scheduled automation uses. Normal CLI usage is unchanged (the env var is unset). Configurable via `MIXLAB_WORKER_XML_PATH`.
+
 ## v1.9.1 — 2026-07-09
 
 - **Remote worker now uploads the Rekordbox playlist export.** The worker runs the pipeline with `--export`, so every remote run writes the merged `rekordbox_export.xml` and passes it to the API's `complete` endpoint — the SPA's "Download export.xml" button now works instead of reporting "no export for this run." The export is optional (a run with no concepts produces none), so completion still succeeds when there's nothing to write. Past runs stay export-less; the change applies to new runs after the worker pulls this release.

@@ -78,7 +78,16 @@ from mixlab.remote import MixLabRemote, RemoteConfig, RemoteConfigError
 from mixlab.summary import build_run_summary
 from mixlab.worker import WorkerConfig, run_worker
 
-_XML_PATH = Path("import/rekordbox.xml")
+
+def _resolve_collection_path() -> Path:
+    """Input collection path. Defaults to the usual local export; the MixLab Anywhere worker
+    sets ``MIXLAB_COLLECTION_PATH`` so a remote run reads its own downloaded copy instead of
+    the file a local run/automation uses. Normal CLI usage is unchanged (env var unset).
+    """
+    return Path(os.environ.get("MIXLAB_COLLECTION_PATH", "import/rekordbox.xml"))
+
+
+_XML_PATH = _resolve_collection_path()
 _HISTORY_PATH = Path(".mixlab/concept-history.json")
 _DO_NOT_RECOMMEND_PLAYLIST = "DO NOT RECOMMEND"
 _FEEDBACK_VERDICTS = ("played", "played_modified", "rejected", "unused")
