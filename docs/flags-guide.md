@@ -124,6 +124,23 @@ way to test whether a specific direction (like a traverse) fires for your pool.
 the product's core loop). BPM/year filters apply straight after ingestion, before
 anything else sees the pool.
 
+### MixLab Anywhere worker mode
+
+```bash
+./mixlab --worker                 # poll loop: claim, execute, push every 30s
+./mixlab --worker-once            # one cycle only (for cron/manual testing)
+```
+
+These flags switch MixLab into remote worker mode: instead of running a local genre/playlist
+pipeline, it polls the MixLab Anywhere API for queued runs, claims the oldest one, executes the
+pipeline with the flags from the queued manifest, and uploads report/summary artifacts back to
+the API. All other pipeline flags are ignored when `--worker` is active — the run's `--genre`,
+`--mode`, `--intent`, etc. come from the enqueued manifest.
+
+`--worker-once` takes precedence over `--worker` and is useful for testing or running a single
+cycle via cron. Requires `MIXLAB_API_URL` and `MIXLAB_API_SECRET` in your environment. See
+`README.md` and `docs/ops/worker-launchd.md` for setup and deployment.
+
 ### The cue-prep loop (this is the compounding one)
 
 ```bash
@@ -214,6 +231,8 @@ options are sitting there as playlists.
 | `--export-unplayed` | utility | Unplayed-tracks XML + Discord, no LLM |
 | `--prep` (+ `--top N`) | utility | Cue-prep payoff ranking, offline |
 | `--feedback` (+ `--concept`, `--verdict`, `--notes`) | utility | Record concept verdicts into history |
+| `--worker` | worker | Poll loop: claim → execute → push (launchd keep-alive) |
+| `--worker-once` | worker | One poll cycle only (for cron/manual testing) |
 
 ## How flags compose
 

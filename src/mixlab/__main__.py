@@ -5,9 +5,11 @@ import asyncio
 import datetime
 import difflib
 import io
+import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import cast
 
@@ -35,14 +37,18 @@ from mixlab.directions import generate_directions
 from mixlab.discord_client import send_report
 from mixlab.history import (
     ConceptHistory,
-    ConceptRecord,
     HistoryEntry,
     append_run,
+    apply_feedback_verdict,
     load_history,
     recent_concept_titles,
     save_history,
 )
-from mixlab.html_report import render_html_report, report_filename
+from mixlab.html_report import (
+    _split_prose,  # noqa: PLC2701 — reused to build the summary.json run-notes trailer (#89)
+    render_html_report,
+    report_filename,
+)
 from mixlab.llm import (
     _match_canvas_for_concept,  # noqa: PLC2701 — reused here to stamp direction_type on cards (#84)
     _parse_user_intent,  # noqa: PLC2701 — reused here for playlist-mode risk override (#54)
@@ -68,6 +74,9 @@ from mixlab.playlist_mode import (
 )
 from mixlab.prep import PrepItem, rank_prep_targets
 from mixlab.reader import apply_bpm_corrections, parse_collection, parse_playlists
+from mixlab.remote import MixLabRemote, RemoteConfig, RemoteConfigError
+from mixlab.summary import build_run_summary
+from mixlab.worker import WorkerConfig, run_worker
 
 _XML_PATH = Path("import/rekordbox.xml")
 _HISTORY_PATH = Path(".mixlab/concept-history.json")
@@ -342,22 +351,12 @@ def _print_feedback_listing(history: ConceptHistory) -> None:
         print(f"  [{i}] {record.title} — feedback: {feedback_label}")
 
 
-def _find_feedback_concept(history: ConceptHistory, query: str) -> tuple[HistoryEntry, ConceptRecord] | None:
-    """Find the most recent run containing a concept matching ``query``.
-
-    Matches case-insensitively on title, or as a prefix of ``concept_id``. Runs are
-    walked newest-first so the first hit is the most recent match.
-    """
-    query_lower = query.lower()
-    for entry in reversed(history.runs):
-        for record in entry.concepts:
-            if record.title.lower() == query_lower or (record.concept_id and record.concept_id.startswith(query)):
-                return entry, record
-    return None
-
-
 def run_feedback(concept: str | None, verdict: str | None, notes: str, history_path: Path) -> int:
     """Handle ``mixlab --feedback`` (#52). No LLM calls, no network — pure history-file edit.
+
+    Thin CLI wrapper around :func:`mixlab.history.apply_feedback_verdict` (#92), which
+    also backs the worker's history sync so both paths use one match-and-mutate
+    implementation.
 
     Returns the process exit code: 0 for a successful listing or feedback update,
     1 for a usage error or an unmatched concept title.
@@ -374,19 +373,16 @@ def run_feedback(concept: str | None, verdict: str | None, notes: str, history_p
         print("ERROR: --concept is required when --verdict is given.", file=sys.stderr)
         return 1
 
-    match = _find_feedback_concept(history, concept)
-    if match is None:
-        all_titles = [record.title for entry in history.runs for record in entry.concepts]
+    record = apply_feedback_verdict(history, concept, verdict, notes)
+    if record is None:
+        all_titles = [c.title for entry in history.runs for c in entry.concepts]
         suggestions = difflib.get_close_matches(concept, all_titles, n=3)
         print(f'No concept found matching "{concept}".', file=sys.stderr)
         if suggestions:
             print("Did you mean: " + ", ".join(suggestions), file=sys.stderr)
         return 1
 
-    entry, record = match
-    record.feedback = verdict
-    record.feedback_notes = notes
-    record.feedback_recorded_at = datetime.datetime.now(datetime.UTC).isoformat()
+    entry = next(e for e in history.runs if any(c is record for c in e.concepts))
     save_history(history, history_path)
     print(f'Recorded feedback "{verdict}" for concept "{record.title}" (run {entry.created_at[:10]}, {entry.genre}).')
     return 0
@@ -980,6 +976,13 @@ async def run(
         print(report, file=sys.stderr)
         sys.exit(1)
 
+    # conceptId unification (#89 / M1): mint each concept's stable identity here, once,
+    # immediately post-Stage-2 and before validation/revision. This id is shared verbatim
+    # by the concept's history record (HistoryEntry.from_run) and its summary.json entry
+    # so API feedback can join back onto history — see docs/architecture/mixlab-anywhere.md §5.2.
+    for concept in all_concepts:
+        concept.concept_id = str(uuid.uuid4())
+
     # Post-Stage-2 validation (warn-only — never aborts the run).
     validation_warnings = validate_stage2_output(
         all_concepts,
@@ -1090,6 +1093,38 @@ async def run(
     html_path = _write_html_report(html, genre, None)
     attachments: list[tuple[str, bytes]] = [*xml_attachments, (html_path.name, html.encode("utf-8"))]
 
+    # 8c. Structured run summary (#89) — same filename stem as the HTML report, .json
+    # extension. Genre mode only (run_playlist_mode has no counterpart yet).
+    # Effective flags mirror the run.json "flags" shape from the architecture doc (§5.1).
+    run_flags: dict[str, object] = {
+        "genre": genre,
+        "mode": mode,
+        "risk": risk,
+        "directions": directions,
+        "intent": intent,
+        "mixLength": mix_length,
+        "resequence": resequence,
+        "deep": deep,
+        "stage1Seed": stage1_seed,
+    }
+    # run_notes v1 (documented interpretation): the report's trailing sections — the
+    # same text html_report renders under "Run notes" — reconstructed via the same
+    # _split_prose the HTML report uses so the two artifacts never disagree.
+    _, run_notes_sections = _split_prose(report, len(all_concepts))
+    run_notes = "\n\n".join(section for section in run_notes_sections if section.strip())
+    summary = build_run_summary(
+        all_concepts,
+        tracks_by_id,
+        flags=run_flags,
+        seed=effective_seed,
+        validation_warnings=validation_warnings,
+        run_notes=run_notes,
+        generated_at=today,
+    )
+    summary_path = html_path.with_suffix(".json")
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"Run summary: {summary_path}")
+
     # 9. Discord delivery.
     filtered_outliers = [t for t in outliers if t.genre not in IGNORED_GENRES]
     await send_report(
@@ -1173,6 +1208,25 @@ def _warn_intent(intent: str | None) -> None:
         )
 
 
+def _run_worker_cli(*, once: bool) -> None:
+    """Handle ``mixlab --worker`` / ``--worker-once`` (#91 / M3).
+
+    Builds the remote config from the environment (``MIXLAB_API_URL`` /
+    ``MIXLAB_API_SECRET``) — a missing value prints the reason to stderr and exits 1 —
+    then drives the worker loop. ``MIXLAB_WORKER_POLL_SECONDS`` (default 30) sets the
+    empty-poll cadence.
+    """
+    try:
+        remote_config = RemoteConfig.from_env()
+    except RemoteConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+    remote = MixLabRemote(remote_config)
+    worker_config = WorkerConfig.from_env()
+    poll_seconds = float(os.environ.get("MIXLAB_WORKER_POLL_SECONDS", "30"))
+    sys.exit(run_worker(remote, worker_config, poll_seconds=poll_seconds, once=once))
+
+
 def main() -> None:
     # Line-buffer stdout even when piped (tee/log capture) so progress lines interleave
     # correctly with unbuffered stderr diagnostics instead of flushing in one late block.
@@ -1221,6 +1275,7 @@ examples:
   mixlab --feedback --concept "Title" --verdict played --notes "great opener"  record concept feedback
   mixlab --prep                       rank uncued tracks by cue-prep payoff (offline, no LLM)
   mixlab --prep --genre house --top 10  scope to house genre, top 10 targets
+  mixlab --worker                     run as a MixLab Anywhere worker (see README)
 """,
     )
     parser.add_argument(
@@ -1454,7 +1509,27 @@ examples:
         metavar="N",
         help="With --prep: number of top targets to show (default 20).",
     )
+    parser.add_argument(
+        "--worker",
+        action="store_true",
+        help=(
+            "Run the MixLab Anywhere worker loop (#91): poll the API for queued runs, "
+            "execute each as a subprocess, and push artifacts back. Requires MIXLAB_API_URL "
+            "and MIXLAB_API_SECRET. Poll cadence: MIXLAB_WORKER_POLL_SECONDS (default 30)."
+        ),
+    )
+    parser.add_argument(
+        "--worker-once",
+        action="store_true",
+        dest="worker_once",
+        help="Run a single worker poll cycle then exit (for cron/agent/manual use). Takes precedence over --worker.",
+    )
     args = parser.parse_args()
+
+    if args.worker or args.worker_once:
+        _run_worker_cli(once=args.worker_once)
+        return
+
     _validate_range_args(
         min_bpm=args.min_bpm,
         max_bpm=args.max_bpm,

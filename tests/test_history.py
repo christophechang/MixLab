@@ -12,6 +12,7 @@ from mixlab.history import (
     ConceptRecord,
     HistoryEntry,
     append_run,
+    apply_feedback_verdict,
     concept_shape_from_canvas,
     concept_shape_from_entry,
     concept_shape_from_record,
@@ -286,6 +287,27 @@ def test_history_entry_from_run() -> None:
     assert "T001" in entry.core_track_ids
     assert "T001" in entry.opener_candidates
     assert "T002" in entry.closer_candidates
+
+
+def test_from_run_uses_prestamped_concept_id_verbatim() -> None:
+    """conceptId unification (#89): a concept_id stamped by run() before from_run is
+    called must flow into the ConceptRecord unchanged — it is the join key between the
+    history record and summary.json."""
+    concept = MixConcept(
+        title="Midnight", mood="dark", track_ids=["T001", "T002"], concept_id="11111111-1111-1111-1111-111111111111"
+    )
+    canvas = _canvas(["T001", "T002"])
+    entry = HistoryEntry.from_run([canvas], [concept], genre="house", mode="standard")
+    assert entry.concepts[0].concept_id == "11111111-1111-1111-1111-111111111111"
+
+
+def test_from_run_mints_uuid_when_concept_id_empty() -> None:
+    """Regression: callers that never stamp concept_id (e.g. playlist mode, older
+    tests) must still get a minted uuid, matching pre-#89 behaviour."""
+    concept = MixConcept(title="Midnight", mood="dark", track_ids=["T001", "T002"])
+    canvas = _canvas(["T001", "T002"])
+    entry = HistoryEntry.from_run([canvas], [concept], genre="house", mode="standard")
+    assert entry.concepts[0].concept_id != ""
 
 
 # ---------------------------------------------------------------------------
@@ -943,3 +965,66 @@ def test_recent_concept_titles_empty_history_returns_empty() -> None:
     from mixlab.history import recent_concept_titles
 
     assert recent_concept_titles(ConceptHistory()) == []
+
+
+# ---------------------------------------------------------------------------
+# apply_feedback_verdict (#92) — shared by mixlab --feedback and the sync module
+# ---------------------------------------------------------------------------
+
+
+def test_apply_feedback_verdict_title_match_case_insensitive_updates_record() -> None:
+    entry = _entry("r1", ["T001"])
+    entry.concepts = [_record("c1", "Midnight Run")]
+    history = ConceptHistory(runs=[entry])
+
+    record = apply_feedback_verdict(history, "midnight run", "played", "great opener")
+
+    assert record is not None
+    assert record.feedback == "played"
+    assert record.feedback_notes == "great opener"
+    assert record.feedback_recorded_at != ""
+
+
+def test_apply_feedback_verdict_concept_id_prefix_match_updates_record() -> None:
+    entry = _entry("r1", ["T001"])
+    entry.concepts = [_record("abcdef12-3456", "Midnight Run")]
+    history = ConceptHistory(runs=[entry])
+
+    record = apply_feedback_verdict(history, "abcdef12", "rejected", "")
+
+    assert record is not None
+    assert record.feedback == "rejected"
+
+
+def test_apply_feedback_verdict_unmatched_concept_returns_none() -> None:
+    entry = _entry("r1", ["T001"])
+    entry.concepts = [_record("c1", "Midnight Run")]
+    history = ConceptHistory(runs=[entry])
+
+    assert apply_feedback_verdict(history, "Nothing Like This", "played", "") is None
+
+
+def test_apply_feedback_verdict_double_application_idempotent_verdict_and_notes() -> None:
+    entry = _entry("r1", ["T001"])
+    entry.concepts = [_record("c1", "Midnight Run")]
+    history = ConceptHistory(runs=[entry])
+
+    apply_feedback_verdict(history, "Midnight Run", "played", "great opener")
+    first_state = (entry.concepts[0].feedback, entry.concepts[0].feedback_notes)
+
+    apply_feedback_verdict(history, "Midnight Run", "played", "great opener")
+    second_state = (entry.concepts[0].feedback, entry.concepts[0].feedback_notes)
+
+    assert first_state == second_state == ("played", "great opener")
+
+
+def test_apply_feedback_verdict_none_verdict_preserves_existing_verdict_updates_notes() -> None:
+    entry = _entry("r1", ["T001"])
+    entry.concepts = [_record("c1", "Midnight Run", feedback="played")]
+    history = ConceptHistory(runs=[entry])
+
+    record = apply_feedback_verdict(history, "Midnight Run", None, "rating=4")
+
+    assert record is not None
+    assert record.feedback == "played"
+    assert record.feedback_notes == "rating=4"
