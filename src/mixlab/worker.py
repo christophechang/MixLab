@@ -44,10 +44,16 @@ _DEFAULT_XML_PATH = "import/rekordbox.xml"
 # Log tails posted to the API are bounded so a runaway pipeline can't PUT megabytes.
 _TAIL_LEN = 4000
 
-# stdout markers the pipeline prints for its two required artifacts (see
-# ``mixlab.__main__._write_html_report`` and the summary.json wiring in ``run``).
+# stdout markers the pipeline prints for its artifacts (see ``mixlab.__main__.run``).
+# Report + summary are required; the export line only appears when ``--export`` wrote a
+# playlist XML (a run with no concepts produces none), so it is parsed leniently.
 _REPORT_PREFIX = "HTML report:"
 _SUMMARY_PREFIX = "Run summary:"
+_EXPORT_PREFIX = "Exported:"
+
+# The worker always asks the pipeline to write the merged Rekordbox playlist XML so the API
+# (and the SPA download button) can serve it. Written under the repo's output tree.
+_EXPORT_REL_DIR = Path("output/worker-export")
 
 
 class WorkerFlagError(ValueError):
@@ -215,6 +221,24 @@ def _resolve_artifact(stdout: str, prefix: str, repo_root: Path) -> Path:
     raise _ArtifactError(f"pipeline stdout missing '{prefix}' line")
 
 
+def _resolve_optional_export(stdout: str, repo_root: Path) -> Path | None:
+    """Return the exported playlist XML path if the pipeline wrote one, else ``None``.
+
+    The export is optional (a run with no concepts writes none), so — unlike
+    :func:`_resolve_artifact` — an absent line, or a line whose file is missing, yields
+    ``None`` rather than failing an otherwise-successful run.
+    """
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_EXPORT_PREFIX):
+            raw = stripped[len(_EXPORT_PREFIX) :].strip()
+            path = Path(raw)
+            if not path.is_absolute():
+                path = repo_root / path
+            return path if path.is_file() else None
+    return None
+
+
 def _run_claimed(remote: MixLabRemote, config: WorkerConfig, manifest: RunManifest) -> bool:
     """Execute a single already-claimed run through the §6 cycle. Returns True (the job
     was consumed — completed or failed) or False (transport error; leave to lease expiry).
@@ -257,6 +281,14 @@ def _run_claimed(remote: MixLabRemote, config: WorkerConfig, manifest: RunManife
         _safe_fail(remote, run_id, error=f"invalid run flags: {exc}", log_tail="")
         return True
 
+    # Always request the merged Rekordbox playlist XML alongside the report + summary so the
+    # API can serve it (SPA download button). ``--export`` is a worker-local operational flag,
+    # not a manifest flag, so it is appended here rather than allow-listed in build_argv. The
+    # dir is created up-front since the pipeline writes into an existing directory.
+    export_dir = config.repo_root / _EXPORT_REL_DIR
+    export_dir.mkdir(parents=True, exist_ok=True)
+    argv = [*argv, "--export", str(export_dir)]
+
     # Step 5 — run the pipeline as an isolated subprocess with a hard timeout.
     try:
         completed = subprocess.run(  # argv is built from a strict allow-list
@@ -282,16 +314,17 @@ def _run_claimed(remote: MixLabRemote, config: WorkerConfig, manifest: RunManife
         )
         return True
 
-    # Step 6 — success. Parse the artifact paths the pipeline printed. This epic's runs
-    # never request an export, so export_path is always None (v1).
+    # Step 6 — success. Parse the required artifact paths the pipeline printed, plus the
+    # optional playlist export (absent for a run that produced no concepts).
     try:
         summary_path = _resolve_artifact(completed.stdout, _SUMMARY_PREFIX, config.repo_root)
         report_path = _resolve_artifact(completed.stdout, _REPORT_PREFIX, config.repo_root)
     except _ArtifactError as exc:
         _safe_fail(remote, run_id, error=str(exc), log_tail=_combine_tail(completed.stdout, completed.stderr))
         return True
+    export_path = _resolve_optional_export(completed.stdout, config.repo_root)
 
-    remote.complete(run_id, summary_path=summary_path, report_path=report_path, export_path=None)
+    remote.complete(run_id, summary_path=summary_path, report_path=report_path, export_path=export_path)
 
     # Post-complete history push. The run IS complete; a sync_up failure here is only a
     # warning — the next cycle's sync reconciles history.
