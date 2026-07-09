@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.9.0 — 2026-07-09
+
+MixLab Anywhere: the engine can now run as a pull-based remote worker for the Changsta API, so runs can be triggered, archived, and fed back from mixlab.changsta.com. Strictly additive — every existing CLI path is unchanged.
+
+- **`--worker` / `--worker-once`** (`worker.py`): crash-safe poll loop that claims queued runs from the API, downloads the collection, executes the normal pipeline as a subprocess with a hard timeout, and uploads the HTML report + run summary. Transport failures leave the claim to lease expiry (the API requeues); pipeline failures are reported with a bounded log tail. SIGTERM finishes the current cycle before exiting.
+- **`remote.py`**: typed client for the MixLab Anywhere API — claim, collection download (streamed gunzip, atomic write), complete (multipart), fail, ETag-guarded history get/put, pending-feedback fetch/ack.
+- **`sync.py`**: history + feedback sync around each run. Web-recorded verdicts/ratings flow through the existing `apply_feedback_verdict` machinery, so novelty multipliers and the name-avoid list react exactly as if `--feedback` had been used locally. Conflicts merge via ETag retry. Applied feedback is summarised in the worker log (`sync: applied N verdict(s), …`).
+- **Docs & ops**: README worker section, `docs/ops/worker-launchd.md` (Mac mini launchd runbook), `docs/ops/anywhere-smoke.md` (eight-step end-to-end smoke checklist), flags-guide entries, `.env.example` worker variables.
+- The unit suite grew from 1101 to 1167 tests.
+
 ## v1.8.4 — 2026-07-08
 
 The second (and decisive) half of making genre_traverse fire — v1.8.3 shipped only the chain-start fix; the verification log proved it insufficient on its own.
