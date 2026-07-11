@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.10.0 — 2026-07-11
+
+- **Energy handling aligned with Mixed In Key's official 1–10 scale.** The reader always parsed MIK's 1–10 energy values, but every prompt, warning, and doc described a 1–8 scale — so the LLM read energy 7 as near-maximum when MIK considers it merely "upbeat", and treated 8–10 as out of range. All Stage 0/1/2 prompt surfaces now show `energy:N/10` with the official band meanings (1–2 very chill/atmospheric, 3–5 lounge/smooth groove, 6–7 danceable/upbeat, 8–10 high intensity), and `config.py` gains a canonical `MIK_ENERGY_BANDS` / `energy_band_label()` / shared prompt-guidance definition.
+- **Stage 2 curation now follows MIK's mixing rule of thumb.** Craft rules instruct the model to move at most one energy level between consecutive tracks by default (5→5 steady, 5→6 lift) and to treat any 2+ level jump as a deliberate, named reset/contrast moment; the deep-critique pass flags unowned 2+ jumps.
+- **Transition scoring recalibrated to the same rule.** `transitions._energy_component` now scores ±1 as ideal (1.0), a 2-level move as a deliberate lift (0.75), 3 as a reset (0.5) and 4+ as a slam (0.3) — previously anything ≥3 collapsed to a flat 0.5.
+- **Two energy-band bugs fixed.** The anchor-scoring energy signal gave genuine high-intensity (8–10) tracks a score of 0.0 — a leftover from reading the scale as 1–8 — and now scores them highest; the peak role threshold moved from ≥6 to ≥7, since 6 only "starts to feel danceable" on the official scale (kept in lockstep with concept-anchor peak tagging).
+- **Structural warnings re-tuned.** A level-5 close no longer trips the "no wind-down" warning (5 is MIK's lounge/smooth-groove band — a legitimate landing); the all-high-energy warning is reworded to "danceable-or-hotter (≥6/10)". The exported HTML report's energy cells now carry the official band as hover text.
+
 ## v1.9.2 — 2026-07-09
 
 - **Worker no longer shares the local collection file.** The MixLab Anywhere worker now downloads each run's collection to `.mixlab/worker-collection.xml` (was `import/rekordbox.xml`) and points the pipeline at it via a new `MIXLAB_COLLECTION_PATH` env var, so a remote run can never overwrite the `import/rekordbox.xml` a local run or scheduled automation uses. Normal CLI usage is unchanged (the env var is unset). Configurable via `MIXLAB_WORKER_XML_PATH`.
