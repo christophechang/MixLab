@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.10.1 — 2026-07-11
+
+- **Energy-arc sparkline in the HTML report now matches the web app.** The report used to auto-scale each concept's energy arc to its own min/max, so a steady set living in a narrow band (e.g. all 5–7) was stretched into a full-height canyon that read as wild swings. The y-domain is now a min-span window — the concept's energy range plus one level of padding, floored to 4 levels and centred on the data — with faint dashed guides at the MIK band edges (6 danceable, 8 high-intensity) that keep the absolute level legible under the re-centred window (`html_report.py`). The sparkline also adopts the web component's visual language: per-track dots, genuine line breaks at unrated tracks (no interpolation), and true set-position spacing. Shared domain logic is mirrored 1:1 with `mixlab-web`'s `energyArcDomain` so the report and the app draw the same shape.
+
 ## v1.10.0 — 2026-07-11
 
 - **Energy handling aligned with Mixed In Key's official 1–10 scale.** The reader always parsed MIK's 1–10 energy values, but every prompt, warning, and doc described a 1–8 scale — so the LLM read energy 7 as near-maximum when MIK considers it merely "upbeat", and treated 8–10 as out of range. All Stage 0/1/2 prompt surfaces now show `energy:N/10` with the official band meanings (1–2 very chill/atmospheric, 3–5 lounge/smooth groove, 6–7 danceable/upbeat, 8–10 high intensity), and `config.py` gains a canonical `MIK_ENERGY_BANDS` / `energy_band_label()` / shared prompt-guidance definition.
