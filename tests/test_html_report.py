@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mixlab.html_report import render_html_report, report_filename
+from mixlab.html_report import _spark_domain, _sparkline, render_html_report, report_filename
 from mixlab.models import MixConcept, MixPoints, Track, Transition
 
 
@@ -171,6 +171,38 @@ def test_render_html_report_sparkline_absent_with_two_energies() -> None:
         [concept], _tracks_by_id(tracks), report_text="", report_context="", validation_warnings=[]
     )
     assert "<polyline" not in html
+
+
+def test_spark_domain_flat_set_floors_to_minimum_span() -> None:
+    # A dead-flat set must not be amplified — the window is the min span centred on the level.
+    assert _spark_domain([6, 6, 6]) == (4.0, 8.0)
+
+
+def test_spark_domain_narrow_band_stays_at_minimum_span() -> None:
+    # 5..7 spans 2 levels; padding keeps it within the 4-level floor, so it does not stretch.
+    assert _spark_domain([5, 6, 7, 6, 5]) == (4.0, 8.0)
+
+
+def test_spark_domain_wide_arc_widens_with_padding() -> None:
+    # 4..9 spans 5; padded by 1 each side → span 7, centred on 6.5 → 3..10.
+    assert _spark_domain([4, 6, 9, 5]) == (3.0, 10.0)
+
+
+def test_sparkline_matches_web_visual_language() -> None:
+    # Mirrors the web EnergyArc: per-track dots, and band guides for a peak set (windowed to 6-10).
+    tracks = [_track(str(i), energy=e) for i, e in enumerate([7, 8, 9, 8])]
+    svg = _sparkline(tracks)
+    assert svg.count("<circle") == 4
+    assert svg.count("<line") == 2  # 6 and 8 guides both fall inside the 6-10 window
+
+
+def test_sparkline_breaks_line_at_unrated_track() -> None:
+    # A null in the middle splits the line into two segments, keeping true set positions.
+    energies = [5, 6, None, 7, 8]
+    tracks = [_track(str(i), energy=e) for i, e in enumerate(energies)]
+    svg = _sparkline(tracks)
+    assert svg.count("<polyline") == 2
+    assert svg.count("<circle") == 4
 
 
 # ---------------------------------------------------------------------------

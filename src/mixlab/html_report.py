@@ -28,6 +28,15 @@ _SPARK_W = 280
 _SPARK_H = 48
 _SPARK_PAD = 4
 _MIN_SPARK_POINTS = 3
+# Energy-arc y-domain, mirroring mixlab-web/src/runs/energy.ts (`energyArcDomain`). The domain
+# fits the concept's own energies plus one level of padding on each side, but never zooms tighter
+# than _SPARK_MIN_SPAN levels — the middle path between a fixed 1–10 domain (flatlines a set that
+# lives in a narrow band) and a raw min→max auto-scale (amplifies a 1-level wiggle into a
+# full-height canyon). The fixed 6/8 band guides carry the absolute level under the re-centred
+# window, so it still reads as a warmup vs. a peak-time set.
+_SPARK_MIN_SPAN = 4
+_SPARK_PAD_LEVELS = 1
+_SPARK_BAND_GUIDES = (6, 8)
 
 
 def _esc(value: str) -> str:
@@ -92,27 +101,77 @@ def _resolved_tracks(concept: MixConcept, tracks_by_id: dict[str, Track]) -> lis
     return [t for tid in concept.track_ids if (t := tracks_by_id.get(tid)) is not None]
 
 
+def _spark_domain(rated: list[int]) -> tuple[float, float]:
+    """The energy-arc y-domain from a concept's rated energies (see mixlab-web `energyArcDomain`).
+
+    Centred on the data midpoint; height is the data span plus ``_SPARK_PAD_LEVELS`` on each side,
+    floored to ``_SPARK_MIN_SPAN``. Callers guarantee at least one rated energy.
+    """
+    data_lo, data_hi = min(rated), max(rated)
+    mid = (data_lo + data_hi) / 2
+    span = max(_SPARK_MIN_SPAN, (data_hi - data_lo) + 2 * _SPARK_PAD_LEVELS)
+    return mid - span / 2, mid + span / 2
+
+
 def _sparkline(tracks: list[Track]) -> str:
-    """Inline SVG polyline of per-track energies. Empty string when <3 energies."""
-    energies = [t.energy for t in tracks if t.energy is not None]
-    if len(energies) < _MIN_SPARK_POINTS:
+    """Inline SVG energy arc: per-track MIK energy across set order.
+
+    Dots joined by a line, with genuine gaps (no interpolation) where a track is unrated, on the
+    windowed y-domain of :func:`_spark_domain` with faint 6/8 band guides. Empty string when fewer
+    than ``_MIN_SPARK_POINTS`` tracks carry a rating. Mirrors the web ``EnergyArc`` component so the
+    report and the app draw the same shape.
+    """
+    energies = [t.energy for t in tracks]
+    rated = [e for e in energies if e is not None]
+    if len(rated) < _MIN_SPARK_POINTS:
         return ""
-    lo, hi = min(energies), max(energies)
+    lo, hi = _spark_domain(rated)
     span = hi - lo
     inner_h = _SPARK_H - 2 * _SPARK_PAD
     inner_w = _SPARK_W - 2 * _SPARK_PAD
-    points: list[str] = []
+    n = len(energies)
+
+    def x_for(i: int) -> float:
+        return _SPARK_PAD + (inner_w * i / (n - 1) if n > 1 else inner_w / 2)
+
+    def y_for(level: float) -> float:
+        return _SPARK_PAD + (1.0 - (level - lo) / span) * inner_h
+
+    # Break the line at unrated tracks; keep each rated track at its true set position.
+    segments: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = []
+    dots: list[tuple[float, float]] = []
     for i, energy in enumerate(energies):
-        x = _SPARK_PAD + (inner_w * i / (len(energies) - 1))
-        frac = 0.5 if span == 0 else (energy - lo) / span
-        y = _SPARK_PAD + (1.0 - frac) * inner_h
-        points.append(f"{x:.1f},{y:.1f}")
-    poly = " ".join(points)
+        if energy is None:
+            if current:
+                segments.append(current)
+            current = []
+            continue
+        point = (x_for(i), y_for(energy))
+        current.append(point)
+        dots.append(point)
+    if current:
+        segments.append(current)
+
+    guides = "".join(
+        f'<line x1="{_SPARK_PAD:.1f}" x2="{inner_w + _SPARK_PAD:.1f}" '
+        f'y1="{y_for(level):.1f}" y2="{y_for(level):.1f}" stroke="currentColor" '
+        f'stroke-width="0.75" stroke-dasharray="2 3" opacity="0.25"/>'
+        for level in _SPARK_BAND_GUIDES
+        if lo <= level <= hi
+    )
+    polylines = "".join(
+        f'<polyline fill="none" stroke="currentColor" stroke-width="2" '
+        f'stroke-linejoin="round" stroke-linecap="round" '
+        f'points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in seg)}"/>'
+        for seg in segments
+        if len(seg) > 1
+    )
+    circles = "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.5" fill="currentColor"/>' for x, y in dots)
     return (
         f'<svg class="spark" viewBox="0 0 {_SPARK_W} {_SPARK_H}" width="{_SPARK_W}" height="{_SPARK_H}" '
         f'role="img" aria-label="Energy arc across the set">'
-        f'<polyline fill="none" stroke="currentColor" stroke-width="2" '
-        f'stroke-linejoin="round" stroke-linecap="round" points="{poly}"/></svg>'
+        f"{guides}{polylines}{circles}</svg>"
     )
 
 
