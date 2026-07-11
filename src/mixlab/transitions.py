@@ -116,14 +116,20 @@ def _harmonic_component(distance: int) -> float:
 
 
 def _energy_component(delta: int | None) -> float:
+    """Energy-step contribution, calibrated to Mixed In Key's official mixing rule:
+    same level or one apart is the ideal move; a two-level step is already a
+    deliberate lift/drop, and three or more is a dramatic reset that must be earned
+    elsewhere in the transition (the composite can still carry it via tempo/key)."""
     if delta is None:
         return 0.7
     abs_delta = abs(delta)
     if abs_delta <= 1:
         return 1.0
     if abs_delta == 2:
-        return 0.8
-    return 0.5
+        return 0.75
+    if abs_delta == 3:
+        return 0.5
+    return 0.3
 
 
 def _tag_component(a_tags: list[str], b_tags: list[str], overlap: float) -> float:

@@ -393,6 +393,19 @@ def test_build_mix_canvas_role_inference_with_energy() -> None:
     assert "groove" in canvas.roles.groove_locker
 
 
+def test_build_mix_canvas_role_inference_energy_six_is_builder_not_peak() -> None:
+    """6/10 only 'starts to feel danceable' on MIK's official scale — peak needs ≥7."""
+    six = _track(track_id="danceable", bpm=172.0, energy=6)
+    seven = _track(track_id="clubpeak", bpm=172.0, energy=7)
+    low = _track(track_id="opener", bpm=172.0, energy=2)
+    tracks = [six, seven, low]
+    concept = _concept([t.track_id for t in tracks])
+    canvas = build_mix_canvas(concept, _tracks_by_id(*tracks))
+    assert "danceable" not in canvas.roles.peak
+    assert "danceable" in canvas.roles.builder
+    assert "clubpeak" in canvas.roles.peak
+
+
 def test_build_mix_canvas_role_inference_no_energy() -> None:
     # No energy field; BPM proxy: bridge pool tracks become opener candidates.
     # Use 5 core tracks to anchor median=172, then one clear bridge track.

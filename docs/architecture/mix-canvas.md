@@ -93,12 +93,12 @@ Each Mix Canvas carries six **role candidate pools** computed deterministically 
 
 | Role            | Heuristic                                                                                         |
 | --------------- | ------------------------------------------------------------------------------------------------- |
-| `opener`        | energy ≤ 3/8, or bridge-tier track when energy is missing                                          |
-| `groove_locker` | core tier, energy 3–5/8, BPM within ±2 of median                                                  |
-| `builder`       | core tier, energy 4–6/8                                                                            |
-| `peak`          | core tier, energy ≥ 6/8                                                                            |
+| `opener`        | energy ≤ 3/10, or bridge-tier track when energy is missing                                          |
+| `groove_locker` | core tier, energy 3–5/10 (MIK lounge/smooth-groove band), BPM within ±2 of median                                                  |
+| `builder`       | core tier, energy 4–6/10                                                                            |
+| `peak`          | core tier, energy ≥ 7/10 (MIK: upbeat/club-peak territory)                                                                            |
 | `pivot`         | Camelot distance ≥ 3 from the dominant key (regardless of tier)                                   |
-| `closer`        | energy ≤ 4/8                                                                                       |
+| `closer`        | energy ≤ 4/10                                                                                       |
 
 A track may appear in multiple pools. When energy data is missing, a BPM-proxy fallback fires (higher-BPM-than-median → peak candidate; lower → closer candidate). The Stage 2 prompt is told explicitly that role candidates are **hints, not assignments** — it may override them when its DJ instinct disagrees.
 
@@ -131,7 +131,7 @@ Pre-flagged structural weaknesses surfaced in the canvas header so Stage 2 can a
 - `too-similar midsection` — more than 60% of core keys near the dominant Camelot
 - `over-repeated artist` — any artist appears ≥3 times in core
 - `over-repeated label` — any label appears ≥4 times in core
-- `all high energy` — more than 75% of tracks at energy ≥6/8
+- `all high energy` — more than 75% of tracks at energy ≥6/10 (danceable or hotter)
 
 Since v0.10, the `weakness_penalty` term in `score_canvas` subtracts 0.04 per risk note from the weighted score (capped at 0.20). A canvas with multiple flags is mechanically deprioritised, not just diagnostically flagged. Stage 2 is also permitted to skip a canvas entirely when its risk notes describe structural problems that cannot be overcome with track selection.
 

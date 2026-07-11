@@ -111,7 +111,7 @@ Every track must have a Camelot key set in Rekordbox (`Tonality` field). The eas
 
 | Data | Format in Comments | What MixLab does with it |
 |---|---|---|
-| Energy score | `Energy 7` (1–8 scale) | Passed to the AI to inform the energy arc and peak placement |
+| Energy score | `Energy 7` (official 1–10 scale) | Passed to the AI to inform the energy arc and peak placement — 1–2 chill, 3–5 lounge/groove, 6–7 danceable, 8–10 high intensity |
 | Genre/mood tags | `/* Deep House / Soulful / Melodic */` | Passed to the AI as track character descriptors |
 
 To populate these, run Mixed In Key on your collection, enable **Write to Rekordbox**, and let it analyse. After analysis completes, re-export your Rekordbox XML.
@@ -145,7 +145,7 @@ Tracks are described across four independent layers:
 |---|---|---|
 | Genre | Rekordbox Genre field | Primary genre (House, Drum & Bass, etc.) |
 | Playlists | Rekordbox Playlists | Tracks used in a SoundCloud mix — "battle-tested" markers |
-| Energy | MIK energy score in Comments | Intensity level on a 1–8 scale |
+| Energy | MIK energy score in Comments | Intensity level on Mixed In Key's official 1–10 scale |
 | Mood | `/* */` block in Comments | Vibe, character, and feel of the track |
 
 **Mood tag vocabulary**

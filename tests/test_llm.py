@@ -704,7 +704,7 @@ def test_tracks_to_text_energy_scale_is_8() -> None:
 
     tracks = [Track(track_id="1", artist="A", title="T", bpm=174.0, camelot_key="8A", genre="Drum & Bass", energy=7)]
     result = _tracks_to_text(tracks)
-    assert "energy:7/8" in result
+    assert "energy:7/10" in result
     assert "energy:7/5" not in result
 
 
@@ -761,7 +761,7 @@ async def test_stage2_prompt_includes_enriched_fields(monkeypatch: pytest.Monkey
     assert "Science" in sent_body
     assert "remix by Mafia Kiss" in sent_body
     assert "mix:Drum n Bass, Jungle" in sent_body
-    assert "energy:7/8" in sent_body
+    assert "energy:7/10" in sent_body
     assert "unplayed" in sent_body
 
 
@@ -3871,7 +3871,7 @@ def test_validate_stage2_output_does_not_warn_about_role_family_run() -> None:
 
 
 def test_validate_stage2_output_warns_all_high_energy_no_dynamic_range() -> None:
-    """Concept where every track is energy ≥6/8 fires the high-energy band warning."""
+    """Concept where every track is energy ≥6/10 fires the no-low-energy-contrast warning."""
     from mixlab.llm import validate_stage2_output
 
     ids = [str(i) for i in range(1, 9)]
@@ -3883,7 +3883,7 @@ def test_validate_stage2_output_warns_all_high_energy_no_dynamic_range() -> None
     concept = MixConcept(title="T", mood="dark", track_ids=ids)
     # Use a genre outside the soft-tier softening families so the warning fires.
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="hip_hop")
-    assert any("all tracks high-energy" in w for w in warnings)
+    assert any("all tracks danceable-or-hotter" in w for w in warnings)
 
 
 def test_validate_stage2_output_high_energy_warning_softened_for_house() -> None:
@@ -3899,8 +3899,8 @@ def test_validate_stage2_output_high_energy_warning_softened_for_house() -> None
     concept = MixConcept(title="T", mood="dark", track_ids=ids)
     warnings_house = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="house")
     warnings_techno = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="techno")
-    assert not any("all tracks high-energy" in w for w in warnings_house)
-    assert not any("all tracks high-energy" in w for w in warnings_techno)
+    assert not any("all tracks danceable-or-hotter" in w for w in warnings_house)
+    assert not any("all tracks danceable-or-hotter" in w for w in warnings_techno)
 
 
 def test_validate_stage2_output_high_energy_warning_softened_for_dnb() -> None:
@@ -3915,7 +3915,7 @@ def test_validate_stage2_output_high_energy_warning_softened_for_dnb() -> None:
     canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
     concept = MixConcept(title="T", mood="dark", track_ids=ids)
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="drum_and_bass")
-    assert not any("all tracks high-energy" in w for w in warnings)
+    assert not any("all tracks danceable-or-hotter" in w for w in warnings)
 
 
 def test_validate_stage2_output_high_energy_warning_softened_for_sustained_pressure_arc() -> None:
@@ -3930,7 +3930,7 @@ def test_validate_stage2_output_high_energy_warning_softened_for_sustained_press
     canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
     concept = MixConcept(title="T", mood="dark", track_ids=ids, arc_type="sustained-pressure")
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="house")
-    assert not any("all tracks high-energy" in w for w in warnings)
+    assert not any("all tracks danceable-or-hotter" in w for w in warnings)
 
 
 def test_validate_stage2_output_wind_down_warning_fires_when_final_three_all_high_energy() -> None:
@@ -3948,6 +3948,22 @@ def test_validate_stage2_output_wind_down_warning_fires_when_final_three_all_hig
     # Use a non-soft-tier genre so the warning fires.
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="hip_hop")
     assert any("no wind-down" in w for w in warnings)
+
+
+def test_validate_stage2_output_wind_down_warning_not_fired_for_level_five_close() -> None:
+    """Energy 5/10 is MIK's lounge/smooth-groove band — a 5-5-5 close IS a wind-down."""
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    energies = [3, 4, 6, 7, 8, 5, 5, 5]
+    lib = {
+        tid: Track(track_id=tid, artist="A", title="T", bpm=124.0, camelot_key="8A", genre="HipHop", energy=e)
+        for tid, e in zip(ids, energies, strict=True)
+    }
+    canvas = _canvas_with_roles(ids, opener=["1"], closer=["8"], peak=["5"])
+    concept = MixConcept(title="T", mood="dark", track_ids=ids)
+    warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre="hip_hop")
+    assert not any("no wind-down" in w for w in warnings)
 
 
 def test_validate_stage2_output_wind_down_warning_softened_for_house() -> None:
@@ -4379,7 +4395,7 @@ def test_structural_high_energy_warning_softening(genre: str, arc_type: str | No
     arc_value = cast("ArcType | None", arc_type)
     concept = MixConcept(title="T", mood="dark", track_ids=ids, arc_type=arc_value)
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set(), genre=genre)
-    fires = any("all tracks high-energy" in w for w in warnings)
+    fires = any("all tracks danceable-or-hotter" in w for w in warnings)
     assert fires is should_warn, f"genre={genre} arc_type={arc_type}: expected fires={should_warn}, got {fires}"
 
 
@@ -5217,8 +5233,8 @@ def test_qualifies_for_revision_soft_only_warnings_returns_false() -> None:
 
     concept = MixConcept(title="X", mood="m", track_ids=["1", "2", "3", "4"])
     warnings = [
-        "[X] no wind-down in final 3 tracks (all energy >4/8)",
-        "[X] all tracks high-energy (≥6/8) — no dynamic range",
+        "[X] no wind-down in final 3 tracks (all energy ≥6/10)",
+        "[X] all tracks danceable-or-hotter (≥6/10) — no low-energy contrast",
         "Concept title 'X' matches generic [Adjective][Noun] pattern — review for distinctiveness",
     ]
     assert _qualifies_for_revision(concept, warnings) is False
