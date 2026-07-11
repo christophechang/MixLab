@@ -109,7 +109,7 @@ to the rest of the pool.
 
 Give each shortlist a rough descriptive title (e.g. "Deep 122 BPM / 4A–7A Pool") and a one-line sonic mood.
 
-Some tracks include supplementary metadata: `energy:N/8` is a Mixed in Key automated score (0=lowest, 8=highest) and can help signal intensity. Treat it as a useful hint when present — not all tracks will have it, and its absence says nothing about the track's quality or suitability. When Year is present, you may form era-coherent groupings (e.g. a 1994–1997 pool alongside a 2018–present pool) as an alternative dimension to BPM-centre variation — but only when the material clearly separates into eras.
+Some tracks include supplementary metadata: `energy:N/10` is a Mixed In Key automated score on MIK's official 1-10 scale (1-2 very chill/atmospheric, 3-5 lounge or smooth groove, 6-7 danceable and upbeat, 8-10 high intensity) and can help signal intensity. Treat it as a useful hint when present — not all tracks will have it, and its absence says nothing about the track's quality or suitability. When Year is present, you may form era-coherent groupings (e.g. a 1994–1997 pool alongside a 2018–present pool) as an alternative dimension to BPM-centre variation — but only when the material clearly separates into eras.
 
 Respond ONLY with a JSON array matching this schema:
 [{"title": "...", "mood": "...", "track_ids": ["id1", "id2", ...]}]\
@@ -132,9 +132,10 @@ Tier definitions:
 
 Inferred role options: opener, groove, hook, pivot, lift, vocal_moment, texture_change, peak, resolution, closer, unknown
 
-Use energy:N/8 when present. When absent, reason from BPM, Camelot key, and list position:
-- Opener candidate: first 1–2 positions, energy 1–3/8 or lowest BPM relative to pool
-- Peak candidate: energy 7–8/8 or highest BPM
+Use energy:N/10 when present (Mixed In Key official scale: 1-2 very chill, 3-5 lounge/groove, \
+6-7 danceable/upbeat, 8-10 high intensity). When absent, reason from BPM, Camelot key, and list position:
+- Opener candidate: first 1–2 positions, energy 1–3/10 or lowest BPM relative to pool
+- Peak candidate: energy 7–10/10 or highest BPM
 - Closer candidate: last 1–2 positions
 
 missing_roles: list which of [opener, groove, peak, resolution, closer] appear absent.
@@ -186,7 +187,7 @@ def _tracks_to_text(
         if t.year is not None:
             line += f" | {t.year}"
         if t.energy is not None:
-            line += f" | energy:{t.energy}/8"
+            line += f" | energy:{t.energy}/10"
         if seed_ids is not None and t.track_id in seed_ids:
             line += " | [seed]"
         lines.append(line)
@@ -718,7 +719,7 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
         if t.remixer:
             extras.append(f"remix by {t.remixer}")
         if t.energy is not None:
-            extras.append(f"energy:{t.energy}/8")
+            extras.append(f"energy:{t.energy}/10")
         if t.tags:
             extras.append(", ".join(t.tags))
         if t.enrichment_confidence == "low":
@@ -1030,17 +1031,19 @@ def _structural_warnings(
         if not has_peak and arc_type not in _ARC_TYPES_NO_PEAK_OK and not is_electronica and not is_sustained_groove:
             warnings.append(f"{label} no peak-role track in sequence")
 
-    # No wind-down before closer. Approximated as final three tracks all energy > 4.
+    # No wind-down before closer. Approximated as final three tracks all still in MIK's
+    # danceable-or-hotter range (≥6/10) — a level-5 close is a legitimate smooth-groove
+    # wind-down on the official scale, so it no longer trips this.
     last_three_tracks = [tracks_by_id.get(tid) for tid in concept.track_ids[-3:]]
     last_three_energies = [t.energy for t in last_three_tracks if t and t.energy is not None]
     if (
         len(last_three_energies) >= 3
-        and all(e > 4 for e in last_three_energies)
+        and all(e >= 6 for e in last_three_energies)
         and arc_type not in _ARC_TYPES_NO_WIND_DOWN_OK
         and not is_dnb
         and not is_sustained_groove
     ):
-        warnings.append(f"{label} no wind-down in final 3 tracks (all energy >4/8)")
+        warnings.append(f"{label} no wind-down in final 3 tracks (all energy ≥6/10)")
 
     # All tracks in the same energy band (no dynamic range).
     energies = [
@@ -1049,9 +1052,9 @@ def _structural_warnings(
     if energies:
         if all(e >= 6 for e in energies):
             if arc_type not in _ARC_TYPES_ALL_HIGH_ENERGY_OK and not is_dnb and not is_sustained_groove:
-                warnings.append(f"{label} all tracks high-energy (≥6/8) — no dynamic range")
+                warnings.append(f"{label} all tracks danceable-or-hotter (≥6/10) — no low-energy contrast")
         elif all(e <= 3 for e in energies) and arc_type not in ("plateau",):
-            warnings.append(f"{label} all tracks low-energy (≤3/8) — no dynamic range")
+            warnings.append(f"{label} all tracks low-energy (≤3/10) — no dynamic range")
 
     return warnings
 
@@ -1434,7 +1437,11 @@ roles), Peak/Payoff (strongest moment, not necessarily the loudest — peak role
 deciding the final order.
 - Design an intentional energy curve that follows the chosen energy path. This need not be a single arc \
 — consider double peaks, plateau-and-release structures, or a false resolution before the final push. \
-The shape should feel inevitable in retrospect, not predictable in real time.
+The shape should feel inevitable in retrospect, not predictable in real time. Build the curve from the \
+Mixed In Key energy values: move between consecutive tracks by at most one energy level by default \
+(5→5 holds the mood, 5→6 is a smooth lift); a jump of two or more levels is a deliberate dramatic \
+device — a reset, a contrast moment, a peak drop — and must be intentional, named, and placed where \
+the floor can absorb it.
 - A set can sustain two or three genuine peak moments at most. Everything else is architecture that makes \
 those moments land. Do not load the tracklist with stacked peaks — they cancel each other out and produce \
 a set with no dynamic range.
@@ -1460,7 +1467,11 @@ payoff.
 - Some tracks carry enrichment metadata. These are context clues — use them to deepen the narrative, not \
 to sort or constrain selection. Unenriched tracks are first-class; absence of any field says nothing about \
 quality. When fields are missing, reason from BPM, key, genre, and artist knowledge as normal.
-  - `energy:N/8` — Mixed in Key score (0=lowest, 8=highest). Use to build the energy arc.
+  - `energy:N/10` — Mixed In Key score on the official 1-10 scale: 1-2 very chill/atmospheric, \
+3-5 lounge or smooth groove, 6-7 danceable and upbeat, 8-10 high intensity (9-10 read as big \
+club/festival moments). Use it to build the energy arc: consecutive tracks should sit at the same \
+level or one apart (5→5 steady, 5→6 smooth lift); reserve bigger jumps for a deliberate reset, \
+contrast, or dramatic moment — and when you make one, say so in the report.
   - `intro:Nb` / `outro:Nb` — bar counts derived from the DJ's own placed cue points: bars from the \
 track's start to the mix-in cue, and from the mix-out cue to the track's end. `intro:0b` means the \
 mix-in cue sits at the very top — the DJ deliberately mixes this track in from bar one. That is a \
@@ -1721,7 +1732,8 @@ requiring it; no track demanding full engagement in its first 32 bars")? Or is i
 hot too early?
 - Does the closer actually signal finality? Could you mix out of it cleanly?
 - Does the stated energy path match the actual sequence? Trace the energy values \
-track-by-track and check it traces the named shape.
+(Mixed In Key 1-10 scale) track-by-track and check it traces the named shape. Flag any \
+consecutive jump of 2+ energy levels that the report does not own as a deliberate moment.
 - Are the transitions marked risky actually justified by the mechanism named? Re-read \
 each — is the mechanism real, or is it boilerplate?
 - Is the thesis verifiable from the tracklist? Could you defend it to a knowledgeable \
@@ -2410,7 +2422,7 @@ async def _call_stage2_report_single(
         if t.mix:
             extras.append(f"mix:{', '.join(t.mix)}")
         if t.energy is not None:
-            extras.append(f"energy:{t.energy}/8")
+            extras.append(f"energy:{t.energy}/10")
         if seed_ids is not None and tid in seed_ids:
             extras.append("[seed]")
         if unplayed_ids is not None:
@@ -2513,7 +2525,7 @@ async def _call_stage2_critique_single(
         t = tracks_by_id.get(tid)
         if t is None:
             continue
-        energy = f"energy:{t.energy}/8" if t.energy is not None else "energy:?"
+        energy = f"energy:{t.energy}/10" if t.energy is not None else "energy:?"
         track_lines.append(f"{i}. ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {energy}")
 
     transition_lines: list[str] = []
@@ -2529,7 +2541,7 @@ async def _call_stage2_critique_single(
             t = tracks_by_id.get(tid)
             if t is None:
                 continue
-            energy = f"energy:{t.energy}/8" if t.energy is not None else "energy:?"
+            energy = f"energy:{t.energy}/10" if t.energy is not None else "energy:?"
             tier = "core"
             if tid in canvas.bridge_track_ids:
                 tier = "bridge"
@@ -2746,7 +2758,7 @@ async def _call_stage2_revision_single(
         t = tracks_by_id.get(tid)
         if t is None:
             continue
-        energy = f"energy:{t.energy}/8" if t.energy is not None else "energy:?"
+        energy = f"energy:{t.energy}/10" if t.energy is not None else "energy:?"
         track_lines.append(f"{i}. ID:{tid} | {t.artist} — {t.title} | {t.bpm} BPM | {t.camelot_key} | {energy}")
 
     transition_lines: list[str] = []
@@ -3311,7 +3323,7 @@ async def stage2_curate_and_report(
                 if t.mix:
                     extras.append(f"mix:{', '.join(t.mix)}")
                 if t.energy is not None:
-                    extras.append(f"energy:{t.energy}/8")
+                    extras.append(f"energy:{t.energy}/10")
                 if seed_ids is not None and tid in seed_ids:
                     extras.append("[seed]")
                 if unplayed_ids is not None:

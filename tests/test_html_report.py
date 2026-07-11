@@ -416,3 +416,19 @@ def test_report_filename_playlist_takes_precedence_over_genre() -> None:
 
 def test_report_filename_both_none_uses_run() -> None:
     assert report_filename(None, None, "2026-07-07") == "mixlab-run-2026-07-07.html"
+
+
+def test_render_html_report_energy_cell_carries_mik_band_tooltip() -> None:
+    tracks = [_track("1", energy=7), _track("2", energy=None)]
+    concept = _concept([t.track_id for t in tracks])
+    html = render_html_report(
+        [concept],
+        _tracks_by_id(tracks),
+        report_text="",
+        report_context="",
+        validation_warnings=[],
+        generated_at="2026-07-07",
+    )
+    assert 'title="7/10 — danceable / upbeat"' in html
+    # Unrated tracks render the em-dash with no tooltip.
+    assert '<td class="en">—</td>' in html

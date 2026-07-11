@@ -239,13 +239,19 @@ def build_custom_genre_pool(
 # Mix Canvas — role inference, contrast detection, risk notes, scoring
 # ---------------------------------------------------------------------------
 
+# Role thresholds sit on Mixed In Key's official 1–10 band edges (see
+# config.MIK_ENERGY_BANDS): 1–2 chill, 3–5 lounge/groove, 6–7 danceable, 8–10 high
+# intensity. Groove maps exactly onto the lounge/smooth-groove band; peak requires at
+# least 7 ("upbeat for many club situations") rather than 6 (merely "starts to feel
+# danceable") — home libraries rarely tag 9–10, so demanding the official 8+ high
+# band would empty the peak pool. Opener/closer keep a pool-relative fallback below.
 _OPENER_MAX_ENERGY = 3
 _CLOSER_MAX_ENERGY = 4
 _GROOVE_ENERGY_MIN = 3
 _GROOVE_ENERGY_MAX = 5
 _BUILDER_ENERGY_MIN = 4
 _BUILDER_ENERGY_MAX = 6
-_PEAK_ENERGY_MIN = 6
+_PEAK_ENERGY_MIN = 7
 _GROOVE_BPM_TOLERANCE = 2.0
 
 # Precompiled regex for matching vocal tokens as whole words (case-insensitive)
@@ -477,7 +483,9 @@ def _compute_dominant_label(core: list[Track]) -> tuple[str | None, float, float
 # overlook. Three categories — peak, identity, structural-exception — driven by
 # different signals so the tag tells Stage 2 *why* the track was flagged.
 _CONCEPT_ANCHOR_THRESHOLD = 0.40
-_CONCEPT_ANCHOR_PEAK_ENERGY = 6
+# ≥7 on MIK's official 1–10 scale ("upbeat for many club situations" and up) — kept in
+# lockstep with _PEAK_ENERGY_MIN so anchor tagging and role inference agree on "peak".
+_CONCEPT_ANCHOR_PEAK_ENERGY = 7
 _CONCEPT_ANCHOR_LOW_ENERGY = 3
 _CONCEPT_ANCHOR_COLLECTION_RARITY_FLOOR = 20
 
@@ -639,8 +647,13 @@ def _centrality_signal(t: Track, median_bpm: float, dominant_camelot: str) -> fl
 
 
 def _energy_signal(t: Track) -> float:
+    # MIK official bands: 8–10 is the true high-intensity/peak band (it previously
+    # scored 0.0 here — a relic of reading the scale as 1–8); 6–7 danceable/upbeat;
+    # 1–2 atmospheric openers are distinctive in the other direction.
     if t.energy is None:
         return 0.0
+    if t.energy >= 8:
+        return 1.0
     if 6 <= t.energy <= 7:
         return 0.8
     if t.energy <= 2:

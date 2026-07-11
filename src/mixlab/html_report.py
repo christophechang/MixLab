@@ -18,6 +18,7 @@ from html import escape
 
 from mixlab import transitions
 from mixlab.booth_sheet import BoothStep, build_booth_sheet
+from mixlab.config import energy_band_label
 from mixlab.models import MixConcept, Track
 
 _PROSE_SEPARATOR = "\n\n---\n\n"
@@ -70,6 +71,13 @@ def _fmt_bars(bars: float | None) -> str:
 
 def _fmt_energy(energy: int | None) -> str:
     return "—" if energy is None else str(energy)
+
+
+def _energy_title_attr(energy: int | None) -> str:
+    """Hover text mapping the number to its official MIK band, e.g. `7/10 — danceable / upbeat`."""
+    if energy is None:
+        return ""
+    return f' title="{_esc(f"{energy}/10 — {energy_band_label(energy)}")}"'
 
 
 def _score_band(score: float) -> str:
@@ -143,7 +151,7 @@ def _render_track_rows(tracks: list[Track]) -> str:
             f'<td class="key">{_esc(t.camelot_key)}</td>'
             f'<td class="bpm">{t.bpm:g}</td>'
             f'<td class="dur">{_esc(_fmt_duration(t.duration_secs))}</td>'
-            f'<td class="en">{_esc(_fmt_energy(t.energy))}</td>'
+            f'<td class="en"{_energy_title_attr(t.energy)}>{_esc(_fmt_energy(t.energy))}</td>'
             f'<td class="bars">{_esc(_fmt_bars(intro))}</td>'
             f'<td class="bars">{_esc(_fmt_bars(outro))}</td>'
             "</tr>"

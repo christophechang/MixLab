@@ -507,3 +507,22 @@ def test_transition_edge_is_frozen() -> None:
     )
     with pytest.raises(AttributeError):
         edge.score = 0.0  # type: ignore[misc]
+
+
+def test_energy_component_same_or_one_apart_is_ideal_bigger_jumps_penalised_progressively() -> None:
+    # Official MIK rule of thumb: same level or one apart is the ideal move; a
+    # two-level step is a deliberate lift; three-plus is a dramatic reset. With
+    # identical BPM/key/tags the composite differs only via the energy component.
+    steady = score_transition(_track("a", energy=5), _track("b", energy=5)).score
+    lift = score_transition(_track("a", energy=5), _track("b", energy=6)).score
+    deliberate = score_transition(_track("a", energy=5), _track("b", energy=7)).score
+    reset = score_transition(_track("a", energy=5), _track("b", energy=8)).score
+    slam = score_transition(_track("a", energy=5), _track("b", energy=9)).score
+    assert steady == lift
+    assert lift > deliberate > reset > slam
+
+
+def test_energy_component_penalty_is_symmetric_for_drops() -> None:
+    up = score_transition(_track("a", energy=4), _track("b", energy=8)).score
+    down = score_transition(_track("a", energy=8), _track("b", energy=4)).score
+    assert up == down
