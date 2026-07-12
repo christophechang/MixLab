@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.10.2 — 2026-07-12
+
+Repository and release-process housekeeping — no runtime behaviour change.
+
+- **Deploy release process is now comprehensive end-to-end.** The `CLAUDE.md` runbook gained the previously-missing `develop → main` merge, moved tagging and GitHub-release creation onto `main` (matching where tags actually live), and added a "return to develop" step. It now also restarts the MixLab Anywhere worker after the production pull — the long-running `mixlab --worker` daemon loads its harness code once and does not hot-reload, so a deploy that skipped the restart left it running stale code — plus a post-restart health check (launchd status + fresh "Worker online" banner + clean stderr).
+- **Docs consolidated under `docs/`.** Planning docs and the `mixlab.skill.json` manifest (now carrying the MiniMax Stage 2 command patterns) moved out of the repo root and the ignored `plans/` directory into `docs/`.
+
 ## v1.10.1 — 2026-07-11
 
 - **Energy-arc sparkline in the HTML report now matches the web app.** The report used to auto-scale each concept's energy arc to its own min/max, so a steady set living in a narrow band (e.g. all 5–7) was stretched into a full-height canyon that read as wild swings. The y-domain is now a min-span window — the concept's energy range plus one level of padding, floored to 4 levels and centred on the data — with faint dashed guides at the MIK band edges (6 danceable, 8 high-intensity) that keep the absolute level legible under the re-centred window (`html_report.py`). The sparkline also adopts the web component's visual language: per-track dots, genuine line breaks at unrated tracks (no interpolation), and true set-position spacing. Shared domain logic is mirrored 1:1 with `mixlab-web`'s `energyArcDomain` so the report and the app draw the same shape.
