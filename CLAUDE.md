@@ -49,8 +49,23 @@ When user says **"deploy release"**:
 
 5. **Tag the release** — `git tag vX.Y.Z` then `git push origin vX.Y.Z`.
 
-6. **Deploy to production server** — SSH as `christophechang@192.168.1.122` and run:
-   ```bash
-   cd /Users/christophechang/OpenClaw/Automations/MixLab && git checkout main && git pull origin main
-   ```
-   Confirm the pull succeeded and the working tree is clean before reporting done.
+6. **Deploy to production server** — SSH as `christophechang@192.168.1.122` and:
+
+   a. **Pull the new code:**
+      ```bash
+      cd /Users/christophechang/OpenClaw/Automations/MixLab && git checkout main && git pull origin main
+      ```
+      Confirm the pull succeeded and the working tree is clean.
+
+   b. **Restart the MixLab Anywhere worker.** The `mixlab --worker` daemon (launchd job `com.changsta.mixlab-worker`) is a long-running process that polls the prod API every 30s. Its poll-loop / harness code (`worker.py`, `remote.py`, `sync.py`, `__main__.py`) is loaded once at start and does **not** hot-reload — it keeps running the old code until restarted. (Each claimed run executes as a fresh subprocess, so pipeline-only changes are picked up automatically, but always restart so the daemon itself is on current code.) The worker traps SIGTERM and finishes its current cycle before exiting, so this is a graceful restart:
+      ```bash
+      launchctl kickstart -k gui/$(id -u)/com.changsta.mixlab-worker
+      ```
+
+   c. **Verify the worker is healthy** — it should come back online within a few seconds:
+      ```bash
+      launchctl list | grep mixlab-worker                # PID non-zero (2nd col status 0)
+      tail -n 3 ~/Library/Logs/mixlab-worker/stdout.log  # fresh "Worker online — polling ... every 30s" banner
+      tail -n 5 ~/Library/Logs/mixlab-worker/stderr.log  # no new errors
+      ```
+      Only report the deploy done once the pull is clean **and** the worker shows a fresh "Worker online" banner with no new errors.
