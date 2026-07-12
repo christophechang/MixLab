@@ -71,11 +71,11 @@ All work happens on `develop`; releases are cut to `main` (tags and GitHub relea
 
 9. **Deploy to production server** — SSH as `christophechang@192.168.1.122` and:
 
-   a. **Pull the new code:**
+   a. **Pull the new code** (fetch tags too — a plain `git pull` does not pull the release tag, so the `git describe` check below would otherwise read `vX.Y.(Z-1)-N-g…`):
       ```bash
-      cd /Users/christophechang/OpenClaw/Automations/MixLab && git checkout main && git pull origin main
+      cd /Users/christophechang/OpenClaw/Automations/MixLab && git checkout main && git pull origin main && git fetch --tags origin
       ```
-      Confirm the pull succeeded and the working tree is clean, and that `git describe --tags` reports `vX.Y.Z`.
+      Confirm the pull succeeded, the working tree is clean (an untracked `output/` is expected), and that `git describe --tags` reports `vX.Y.Z`.
 
    b. **Restart the MixLab Anywhere worker.** The `mixlab --worker` daemon (launchd job `com.changsta.mixlab-worker`) is a long-running process that polls the prod API every 30s. Its poll-loop / harness code (`worker.py`, `remote.py`, `sync.py`, `__main__.py`) is loaded once at start and does **not** hot-reload — it keeps running the old code until restarted. (Each claimed run executes as a fresh subprocess, so pipeline-only changes are picked up automatically, but always restart so the daemon itself is on current code.) The worker traps SIGTERM and finishes its current cycle before exiting, so this is a graceful restart:
       ```bash
