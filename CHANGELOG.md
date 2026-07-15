@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.11.0 — 2026-07-15
+
+Worker support for playlist-completion mode and BPM/year filters driven from MixLab Anywhere. The CLI already accepted these flags; this release lets a queued run manifest actually carry them through to `./mixlab`.
+
+- **`build_argv` allow-lists five new run flags.** The worker's strict manifest→argv mapper now maps `playlist` → `--playlist`, `minBpm`/`maxBpm` → `--min-bpm`/`--max-bpm`, and `minYear`/`maxYear` → `--min-year`/`--max-year`. Previously any of these keys in a run manifest was rejected outright as an unknown flag, so playlist-seeded and BPM/year-filtered runs could only be started from the command line, never from the web app.
+- **New `"float"` flag kind.** BPM is a float on the CLI, but the mapper only understood `str`/`enum`/`int`/`bool`. The new kind accepts an int or a float, rejects booleans (which are ints in Python and would otherwise smuggle through as `1`/`0`), and formats with `str()` — so `--min-bpm 128.5` survives the round trip intact.
+- **Seed retention is now covered by a regression test.** `--playlist` runs apply BPM/year range filters only to the *library* tracks that get added around the seed; the seed playlist's own tracks are always kept even when they fall outside the range. That invariant was previously untested, and the web app's filter copy now promises it, so a test pins it in place.
+- **Housekeeping.** The `CLAUDE.md` release runbook is condensed to defer to the shared user-level `deploy-release` skill rather than restating the whole procedure, and `.gitignore` now covers `.claude/settings.local.json`.
+
 ## v1.10.2 — 2026-07-12
 
 Repository and release-process housekeeping — no runtime behaviour change.
