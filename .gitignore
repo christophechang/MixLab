@@ -214,3 +214,4 @@ output/house_report.txt
 output/playlists/rekordbox_export.xml
 /plans/
 output/reports/
+.claude/settings.local.json
