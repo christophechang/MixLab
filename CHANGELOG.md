@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.11.1 — 2026-07-15
+
+- **Playlist-completion runs no longer get misreported as failed.** The worker requires a `Run summary: <path>` line in the pipeline's stdout to mark any run complete, but `run_playlist_mode` never printed one — only genre-mode runs built the `summary.json` artifact. Every successful playlist-mode run through MixLab Anywhere was therefore reported to the API (and shown in the web app) as failed, even though the report, export, and Discord delivery all completed. `run_playlist_mode` now builds and prints the same `Run summary:` artifact genre mode does, reusing `build_run_summary` unchanged since playlist mode already produces the same `MixConcept` data.
+
 ## v1.11.0 — 2026-07-15
 
 Worker support for playlist-completion mode and BPM/year filters driven from MixLab Anywhere. The CLI already accepted these flags; this release lets a queued run manifest actually carry them through to `./mixlab`.
