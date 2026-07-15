@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import textwrap
 from pathlib import Path
 
@@ -266,6 +267,14 @@ def test_run_playlist_mode_happy_path(
     asyncio.run(main_mod.run_playlist_mode("Monday Night", None, None, "unplayed"))
     captured = capsys.readouterr()
     assert "Playlist report" in captured.out
+
+    # #89 — playlist mode must emit the same "Run summary:" artifact genre mode does, since
+    # the worker's _resolve_artifact requires it for every successful run regardless of mode.
+    summary_line = next(line for line in captured.out.splitlines() if line.startswith("Run summary:"))
+    summary_path = Path(summary_line.removeprefix("Run summary:").strip())
+    summary = json.loads(summary_path.read_text())
+    assert summary["flags"]["playlist"] == "Monday Night"
+    assert [c["title"] for c in summary["concepts"]] == ["Completed Set"]
 
 
 def test_run_playlist_mode_intent_risk_signal_overrides_stage0_brief(

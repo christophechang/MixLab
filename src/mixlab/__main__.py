@@ -650,6 +650,40 @@ async def run_playlist_mode(
     html_path = _write_html_report(html, genre, playlist_name)
     attachments: list[tuple[str, bytes]] = [*xml_attachments, (html_path.name, html.encode("utf-8"))]
 
+    # Structured run summary (#89) — playlist mode produces MixConcept objects via the same
+    # stage2_curate_and_report pipeline genre mode uses, so build_run_summary applies unchanged.
+    # `flags` intentionally differs in shape from genre mode's (playlist/genre/mode/BPM-year
+    # range/locked vs. risk/directions/resequence/deep/stage1Seed) — the API/SPA contract already
+    # types summary.flags as an opaque dict because it varies by mode.
+    # `seed` has no playlist-mode counterpart (no Stage-1 pool partitioning happens here); reuse
+    # genre mode's date-based fallback so the field stays populated without implying reproducibility.
+    playlist_flags: dict[str, object] = {
+        "playlist": playlist_name,
+        "genre": genre,
+        "mode": mode,
+        "minBpm": min_bpm,
+        "maxBpm": max_bpm,
+        "minYear": min_year,
+        "maxYear": max_year,
+        "intent": intent,
+        "mixLength": mix_length,
+        "locked": locked,
+    }
+    _, run_notes_sections = _split_prose(report, len(all_concepts))
+    run_notes = "\n\n".join(section for section in run_notes_sections if section.strip())
+    summary = build_run_summary(
+        all_concepts,
+        tracks_by_id,
+        flags=playlist_flags,
+        seed=int(datetime.date.today().strftime("%Y%m%d")),
+        validation_warnings=[],
+        run_notes=run_notes,
+        generated_at=today,
+    )
+    summary_path = html_path.with_suffix(".json")
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"Run summary: {summary_path}")
+
     await send_report(
         report,
         [all_concepts[0]],
