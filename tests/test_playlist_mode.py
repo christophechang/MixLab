@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from mixlab.__main__ import _apply_range_filters  # noqa: PLC2701
 from mixlab.models import IntentBrief, MixConcept, Track
 from mixlab.playlist_mode import (
     _score_candidate,  # noqa: PLC2701
@@ -713,3 +714,22 @@ def test_compute_deterministic_intent_single_track_chapter_not_absorbed() -> Non
     }
     brief = compute_deterministic_intent(["lone", "c1", "c2", "c3"], tracks_by_id)
     assert brief.is_coherent_set is False
+
+
+def test_apply_range_filters_excludes_out_of_bpm_library_tracks() -> None:
+    tracks = [_make_track("a", bpm=118.0), _make_track("b", bpm=124.0), _make_track("c", bpm=200.0)]
+    kept = _apply_range_filters(tracks, min_bpm=120.0, max_bpm=130.0, min_year=None, max_year=None)
+    assert {t.track_id for t in kept} == {"b"}
+
+
+def test_range_filter_never_touches_seed_tracks() -> None:
+    # Seeds span 120-124 BPM; a 120-130 filter is applied ONLY to the library list, so an
+    # out-of-range library track (200 BPM) drops out while every seed is still shortlisted.
+    seeds = [_make_track(str(i), bpm=120.0 + i) for i in range(5)]  # 120..124
+    library = [_make_track("lib_in", bpm=122.0), _make_track("lib_out", bpm=200.0)]
+    filtered_library = _apply_range_filters(library, min_bpm=120.0, max_bpm=130.0, min_year=None, max_year=None)
+    shortlists = build_zone_shortlists(seeds, filtered_library, None)
+    all_ids = {tid for s in shortlists for tid in s.track_ids}
+    assert {t.track_id for t in seeds}.issubset(all_ids)  # every seed retained
+    assert "lib_out" not in all_ids  # out-of-range addition excluded
+    assert "lib_in" in all_ids  # in-range addition kept

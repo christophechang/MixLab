@@ -197,6 +197,42 @@ def test_build_argv_non_bool_resequence_rejected() -> None:
         build_argv({"resequence": 1})
 
 
+def test_build_argv_maps_playlist() -> None:
+    assert build_argv({"playlist": "DJ CRATES 2025/Eclectic"}) == ["--playlist", "DJ CRATES 2025/Eclectic"]
+
+
+def test_build_argv_empty_playlist_rejected() -> None:
+    with pytest.raises(WorkerFlagError, match="playlist"):
+        build_argv({"playlist": ""})
+
+
+def test_build_argv_maps_float_bpm() -> None:
+    assert build_argv({"minBpm": 128.5}) == ["--min-bpm", "128.5"]
+
+
+def test_build_argv_maps_int_bpm_as_number() -> None:
+    assert build_argv({"maxBpm": 130}) == ["--max-bpm", "130"]
+
+
+def test_build_argv_maps_year_ints() -> None:
+    assert build_argv({"minYear": 2000, "maxYear": 2020}) == ["--min-year", "2000", "--max-year", "2020"]
+
+
+def test_build_argv_bool_as_bpm_rejected() -> None:
+    with pytest.raises(WorkerFlagError, match="minBpm"):
+        build_argv({"minBpm": True})
+
+
+def test_build_argv_string_bpm_rejected() -> None:
+    with pytest.raises(WorkerFlagError, match="minBpm"):
+        build_argv({"minBpm": "128"})
+
+
+def test_build_argv_float_year_rejected() -> None:
+    with pytest.raises(WorkerFlagError, match="minYear"):
+        build_argv({"minYear": 2000.5})
+
+
 # ===========================================================================
 # process_one — full cycle + failure taxonomy
 # ===========================================================================

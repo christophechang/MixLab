@@ -77,7 +77,7 @@ class _FlagSpec:
 
     wire_key: str
     cli_flag: str
-    kind: str  # "str" | "enum" | "int" | "bool"
+    kind: str  # "str" | "enum" | "int" | "float" | "bool"
     allowed: frozenset[str] | None = None
 
 
@@ -94,6 +94,11 @@ _FLAG_SPECS: tuple[_FlagSpec, ...] = (
     _FlagSpec("stage1Seed", "--stage1-seed", "int"),
     _FlagSpec("resequence", "--resequence", "bool"),
     _FlagSpec("deep", "--deep", "bool"),
+    _FlagSpec("playlist", "--playlist", "str"),
+    _FlagSpec("minBpm", "--min-bpm", "float"),
+    _FlagSpec("maxBpm", "--max-bpm", "float"),
+    _FlagSpec("minYear", "--min-year", "int"),
+    _FlagSpec("maxYear", "--max-year", "int"),
 )
 _KNOWN_KEYS = frozenset(spec.wire_key for spec in _FLAG_SPECS)
 
@@ -134,6 +139,12 @@ def build_argv(flags: Mapping[str, object]) -> list[str]:
             # smuggled in as 1/0 for a numeric flag.
             if isinstance(value, bool) or not isinstance(value, int):
                 raise WorkerFlagError(f"flag {spec.wire_key!r} must be an integer, got {type(value).__name__}")
+            argv.extend([spec.cli_flag, str(value)])
+        elif spec.kind == "float":
+            # bool is a subclass of int — reject it before accepting int|float, so True/False
+            # can't be smuggled in as 1.0/0.0 for a numeric flag.
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise WorkerFlagError(f"flag {spec.wire_key!r} must be a number, got {type(value).__name__}")
             argv.extend([spec.cli_flag, str(value)])
         else:  # "bool"
             if not isinstance(value, bool):
