@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.11.2 — 2026-07-16
+
+- **Playlist-mode runs now get a real `conceptId`.** `run_playlist_mode` never stamped `concept_id` — only genre mode's `run()` did — so every playlist-mode `summary.json` since v1.11.1 shipped `"conceptId": ""`. The web app's Save feedback button submitted that empty id as a URL path segment (`.../concepts//feedback`), which 404'd before ever reaching the concept-lookup logic. `run_playlist_mode` now mints a `concept_id` immediately after Stage 2 returns, matching genre mode.
+
 ## v1.11.1 — 2026-07-15
 
 - **Playlist-completion runs no longer get misreported as failed.** The worker requires a `Run summary: <path>` line in the pipeline's stdout to mark any run complete, but `run_playlist_mode` never printed one — only genre-mode runs built the `summary.json` artifact. Every successful playlist-mode run through MixLab Anywhere was therefore reported to the API (and shown in the web app) as failed, even though the report, export, and Discord delivery all completed. `run_playlist_mode` now builds and prints the same `Run summary:` artifact genre mode does, reusing `build_run_summary` unchanged since playlist mode already produces the same `MixConcept` data.
