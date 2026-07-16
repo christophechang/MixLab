@@ -275,6 +275,10 @@ def test_run_playlist_mode_happy_path(
     summary = json.loads(summary_path.read_text())
     assert summary["flags"]["playlist"] == "Monday Night"
     assert [c["title"] for c in summary["concepts"]] == ["Completed Set"]
+    # Regression: playlist mode used to never stamp concept_id (only genre mode's run()
+    # did), so summary.json shipped "conceptId": "" and the web app's Save feedback
+    # button 404'd on POST .../concepts//feedback.
+    assert summary["concepts"][0]["conceptId"] != ""
 
 
 def test_run_playlist_mode_intent_risk_signal_overrides_stage0_brief(

@@ -610,6 +610,11 @@ async def run_playlist_mode(
         print(report, file=sys.stderr)
         sys.exit(1)
 
+    # conceptId unification (#89 / M1): mint each concept's stable identity here, once,
+    # immediately post-Stage-2, matching genre mode's run() — see docs/architecture/mixlab-anywhere.md §5.2.
+    for concept in all_concepts:
+        concept.concept_id = str(uuid.uuid4())
+
     elapsed = time.monotonic() - t_start
     mins, secs = divmod(int(elapsed), 60)
     elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
