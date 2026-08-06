@@ -103,6 +103,21 @@ def test_build_map_payload_unplayed_mode_filters_catalog_matches(map_tracks: lis
     assert total(unplayed) == total(all_counts) - 1
 
 
+def test_build_map_payload_custom_pool_170_applies_bpm_filter(map_tracks: list[Track]) -> None:
+    # Fixture carries exactly one Drum & Bass track inside the "170" custom pool's
+    # (165.0, 175.0) BPM range (dnb_in, bpm=170.0) and one outside it (dnb_out,
+    # bpm=185.0) — a reversed or off-by-one boundary would silently pass the other
+    # two tests, since neither asserts on custom-pool contents.
+    payload = build_map_payload(map_tracks, mode="all", seed=0, played=[])
+    pools = cast("dict[str, dict[str, object]]", payload["pools"])
+    pool_170 = pools["170"]
+    assert pool_170["track_count"] == 1
+    directions = cast("list[dict[str, object]]", pool_170["directions"])
+    for direction in directions:
+        track_ids = cast("list[str]", direction["track_ids"])
+        assert "dnb_out" not in track_ids
+
+
 def test_render_map_json_deterministic_and_parseable(map_tracks: list[Track]) -> None:
     payload = build_map_payload(map_tracks, mode="all", seed=3, played=[])
     first = render_map_json(payload)

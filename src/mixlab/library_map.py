@@ -4,6 +4,14 @@ Deterministic, LLM-free enumeration of concept-direction candidates per engine
 pool, serialised for the web app's constellation overlay. Contract:
 mixlab-web docs/superpowers/specs/2026-08-06-library-map-design.md §7 —
 change the shape there first, then here.
+
+Pool-semantics note: the run pipeline's direction pool is the flattened genre
+scope plus that genre's resolved same-genre outliers (see ``direction_pool`` in
+``__main__.py``), whereas this module's standard-genre pools contain only
+tracks whose Rekordbox tag is already a mapped ``GENRE_MAP`` member. The map is
+therefore intentionally conservative — it can under-count relative to a live
+run — because outlier resolution is a run-time concern (it needs the LLM-backed
+outlier classifier) that has no place in a static, deterministic map payload.
 """
 
 from __future__ import annotations
