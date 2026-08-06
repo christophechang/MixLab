@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Worker now claims and runs library-map jobs (#40, Milestone B).** `mixlab --worker` polls
+  `/api/mixlab/maps/claim` once the run queue is empty, downloads the job's collection to its
+  own isolated path, executes `mixlab --map --mode unplayed` as a subprocess, and pushes the
+  raw JSON stdout back via `/api/mixlab/maps/{uploadId}/result` — closing the loop between the
+  API's maps endpoints and the web app's constellation overlay. Run jobs keep priority (the map
+  queue is only checked when the run queue is empty); a non-zero exit or any unexpected error
+  after the claim best-effort reports failure via `/api/mixlab/maps/{uploadId}/fail` so the job
+  doesn't hang the API-side lease.
+
 ## v1.12.0 — 2026-08-06
 
 - **`mixlab --map` — library-map payload for the web app (#40, Milestone B).** Emits a

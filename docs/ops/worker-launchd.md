@@ -7,6 +7,9 @@ This document covers running MixLab as a persistent remote worker on a Mac mini 
 - Repository cloned to a local path (e.g. `/Users/christophechang/OpenClaw/Automations/MixLab`)
 - Python virtual environment built via `./setup.sh`
 - `.env` file populated with `MIXLAB_API_URL` and `MIXLAB_API_SECRET`
+- `.env` also populated with `CATALOG_API_URL` (and `CHANGSTA_API_KEY` if the catalog
+  requires it) — a run degrades gracefully without it, but a claimed map job
+  (`mixlab --map --mode unplayed`) hard-fails without it (see Worker behavior notes below)
 
 ## Create the launchd agent
 
@@ -34,6 +37,8 @@ Create a file at `~/Library/LaunchAgents/com.changsta.mixlab-worker.plist` with 
 		<string>YOUR-API-URL-HERE</string>
 		<key>MIXLAB_API_SECRET</key>
 		<string>YOUR-SECRET-HERE</string>
+		<key>CATALOG_API_URL</key>
+		<string>YOUR-CATALOG-API-URL-HERE</string>
 		<key>PYTHONPATH</key>
 		<string>/Users/christophechang/OpenClaw/Automations/MixLab/src</string>
 	</dict>
@@ -108,6 +113,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.changsta.mixlab-work
 - **SIGTERM graceful shutdown**: When you run `launchctl bootout`, launchd sends SIGTERM to the worker. It finishes the current claim cycle before exiting, so mid-run claims are never abandoned.
 - **API unreachable**: If the API is down, the worker's claim call fails with a transport error. It does **not** attempt to fail the run (that would fail too); it leaves the claim to lease expiry. The run is requeued when the API comes back and the claim expires.
 - **Pipeline crashes**: The worker runs `./mixlab ...` as a subprocess, so a crash in the pipeline is isolated — the loop survives and reports the failure via the fail endpoint with a log tail.
+- **Map jobs need `CATALOG_API_URL`**: A claimed map job always runs `mixlab --map --mode unplayed`, which hard-fails (exit 1, reported via `fail_map`) if `CATALOG_API_URL` is unset — unlike a run, which merely degrades to the full collection without a played-track filter.
 - **Empty polls are silent**: When the queue is empty, the worker sleeps and prints nothing (designed to avoid flooding launchd logs with heartbeat lines).
 
 ## Troubleshooting
