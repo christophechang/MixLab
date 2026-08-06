@@ -379,9 +379,10 @@ def _run_claimed_map(remote: MixLabRemote, config: WorkerConfig, upload_id: str)
     artifacts: the pipeline's stdout bytes (raw ``--map`` JSON) are the entire payload, pushed
     to the API untouched.
 
-    Unlike :func:`_run_claimed`, errors here (a download failure, a subprocess timeout, ...)
-    are not individually caught — they propagate to :func:`process_one`'s outer handler, which
-    best-effort ``fail_map``s the job the claim already secured. Always returns True: this
+    Unlike :func:`_run_claimed`, a download failure is not individually caught — it propagates
+    to :func:`process_one`'s outer handler, which best-effort ``fail_map``s the job the claim
+    already secured. A subprocess timeout *is* caught here (mirroring :func:`_run_claimed`) so
+    the bounded output tail makes it into the failure report. Always returns True: this
     function is only reached once ``claim_map`` has succeeded.
     """
     map_xml_path = config.repo_root / _MAP_XML_PATH
@@ -390,14 +391,19 @@ def _run_claimed_map(remote: MixLabRemote, config: WorkerConfig, upload_id: str)
     # Point the pipeline at the map job's isolated collection via the environment, same as
     # _run_claimed does for run jobs. argv is fixed (no manifest flags to allow-list here).
     run_env = {**os.environ, _COLLECTION_PATH_ENV: str(map_xml_path)}
-    completed = subprocess.run(  # capture_output without text=True: stdout stays raw bytes
-        [sys.executable, "-m", "mixlab", "--map", "--mode", "unplayed"],
-        capture_output=True,
-        timeout=config.run_timeout,
-        cwd=config.repo_root,
-        env=run_env,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(  # capture_output without text=True: stdout stays raw bytes
+            [sys.executable, "-m", "mixlab", "--map", "--mode", "unplayed"],
+            capture_output=True,
+            timeout=config.run_timeout,
+            cwd=config.repo_root,
+            env=run_env,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        tail = _combine_tail(_as_text(exc.stdout), _as_text(exc.stderr))
+        _safe_fail_map(remote, upload_id, error=f"mixlab --map timed out after {config.run_timeout:g}s: {tail}")
+        return True
 
     if completed.returncode != 0:
         stderr_tail = _as_text(completed.stderr)[-_TAIL_LEN:]

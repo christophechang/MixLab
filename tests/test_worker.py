@@ -490,7 +490,12 @@ def test_process_one_sync_report_without_activity_stays_silent(
 def test_process_one_empty_queue_returns_false_and_does_nothing(tmp_path: Path) -> None:
     remote = _remote()
     config = _config(tmp_path)
+    # Both queues empty: run claim 204, then the map claim 204 too — the genuine
+    # both-empty path (a respx.mock run leaves the map-claim route unmocked, an
+    # unmocked request raises, and that error would be swallowed by process_one's
+    # generic exception handler too, masking this as a false pass for the wrong reason).
     respx.post(_CLAIM_URL).mock(return_value=Response(204))
+    respx.post(_MAP_CLAIM_URL).mock(return_value=Response(204))
 
     with (
         patch("mixlab.worker.sync_down", return_value=SyncReport()) as sync_down_mock,
@@ -699,21 +704,11 @@ def test_process_one_claims_map_when_run_queue_empty(tmp_path: Path) -> None:
     assert run_mock.call_args.kwargs["env"]["MIXLAB_COLLECTION_PATH"] == str(map_xml_path)
     assert run_mock.call_args.kwargs["cwd"] == config.repo_root
     assert run_mock.call_args.kwargs["timeout"] == config.run_timeout
+    # stdout must stay raw bytes for complete_map's payload contract — text=True (or an
+    # encoding kwarg) would decode it to str and silently break that contract.
+    assert "text" not in run_mock.call_args.kwargs
+    assert "encoding" not in run_mock.call_args.kwargs
     complete_map_mock.assert_called_once_with("up-1", stdout_bytes)
-
-
-@respx.mock
-def test_process_one_returns_false_when_both_queues_empty(tmp_path: Path) -> None:
-    remote = _remote()
-    config = _config(tmp_path)
-    respx.post(_CLAIM_URL).mock(return_value=Response(204))
-    respx.post(_MAP_CLAIM_URL).mock(return_value=Response(204))
-
-    with patch("mixlab.worker.subprocess.run") as run_mock:
-        result = process_one(remote, config)
-
-    assert result is False
-    run_mock.assert_not_called()
 
 
 def test_run_claimed_map_nonzero_exit_fails_job_with_bounded_tail(tmp_path: Path) -> None:
@@ -740,6 +735,34 @@ def test_run_claimed_map_nonzero_exit_fails_job_with_bounded_tail(tmp_path: Path
     assert "e" * 4000 in call_kwargs["error"]
     # the whole error string carries only a bounded stderr tail, not the full 5000 chars
     assert "e" * 5000 not in call_kwargs["error"]
+
+
+def test_run_claimed_map_timeout_fails_job_mentioning_timeout_and_tail(tmp_path: Path) -> None:
+    remote = _remote()
+    config = _config(tmp_path)
+    map_xml_path = config.repo_root / _MAP_XML_PATH
+
+    timeout_exc = subprocess.TimeoutExpired(
+        cmd="mixlab", timeout=config.run_timeout, output=b"partial-out", stderr=b"partial-err"
+    )
+
+    with (
+        patch.object(remote, "download_collection", return_value=map_xml_path),
+        patch("mixlab.worker.subprocess.run", side_effect=timeout_exc),
+        patch.object(remote, "fail_map") as fail_map_mock,
+        patch.object(remote, "complete_map") as complete_map_mock,
+    ):
+        result = _run_claimed_map(remote, config, "up-1")
+
+    assert result is True
+    complete_map_mock.assert_not_called()
+    fail_map_mock.assert_called_once()
+    call_kwargs = fail_map_mock.call_args.kwargs
+    assert fail_map_mock.call_args.args[0] == "up-1"
+    assert "timed out" in call_kwargs["error"]
+    assert f"{config.run_timeout:g}" in call_kwargs["error"]
+    assert "partial-out" in call_kwargs["error"]
+    assert "partial-err" in call_kwargs["error"]
 
 
 @respx.mock
