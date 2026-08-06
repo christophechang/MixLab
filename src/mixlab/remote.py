@@ -148,6 +148,7 @@ _CLAIM_PATH = "/api/mixlab/worker/claim"
 _HISTORY_PATH = "/api/mixlab/history"
 _FEEDBACK_PENDING_PATH = "/api/mixlab/feedback/pending"
 _FEEDBACK_ACK_PATH = "/api/mixlab/feedback/ack"
+_CLAIM_MAP_PATH = "/api/mixlab/maps/claim"
 
 
 class MixLabRemote:
@@ -279,3 +280,36 @@ class MixLabRemote:
                 json={"eventIds": event_ids},
             )
         self._raise_for_status("POST", _FEEDBACK_ACK_PATH, response)
+
+    def claim_map(self, worker_id: str) -> str | None:
+        with httpx.Client(timeout=self._config.timeout) as client:
+            response = client.post(
+                self._url(_CLAIM_MAP_PATH),
+                headers=self._headers(),
+                json={"workerId": worker_id},
+            )
+        if response.status_code == 204:
+            return None
+        self._raise_for_status("POST", _CLAIM_MAP_PATH, response)
+        upload_id = str(response.json().get("uploadId", ""))
+        if not upload_id:
+            raise RemoteError("POST", _CLAIM_MAP_PATH, response.status_code, response.text)
+        return upload_id
+
+    def complete_map(self, upload_id: str, payload: bytes) -> None:
+        path = f"/api/mixlab/maps/{upload_id}/result"
+        headers = self._headers()
+        headers["Content-Type"] = "application/json"
+        with httpx.Client(timeout=self._config.timeout) as client:
+            response = client.post(self._url(path), headers=headers, content=payload)
+        self._raise_for_status("POST", path, response)
+
+    def fail_map(self, upload_id: str, *, error: str) -> None:
+        path = f"/api/mixlab/maps/{upload_id}/fail"
+        with httpx.Client(timeout=self._config.timeout) as client:
+            response = client.post(
+                self._url(path),
+                headers=self._headers(),
+                json={"error": error},
+            )
+        self._raise_for_status("POST", path, response)
