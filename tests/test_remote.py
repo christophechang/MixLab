@@ -377,3 +377,59 @@ def test_ack_feedback_empty_list_skips_request() -> None:
     route = respx.post(f"{_BASE}/api/mixlab/feedback/ack").mock(return_value=Response(200))
     _remote().ack_feedback([])
     assert route.call_count == 0
+
+
+# --- claim_map / complete_map / fail_map -----------------------------------------------
+
+
+@respx.mock
+def test_claim_map_returns_upload_id_on_200() -> None:
+    route = respx.post(f"{_BASE}/api/mixlab/maps/claim").mock(
+        return_value=Response(200, json={"uploadId": "up-1", "status": "running"})
+    )
+    upload_id = _remote().claim_map("w_1")
+    assert upload_id == "up-1"
+    request = route.calls.last.request
+    assert _bearer(request) == f"Bearer {_SECRET}"
+    assert json.loads(request.content) == {"workerId": "w_1"}
+
+
+@respx.mock
+def test_claim_map_returns_none_on_204() -> None:
+    respx.post(f"{_BASE}/api/mixlab/maps/claim").mock(return_value=Response(204))
+    assert _remote().claim_map("w_1") is None
+
+
+@respx.mock
+def test_claim_map_missing_upload_id_raises_remote_error() -> None:
+    respx.post(f"{_BASE}/api/mixlab/maps/claim").mock(return_value=Response(200, json={}))
+    with pytest.raises(RemoteError):
+        _remote().claim_map("w_1")
+
+
+@respx.mock
+def test_complete_map_posts_payload_bytes_verbatim() -> None:
+    payload = b'{"cells": []}'
+    route = respx.post(f"{_BASE}/api/mixlab/maps/up-1/result").mock(return_value=Response(204))
+    _remote().complete_map("up-1", payload)
+    request = route.calls.last.request
+    assert request.content == payload
+    assert request.headers.get("Content-Type") == "application/json"
+    assert _bearer(request) == f"Bearer {_SECRET}"
+
+
+@respx.mock
+def test_complete_map_non_2xx_raises() -> None:
+    respx.post(f"{_BASE}/api/mixlab/maps/up-1/result").mock(return_value=Response(404, text="not found"))
+    with pytest.raises(RemoteError) as exc_info:
+        _remote().complete_map("up-1", b"{}")
+    assert exc_info.value.status == 404
+
+
+@respx.mock
+def test_fail_map_posts_error_body() -> None:
+    route = respx.post(f"{_BASE}/api/mixlab/maps/up-1/fail").mock(return_value=Response(204))
+    _remote().fail_map("up-1", error="boom")
+    request = route.calls.last.request
+    assert _bearer(request) == f"Bearer {_SECRET}"
+    assert json.loads(request.content) == {"error": "boom"}
