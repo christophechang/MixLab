@@ -636,6 +636,19 @@ _BUILDERS = (
 )
 
 
+def enumerate_directions(pool: list[Track], *, seed: int) -> list[Direction]:
+    """Every surviving Direction candidate over ``pool``, exhaustively.
+
+    The library-map path (#40): unlike :func:`generate_directions` there is no
+    seed-derived rotation, no ``max_directions`` cap, no materialisation into
+    MixCanvas, and no run-log printing — the caller wants the full candidate
+    field with feasibility scores, deterministically ordered.
+    """
+    candidates = [direction for builder in _BUILDERS if (direction := builder(pool, seed=seed)) is not None]
+    candidates.sort(key=lambda d: (-d.feasibility, d.direction_type))
+    return candidates
+
+
 def generate_directions(
     pool: list[Track],
     tracks_by_id: dict[str, Track],

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **`mixlab --map` — library-map payload for the web app (#40, Milestone B).** Emits a
+  deterministic JSON map of concept-direction candidates per engine pool (all standard +
+  custom pools, exhaustive builder enumeration with feasibility scores, no LLM calls),
+  honouring `--mode` and the do-not-recommend playlist. Consumed by mixlab-web's
+  constellation overlay; contract lives in mixlab-web's library-map design spec §7.
+
 ## v1.11.2 — 2026-07-16
 
 - **Playlist-mode runs now get a real `conceptId`.** `run_playlist_mode` never stamped `concept_id` — only genre mode's `run()` did — so every playlist-mode `summary.json` since v1.11.1 shipped `"conceptId": ""`. The web app's Save feedback button submitted that empty id as a URL path segment (`.../concepts//feedback`), which 404'd before ever reaching the concept-lookup logic. `run_playlist_mode` now mints a `concept_id` immediately after Stage 2 returns, matching genre mode.
