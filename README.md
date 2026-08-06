@@ -200,6 +200,16 @@ In Rekordbox:
 
 Prints unplayed vs total counts per genre, sorted by availability. Only the catalog API is called (if configured). Without a catalog API, shows total collection counts.
 
+### Emit the library map (machine-readable, no LLM)
+
+```bash
+./mixlab --map                    # unplayed pools (default --mode), needs CATALOG_API_URL
+./mixlab --map --mode all         # full collection, zero network
+./mixlab --map --out map.json     # also write the payload to a file
+```
+
+Deterministic JSON on stdout: concept-direction candidates per pool (every standard + custom pool, exhaustive builder enumeration with feasibility scores), honouring `--mode`, `--seed`, and the do-not-recommend playlist. Consumed by MixLab Anywhere's library map (constellation overlay); diagnostics go to stderr so stdout stays pure JSON.
+
 ### Generate a mix report for a specific genre
 
 ```bash

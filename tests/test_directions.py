@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from mixlab.directions import (
     MAX_DIRECTION_POOL,
     MIN_DIRECTION_POOL,
+    Direction,
     _build_artist_thread,
     _build_energy_shape_first,
     _build_era_dialogue,
@@ -13,6 +16,7 @@ from mixlab.directions import (
     _build_label_spotlight,
     _build_mood_journey,
     _path_feasible,
+    enumerate_directions,
     generate_directions,
 )
 from mixlab.models import Track
@@ -429,3 +433,33 @@ def test_tempo_regimes_dense_pool_peaks_are_disjoint_and_ordered() -> None:
     # The two heavy concentrations must each anchor a regime.
     assert any(any(t.track_id == "h0" for t in r) for r in regimes)
     assert any(any(t.track_id == "d0" for t in r) for r in regimes)
+
+
+# ---------------------------------------------------------------------------
+# enumerate_directions — exhaustive candidate field for the library map (#40)
+# ---------------------------------------------------------------------------
+
+
+def test_enumerate_directions_returns_sorted_candidates() -> None:
+    pool = _rich_pool()
+    result = enumerate_directions(pool, seed=0)
+    assert result, "builders should propose at least one direction for the rich fixture pool"
+    feasibilities = [d.feasibility for d in result]
+    assert feasibilities == sorted(feasibilities, reverse=True) or [
+        (-d.feasibility, d.direction_type) for d in result
+    ] == sorted((-d.feasibility, d.direction_type) for d in result)
+    assert all(isinstance(d, Direction) for d in result)
+
+
+def test_enumerate_directions_same_seed_identical_output() -> None:
+    pool = _rich_pool()
+    first = enumerate_directions(pool, seed=7)
+    second = enumerate_directions(pool, seed=7)
+    assert [(d.direction_type, d.title, d.track_ids) for d in first] == [
+        (d.direction_type, d.title, d.track_ids) for d in second
+    ]
+
+
+def test_enumerate_directions_empty_pool_returns_empty(capsys: pytest.CaptureFixture[str]) -> None:
+    assert enumerate_directions([], seed=0) == []
+    assert capsys.readouterr().out == ""  # never prints, unlike generate_directions
