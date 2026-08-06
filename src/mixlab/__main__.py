@@ -49,6 +49,7 @@ from mixlab.html_report import (
     render_html_report,
     report_filename,
 )
+from mixlab.library_map import MapMode, build_map_payload, render_map_json
 from mixlab.llm import (
     _match_canvas_for_concept,  # noqa: PLC2701 — reused here to stamp direction_type on cards (#84)
     _parse_user_intent,  # noqa: PLC2701 — reused here for playlist-mode risk override (#54)
@@ -61,7 +62,7 @@ from mixlab.llm import (
     validate_stage2_output,
 )
 from mixlab.matcher import filter_played, filter_unplayed
-from mixlab.models import MixCanvas, MixConcept, RiskTolerance, Track, TrackMode
+from mixlab.models import MixCanvas, MixConcept, PlayedTrack, RiskTolerance, Track, TrackMode
 from mixlab.playlist_exporter import (
     export_merged_xml,
     generate_merged_xml_bytes,
@@ -749,6 +750,44 @@ async def run_export_unplayed() -> None:
     )
 
 
+def _run_map_cli(mode: str, seed: int, out: Path | None) -> int:
+    """Handle ``mixlab --map`` — emit the deterministic library-map JSON and exit.
+    No LLM calls, no Discord.
+
+    stdout carries *only* the rendered JSON, so a worker/subprocess can capture
+    it cleanly; every status/diagnostic line goes to ``sys.stderr``. ``--out``
+    is additive — it writes the same JSON to a file in addition to printing it,
+    never instead of.
+    """
+    tracks = parse_collection(_XML_PATH)
+    tracks = apply_bpm_corrections(tracks)
+    tracks, _ = _apply_do_not_recommend_filter(tracks, _XML_PATH)
+
+    played: list[PlayedTrack] = []
+    if mode != "all":
+        api_key = os.environ.get("CHANGSTA_API_KEY", "")
+        catalog_url = os.environ.get("CATALOG_API_URL", "")
+        if not catalog_url:
+            print(
+                f"ERROR: CATALOG_API_URL not set — cannot fetch catalog for --map --mode {mode}.",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            played = asyncio.run(fetch_played_tracks(api_key, catalog_url))
+        except Exception as exc:
+            print(f"ERROR: Could not fetch played tracks — aborting: {exc}", file=sys.stderr)
+            return 1
+
+    payload = build_map_payload(tracks, mode=cast(MapMode, mode), seed=seed, played=played)
+    rendered = render_map_json(payload)
+    print(rendered, end="")
+    if out is not None:
+        out.write_text(rendered, encoding="utf-8")
+        print(f"Wrote map payload: {out}", file=sys.stderr)
+    return 0
+
+
 async def run(
     genre: str | None,
     export_dir: Path | None,
@@ -1323,6 +1362,8 @@ examples:
   mixlab --feedback --concept "Title" --verdict played --notes "great opener"  record concept feedback
   mixlab --prep                       rank uncued tracks by cue-prep payoff (offline, no LLM)
   mixlab --prep --genre house --top 10  scope to house genre, top 10 targets
+  mixlab --map --mode all             emit deterministic library-map JSON (no LLM) and exit
+  mixlab --map --out map.json         also write the JSON payload to a file
   mixlab --worker                     run as a MixLab Anywhere worker (see README)
 """,
     )
@@ -1371,6 +1412,23 @@ examples:
         "--export-unplayed",
         action="store_true",
         help="Export all unplayed tracks (rekordbox minus catalog) to output/playlists/ and post to Discord. No LLM.",
+    )
+    parser.add_argument(
+        "--map",
+        action="store_true",
+        help="Emit a deterministic JSON library map (direction candidates per pool) and exit. No LLM calls.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Deterministic seed for --map direction enumeration (default 0).",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="With --map: also write the JSON payload to this path.",
     )
     parser.add_argument(
         "--min-bpm",
@@ -1577,6 +1635,9 @@ examples:
     if args.worker or args.worker_once:
         _run_worker_cli(once=args.worker_once)
         return
+
+    if args.map:
+        raise SystemExit(_run_map_cli(args.mode, args.seed, args.out))
 
     _validate_range_args(
         min_bpm=args.min_bpm,

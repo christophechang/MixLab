@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Callable, cast
 
 import pytest
@@ -125,3 +126,48 @@ def test_render_map_json_deterministic_and_parseable(map_tracks: list[Track]) ->
     assert first == second
     assert first.endswith("\n")
     assert json.loads(first)["seed"] == 3
+
+
+def test_run_map_cli_all_mode_prints_json_to_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], map_tracks: list[Track]
+) -> None:
+    import mixlab.__main__ as cli
+
+    monkeypatch.setattr(cli, "parse_collection", lambda _path: list(map_tracks))
+    monkeypatch.setattr(cli, "apply_bpm_corrections", lambda tracks: tracks)
+    monkeypatch.setattr(cli, "_apply_do_not_recommend_filter", lambda tracks, _p: (tracks, 0))
+    exit_code = cli._run_map_cli("all", 0, None)
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    payload = json.loads(captured.out)
+    assert payload["mode"] == "all"
+    assert "pools" in payload
+
+
+def test_run_map_cli_out_flag_writes_identical_file(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, map_tracks: list[Track]
+) -> None:
+    import mixlab.__main__ as cli
+
+    monkeypatch.setattr(cli, "parse_collection", lambda _path: list(map_tracks))
+    monkeypatch.setattr(cli, "apply_bpm_corrections", lambda tracks: tracks)
+    monkeypatch.setattr(cli, "_apply_do_not_recommend_filter", lambda tracks, _p: (tracks, 0))
+    target = tmp_path / "map.json"
+    assert cli._run_map_cli("all", 0, target) == 0
+    assert target.read_text() == capsys.readouterr().out
+
+
+def test_run_map_cli_unplayed_mode_without_catalog_url_fails_clearly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], map_tracks: list[Track]
+) -> None:
+    import mixlab.__main__ as cli
+
+    monkeypatch.setattr(cli, "parse_collection", lambda _path: list(map_tracks))
+    monkeypatch.setattr(cli, "apply_bpm_corrections", lambda tracks: tracks)
+    monkeypatch.setattr(cli, "_apply_do_not_recommend_filter", lambda tracks, _p: (tracks, 0))
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    exit_code = cli._run_map_cli("unplayed", 0, None)
+    captured = capsys.readouterr()
+    assert exit_code != 0
+    assert captured.out == ""
+    assert "CATALOG_API_URL" in captured.err
