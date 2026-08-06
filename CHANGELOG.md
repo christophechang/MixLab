@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.13.0 — 2026-08-06
 
 - **Worker now claims and runs library-map jobs (#40, Milestone B).** `mixlab --worker` polls
   `/api/mixlab/maps/claim` once the run queue is empty, downloads the job's collection to its
