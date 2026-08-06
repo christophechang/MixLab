@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.12.0 — 2026-08-06
 
 - **`mixlab --map` — library-map payload for the web app (#40, Milestone B).** Emits a
   deterministic JSON map of concept-direction candidates per engine pool (all standard +
