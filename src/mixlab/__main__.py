@@ -783,7 +783,14 @@ def _run_map_cli(mode: str, seed: int, out: Path | None) -> int:
     rendered = render_map_json(payload)
     print(rendered, end="")
     if out is not None:
-        out.write_text(rendered, encoding="utf-8")
+        try:
+            out.write_text(rendered, encoding="utf-8")
+        except OSError as exc:
+            # The JSON payload is already on stdout — a worker that captured it has what
+            # it needs. Report the write failure on stderr without a traceback rather
+            # than letting it escape uncaught.
+            print(f"ERROR: Could not write map payload to {out}: {exc}", file=sys.stderr)
+            return 1
         print(f"Wrote map payload: {out}", file=sys.stderr)
     return 0
 

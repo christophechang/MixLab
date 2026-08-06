@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import httpx
 
 from mixlab.models import PlayedTrack
@@ -40,7 +42,10 @@ async def fetch_played_tracks(api_key: str = "", base_url: str = "") -> list[Pla
                 break
             page += 1
 
-    print(f"Fetched {len(all_tracks)} played tracks from API ({page} page(s)).", flush=True)
+    # stderr, not stdout: ``mixlab --map`` (any mode) requires stdout to carry only the
+    # rendered JSON payload — a worker/subprocess parses captured stdout as JSON — and
+    # this function is shared by that path via ``_run_map_cli``.
+    print(f"Fetched {len(all_tracks)} played tracks from API ({page} page(s)).", file=sys.stderr, flush=True)
     return all_tracks
 
 

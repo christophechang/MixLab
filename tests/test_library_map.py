@@ -171,3 +171,53 @@ def test_run_map_cli_unplayed_mode_without_catalog_url_fails_clearly(
     assert exit_code != 0
     assert captured.out == ""
     assert "CATALOG_API_URL" in captured.err
+
+
+def test_run_map_cli_unplayed_mode_emits_pure_json_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], map_tracks: list[Track]
+) -> None:
+    """Regression for the --map contract: stdout must be *only* the rendered JSON, even
+    in the default (unplayed) mode, which fetches played tracks from the catalog API.
+    ``fetch_played_tracks`` used to print a progress line to stdout ahead of the
+    payload — the worker capturing stdout for JSON.parse would fail on that line.
+    """
+    import mixlab.__main__ as cli
+
+    monkeypatch.setattr(cli, "parse_collection", lambda _path: list(map_tracks))
+    monkeypatch.setattr(cli, "apply_bpm_corrections", lambda tracks: tracks)
+    monkeypatch.setattr(cli, "_apply_do_not_recommend_filter", lambda tracks, _p: (tracks, 0))
+    monkeypatch.setenv("CATALOG_API_URL", "https://api.changsta.com")
+    monkeypatch.setenv("CHANGSTA_API_KEY", "test-key")
+
+    async def _fake_fetch_played_tracks(api_key: str, base_url: str) -> list[PlayedTrack]:
+        return []
+
+    monkeypatch.setattr(cli, "fetch_played_tracks", _fake_fetch_played_tracks)
+
+    exit_code = cli._run_map_cli("unplayed", 0, None)
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    payload = json.loads(captured.out)  # raises if anything precedes/follows the JSON
+    assert payload["mode"] == "unplayed"
+
+
+def test_run_map_cli_out_write_failure_reports_stderr_keeps_stdout_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, map_tracks: list[Track]
+) -> None:
+    """F2: a failing ``--out`` write must not raise an uncaught traceback after the JSON
+    payload has already gone to stdout — it should report clearly on stderr and exit 1,
+    leaving stdout as pure, already-emitted JSON.
+    """
+    import mixlab.__main__ as cli
+
+    monkeypatch.setattr(cli, "parse_collection", lambda _path: list(map_tracks))
+    monkeypatch.setattr(cli, "apply_bpm_corrections", lambda tracks: tracks)
+    monkeypatch.setattr(cli, "_apply_do_not_recommend_filter", lambda tracks, _p: (tracks, 0))
+    target = tmp_path / "does-not-exist" / "map.json"
+
+    exit_code = cli._run_map_cli("all", 0, target)
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert str(target) in captured.err
+    payload = json.loads(captured.out)
+    assert payload["mode"] == "all"
