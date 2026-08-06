@@ -43,6 +43,10 @@ _HISTORY_REL_PATH = Path(".mixlab/concept-history.json")
 # pipeline is pointed here via MIXLAB_COLLECTION_PATH on the subprocess env.
 _DEFAULT_XML_PATH = ".mixlab/worker-collection.xml"
 
+# Where the worker downloads a claimed map job's collection. Its own path — never
+# _DEFAULT_XML_PATH (run jobs) or the local import/rekordbox.xml — same reasoning as above.
+_MAP_XML_PATH = ".mixlab/worker-map-collection.xml"
+
 # Env var the pipeline reads to override its input collection path (see
 # ``mixlab.__main__._XML_PATH``).
 _COLLECTION_PATH_ENV = "MIXLAB_COLLECTION_PATH"
@@ -359,20 +363,71 @@ def _run_claimed(remote: MixLabRemote, config: WorkerConfig, manifest: RunManife
     return True
 
 
+def _safe_fail_map(remote: MixLabRemote, upload_id: str, *, error: str) -> None:
+    """Report a map job failure, swallowing (and logging) any error from ``fail_map`` itself."""
+    try:
+        remote.fail_map(upload_id, error=error)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:  # fail_map() is best-effort; the map job is already lost
+        print(f"worker: fail_map() for map job {upload_id} errored: {exc!r}", file=sys.stderr)
+
+
+def _run_claimed_map(remote: MixLabRemote, config: WorkerConfig, upload_id: str) -> bool:
+    """Execute a single already-claimed map job. Mirrors :func:`_run_claimed`'s subprocess
+    discipline but the cycle is much smaller — no manifest, no history sync, no report/summary
+    artifacts: the pipeline's stdout bytes (raw ``--map`` JSON) are the entire payload, pushed
+    to the API untouched.
+
+    Unlike :func:`_run_claimed`, errors here (a download failure, a subprocess timeout, ...)
+    are not individually caught — they propagate to :func:`process_one`'s outer handler, which
+    best-effort ``fail_map``s the job the claim already secured. Always returns True: this
+    function is only reached once ``claim_map`` has succeeded.
+    """
+    map_xml_path = config.repo_root / _MAP_XML_PATH
+    remote.download_collection(upload_id, map_xml_path)
+
+    # Point the pipeline at the map job's isolated collection via the environment, same as
+    # _run_claimed does for run jobs. argv is fixed (no manifest flags to allow-list here).
+    run_env = {**os.environ, _COLLECTION_PATH_ENV: str(map_xml_path)}
+    completed = subprocess.run(  # capture_output without text=True: stdout stays raw bytes
+        [sys.executable, "-m", "mixlab", "--map", "--mode", "unplayed"],
+        capture_output=True,
+        timeout=config.run_timeout,
+        cwd=config.repo_root,
+        env=run_env,
+        check=False,
+    )
+
+    if completed.returncode != 0:
+        stderr_tail = _as_text(completed.stderr)[-_TAIL_LEN:]
+        _safe_fail_map(remote, upload_id, error=f"mixlab --map exited {completed.returncode}: {stderr_tail}")
+        return True
+
+    remote.complete_map(upload_id, completed.stdout)
+    print(f"map job {upload_id}: completed", file=sys.stderr)
+    return True
+
+
 def process_one(remote: MixLabRemote, config: WorkerConfig) -> bool:
     """Run one claim cycle. Returns True when a job was claimed (and completed/failed),
-    False when the queue was empty or the API was unreachable.
+    False when both queues were empty or the API was unreachable.
 
-    Nothing escapes except ``KeyboardInterrupt``/``SystemExit``: an unexpected error is
-    logged, a best-effort ``fail`` is attempted when a job was claimed, and the loop
-    keeps running.
+    Runs keep priority: the map queue is only checked once the run queue is empty. Nothing
+    escapes except ``KeyboardInterrupt``/``SystemExit``: an unexpected error is logged, a
+    best-effort ``fail``/``fail_map`` is attempted for whichever job kind was claimed, and
+    the loop keeps running.
     """
     manifest: RunManifest | None = None
+    map_upload_id: str | None = None
     try:
         manifest = remote.claim(config.worker_id)
-        if manifest is None:
+        if manifest is not None:
+            return _run_claimed(remote, config, manifest)
+        map_upload_id = remote.claim_map(config.worker_id)
+        if map_upload_id is None:
             return False
-        return _run_claimed(remote, config, manifest)
+        return _run_claimed_map(remote, config, map_upload_id)
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as exc:  # the loop must survive any pipeline/API surprise
@@ -381,6 +436,9 @@ def process_one(remote: MixLabRemote, config: WorkerConfig) -> bool:
             _safe_fail(
                 remote, manifest.run_id, error=f"worker error: {exc!r}", log_tail=traceback.format_exc()[-_TAIL_LEN:]
             )
+            return True
+        if map_upload_id is not None:
+            _safe_fail_map(remote, map_upload_id, error=f"worker error: {exc!r}")
             return True
         return False
 

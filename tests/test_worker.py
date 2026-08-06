@@ -14,9 +14,11 @@ from mixlab.__main__ import main
 from mixlab.remote import MixLabRemote, RemoteConfig
 from mixlab.sync import SyncReport
 from mixlab.worker import (
+    _MAP_XML_PATH,
     WorkerConfig,
     WorkerFlagError,
     _resolve_optional_export,
+    _run_claimed_map,
     build_argv,
     process_one,
     run_worker,
@@ -26,6 +28,7 @@ _BASE = "https://mixlab-api.example.com"
 _SECRET = "test-secret"
 
 _CLAIM_URL = f"{_BASE}/api/mixlab/worker/claim"
+_MAP_CLAIM_URL = f"{_BASE}/api/mixlab/maps/claim"
 
 
 def _remote() -> MixLabRemote:
@@ -71,6 +74,14 @@ def _manifest_dict(
 
 
 def _completed(*, returncode: int = 0, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=["python"], returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def _completed_bytes(
+    *, returncode: int = 0, stdout: bytes = b"", stderr: bytes = b""
+) -> subprocess.CompletedProcess[bytes]:
+    # Map jobs run without text=True — stdout/stderr come back as bytes (the payload
+    # contract requires the raw stdout bytes, untouched, to reach complete_map).
     return subprocess.CompletedProcess(args=["python"], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
@@ -633,6 +644,122 @@ def test_process_one_unexpected_error_in_body_best_effort_fails_loop_safe(tmp_pa
 
     assert result is True  # a job was claimed, so the run is consumed
     assert fail_route.called  # generic handler attempted a best-effort fail
+
+
+# ===========================================================================
+# process_one / _run_claimed_map — map-job cycle
+# ===========================================================================
+
+
+@respx.mock
+def test_process_one_prefers_run_queue_over_maps(tmp_path: Path) -> None:
+    remote = _remote()
+    config = _config(tmp_path)
+    respx.post(_CLAIM_URL).mock(return_value=Response(200, json=_manifest_dict(flags={"genre": "house"})))
+    respx.get(f"{_BASE}/api/mixlab/uploads/u1").mock(
+        return_value=Response(200, content=gzip.compress(b"<COLLECTION/>"))
+    )
+    respx.post(f"{_BASE}/api/mixlab/runs/r1/complete").mock(return_value=Response(200))
+    stdout = _write_artifacts(tmp_path)
+
+    with (
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
+        patch("mixlab.worker.sync_up"),
+        patch("mixlab.worker.subprocess.run", return_value=_completed(stdout=stdout)),
+        patch.object(remote, "claim_map") as claim_map_mock,
+    ):
+        result = process_one(remote, config)
+
+    assert result is True
+    claim_map_mock.assert_not_called()
+
+
+@respx.mock
+def test_process_one_claims_map_when_run_queue_empty(tmp_path: Path) -> None:
+    remote = _remote()
+    config = _config(tmp_path)
+    respx.post(_CLAIM_URL).mock(return_value=Response(204))
+    respx.post(_MAP_CLAIM_URL).mock(return_value=Response(200, json={"uploadId": "up-1"}))
+
+    map_xml_path = config.repo_root / _MAP_XML_PATH
+    stdout_bytes = b'{"cells": []}'
+
+    with (
+        patch.object(remote, "download_collection", return_value=map_xml_path) as download_mock,
+        patch("mixlab.worker.subprocess.run", return_value=_completed_bytes(stdout=stdout_bytes)) as run_mock,
+        patch.object(remote, "complete_map") as complete_map_mock,
+    ):
+        result = process_one(remote, config)
+
+    assert result is True
+    download_mock.assert_called_once_with("up-1", map_xml_path)
+    run_argv = run_mock.call_args.args[0]
+    assert run_argv[:3] == [run_argv[0], "-m", "mixlab"]
+    assert run_argv[3:] == ["--map", "--mode", "unplayed"]
+    assert run_mock.call_args.kwargs["env"]["MIXLAB_COLLECTION_PATH"] == str(map_xml_path)
+    assert run_mock.call_args.kwargs["cwd"] == config.repo_root
+    assert run_mock.call_args.kwargs["timeout"] == config.run_timeout
+    complete_map_mock.assert_called_once_with("up-1", stdout_bytes)
+
+
+@respx.mock
+def test_process_one_returns_false_when_both_queues_empty(tmp_path: Path) -> None:
+    remote = _remote()
+    config = _config(tmp_path)
+    respx.post(_CLAIM_URL).mock(return_value=Response(204))
+    respx.post(_MAP_CLAIM_URL).mock(return_value=Response(204))
+
+    with patch("mixlab.worker.subprocess.run") as run_mock:
+        result = process_one(remote, config)
+
+    assert result is False
+    run_mock.assert_not_called()
+
+
+def test_run_claimed_map_nonzero_exit_fails_job_with_bounded_tail(tmp_path: Path) -> None:
+    remote = _remote()
+    config = _config(tmp_path)
+    map_xml_path = config.repo_root / _MAP_XML_PATH
+
+    oversized = _completed_bytes(returncode=1, stdout=b"", stderr=b"e" * 5000)
+
+    with (
+        patch.object(remote, "download_collection", return_value=map_xml_path),
+        patch("mixlab.worker.subprocess.run", return_value=oversized),
+        patch.object(remote, "fail_map") as fail_map_mock,
+        patch.object(remote, "complete_map") as complete_map_mock,
+    ):
+        result = _run_claimed_map(remote, config, "up-1")
+
+    assert result is True
+    complete_map_mock.assert_not_called()
+    fail_map_mock.assert_called_once()
+    call_kwargs = fail_map_mock.call_args.kwargs
+    assert fail_map_mock.call_args.args[0] == "up-1"
+    assert "mixlab --map exited 1" in call_kwargs["error"]
+    assert "e" * 4000 in call_kwargs["error"]
+    # the whole error string carries only a bounded stderr tail, not the full 5000 chars
+    assert "e" * 5000 not in call_kwargs["error"]
+
+
+@respx.mock
+def test_process_one_map_claim_unexpected_error_best_effort_fails_map(tmp_path: Path) -> None:
+    remote = _remote()
+    config = _config(tmp_path)
+    respx.post(_CLAIM_URL).mock(return_value=Response(204))
+    respx.post(_MAP_CLAIM_URL).mock(return_value=Response(200, json={"uploadId": "up-1"}))
+
+    with (
+        patch.object(remote, "download_collection", side_effect=RuntimeError("disk full")),
+        patch("mixlab.worker.subprocess.run") as run_mock,
+        patch.object(remote, "fail_map") as fail_map_mock,
+    ):
+        result = process_one(remote, config)
+
+    assert result is True
+    run_mock.assert_not_called()
+    fail_map_mock.assert_called_once()
+    assert fail_map_mock.call_args.args[0] == "up-1"
 
 
 # ===========================================================================
