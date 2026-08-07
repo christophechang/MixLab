@@ -8,6 +8,7 @@ import pytest
 import respx
 from httpx import Response
 
+from mixlab import llm
 from mixlab.models import (
     CanvasRoleCandidates,
     CanvasScore,
@@ -6050,3 +6051,42 @@ def test_format_canvas_section_includes_intro_outro_token_when_mix_points_presen
     line2 = next(text_line for text_line in section.splitlines() if "Artist_2 —" in text_line)
     assert "intro:" not in line2
     assert "outro:" not in line2
+
+
+# ---------------------------------------------------------------------------
+# Concept titles must not be built from DJ mechanics (operator feedback 2026-08-07)
+# ---------------------------------------------------------------------------
+
+
+def _concept(title: str) -> MixConcept:
+    return MixConcept(title=title, mood="dark", track_ids=["1", "2", "3"])
+
+
+def test_naming_lenses_bank_carries_no_mechanics_lens() -> None:
+    """No lens may steer titles toward BPM numbers, keys, or booth equipment."""
+    joined = " ".join(llm._NAMING_LENSES).lower()
+    for banned in ("bpm", "camelot", "fader", "a year"):
+        assert banned not in joined, f"lens bank still steers toward {banned!r}"
+
+
+def test_naming_lenses_block_states_the_mechanics_ban() -> None:
+    block = llm._naming_lenses_block(7)
+    assert "BPM" in block and "equipment" in block.lower()
+
+
+def test_mechanics_title_warning_flags_bpm_number_and_equipment() -> None:
+    concepts = [
+        _concept("The 139 Dip"),
+        _concept("Fader Down at Six"),
+        _concept("Slink Mechanics"),
+    ]
+    warning = llm._mechanics_title_warning(concepts)
+    assert warning is not None
+    assert "The 139 Dip" in warning
+    assert "Fader Down at Six" in warning
+    assert "Slink Mechanics" not in warning
+
+
+def test_mechanics_title_warning_flags_camelot_codes_silent_when_clean() -> None:
+    assert llm._mechanics_title_warning([_concept("8A Sunrise")]) is not None
+    assert llm._mechanics_title_warning([_concept("Warm Static"), _concept("Last Bus Home")]) is None

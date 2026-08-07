@@ -798,13 +798,12 @@ _NAMING_LENSES: tuple[str, ...] = (
     "fuse two artist or title words from the pool into one invented portmanteau word",
     "deliberately mishear a lyric or title from the pool and write down the wrong version",
     "use scene slang or studio jargon from the pool's dominant production era",
-    "name a physical object that would be in the booth or on the floor during this exact set",
+    "name a physical object from the dancefloor, the queue, or the walk home — never the DJ equipment",
     "use weather or temperature as a verb, not an adjective",
     "a fragment of overheard smoking-area conversation — first person, mid-sentence",
     "a night-transit reference — last train, night bus route, taxi rank — matched to the set's energy",
     "something from a DJ's phone notes at 4am: cryptic, personal, no explanation",
     "the cadence of a white-label etching or dubplate scrawl — terse, initials, studio shorthand",
-    "a number that means something inside the set (a year, a BPM only insiders would clock) worn as a name",
 )
 
 
@@ -844,7 +843,9 @@ def _naming_lenses_block(seed: int) -> str:
         "concept name in this response; name any remaining concepts with distinct "
         "techniques of your own. At most ONE name in the whole response may lift words "
         "from its own track list; every other name must build from material outside "
-        "the pool:\n" + lines
+        "the pool. Never build a title from DJ mechanics: no BPM numbers, no musical "
+        "keys or Camelot codes, no mixing equipment or moves (faders, EQs, blends, "
+        "cues). Name the feeling, the place, the image — never the craft:\n" + lines
     )
 
 
@@ -870,7 +871,8 @@ You titled these mix concepts moments ago, but every title listed below is alrea
 existing mix or an earlier run. Provide a NEW title for each concept: 2-4 words, keeping the \
 concept's character (its mood and thesis are provided), built with a different naming technique. \
 The new title must not appear in the forbidden list and must not share a distinctive word with \
-any entry in it, nor with the other new titles.
+any entry in it, nor with the other new titles. Never build a title from DJ mechanics: no BPM \
+numbers, no keys or Camelot codes, no equipment or mixing moves.
 
 Respond ONLY with a JSON array, no fences, no prose:
 [{"old_title": "...", "new_title": "..."}]\
@@ -1135,6 +1137,25 @@ def _ampersand_family_warning(concepts: list[MixConcept]) -> str | None:
     return None
 
 
+_MECHANICS_TITLE_RE = re.compile(
+    r"\b(?:1[0-9]{2})\b"  # three-digit numbers in tempo territory (100-199)
+    r"|\b\d{1,2}[ab]\b"  # camelot codes (8a, 12b)
+    r"|\b(?:bpm|fader|faders|crossfade|crossfader|eq|eqs|cue|cues|deck|decks|mixer)\b",
+    re.IGNORECASE,
+)
+
+
+def _mechanics_title_warning(concepts: list[MixConcept]) -> str | None:
+    """Warn when a concept title is built from DJ mechanics — BPM numbers, Camelot
+    codes, or equipment vocabulary (operator feedback 2026-08-07: name the feeling,
+    never the craft)."""
+    offenders = [c.title for c in concepts if _MECHANICS_TITLE_RE.search(c.title)]
+    if offenders:
+        titles_str = ", ".join(f"'{t}'" for t in offenders)
+        return f"{len(offenders)} concept title(s) built from DJ mechanics ({titles_str}) — name the feeling, not the craft"
+    return None
+
+
 def _anchor_lift_warning(concepts: list[MixConcept], tracks_by_id: dict[str, Track]) -> str | None:
     """Warn when more than one concept title is lifted from its own tracks' title/artist/label."""
     lifted_titles: list[str] = []
@@ -1172,6 +1193,9 @@ def _flag_name_families(
     warnings: list[str] = []
     warnings.extend(_history_echo_warnings(concepts, used_mix_names or []))
     warnings.extend(_within_run_shared_word_warnings(concepts))
+    mechanics_warning = _mechanics_title_warning(concepts)
+    if mechanics_warning is not None:
+        warnings.append(mechanics_warning)
     ampersand_warning = _ampersand_family_warning(concepts)
     if ampersand_warning is not None:
         warnings.append(ampersand_warning)
