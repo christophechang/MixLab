@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.13.1 — 2026-08-07
+
+- **Worker log lines carry timestamps.** Every line the worker itself writes (online banner,
+  sync reports, map-job status, transport and unexpected-error reports) is now prefixed
+  `[YYYY-MM-DD HH:MM:SS]`. During the 2026-08-07 network outage the untimestamped error log
+  made it impossible to tell live failures from historical noise without file-mtime forensics;
+  outage windows are now readable straight from the log.
+
 ## v1.13.0 — 2026-08-06
 
 - **Worker now claims and runs library-map jobs (#40, Milestone B).** `mixlab --worker` polls
