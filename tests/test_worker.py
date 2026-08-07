@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -10,6 +11,7 @@ import pytest
 import respx
 from httpx import Response
 
+import mixlab.worker as worker_module
 from mixlab.__main__ import main
 from mixlab.remote import MixLabRemote, RemoteConfig
 from mixlab.sync import SyncReport
@@ -911,3 +913,36 @@ def test_main_worker_poll_seconds_env_passed_through(monkeypatch: pytest.MonkeyP
         main()
 
     assert run_worker_mock.call_args.kwargs["poll_seconds"] == 12.0
+
+
+# ===========================================================================
+# _log — timestamped worker log lines
+# ===========================================================================
+
+_TS_PREFIX_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
+
+
+def test_log_prefixes_stdout_lines_with_timestamp(capsys: pytest.CaptureFixture[str]) -> None:
+    worker_module._log("hello from the worker")
+    out = capsys.readouterr().out
+    assert "hello from the worker" in out
+    assert _TS_PREFIX_RE.match(out), f"no timestamp prefix on stdout line: {out!r}"
+
+
+def test_log_err_prefixes_stderr_lines_with_timestamp(capsys: pytest.CaptureFixture[str]) -> None:
+    worker_module._log("something broke", err=True)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert _TS_PREFIX_RE.match(captured.err), f"no timestamp prefix on stderr line: {captured.err!r}"
+
+
+@respx.mock
+def test_process_one_error_line_carries_timestamp(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    remote = _remote()
+    config = _config(tmp_path)
+    respx.post(_CLAIM_URL).mock(side_effect=RuntimeError("api exploded"))
+
+    assert process_one(remote, config) is False
+    err = capsys.readouterr().err
+    assert "unexpected error in process_one" in err
+    assert _TS_PREFIX_RE.match(err), f"no timestamp prefix on error line: {err!r}"

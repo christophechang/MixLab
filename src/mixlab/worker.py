@@ -66,6 +66,12 @@ _EXPORT_PREFIX = "Exported:"
 _EXPORT_REL_DIR = Path("output/worker-export")
 
 
+def _log(message: str, *, err: bool = False) -> None:
+    """Worker log line with a local-time stamp — outage forensics need to know *when*."""
+    stamped = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+    print(stamped, file=sys.stderr if err else sys.stdout, flush=True)
+
+
 class WorkerFlagError(ValueError):
     """Raised when a run manifest carries a flag the worker refuses to map to argv."""
 
@@ -220,7 +226,7 @@ def _safe_fail(remote: MixLabRemote, run_id: str, *, error: str, log_tail: str) 
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:  # fail() is best-effort; the run is already lost
-        print(f"worker: fail() for run {run_id} errored: {exc!r}", file=sys.stderr)
+        _log(f"worker: fail() for run {run_id} errored: {exc!r}", err=True)
 
 
 def _resolve_artifact(stdout: str, prefix: str, repo_root: Path) -> Path:
@@ -273,7 +279,7 @@ def _run_claimed(remote: MixLabRemote, config: WorkerConfig, manifest: RunManife
     try:
         sync_report = sync_down(remote, history_path)
     except RemoteError as exc:
-        print(f"worker: sync_down transport error; leaving run {run_id} to lease expiry: {exc}", file=sys.stderr)
+        _log(f"worker: sync_down transport error; leaving run {run_id} to lease expiry: {exc}", err=True)
         return False
     except Exception as exc:  # any non-transport failure is reportable
         _safe_fail(remote, run_id, error=f"sync_down failed: {exc}", log_tail=traceback.format_exc()[-_TAIL_LEN:])
@@ -281,13 +287,13 @@ def _run_claimed(remote: MixLabRemote, config: WorkerConfig, manifest: RunManife
     if sync_report.applied or sync_report.skipped or sync_report.acked:
         # Surface feedback application in the launchd stdout log — the smoke runbook
         # (docs/ops/anywhere-smoke.md step 7) greps for this line. Quiet when nothing synced.
-        print(sync_report, flush=True)
+        _log(str(sync_report))
 
     # Step 3 — download the collection. Same failure taxonomy as step 2.
     try:
         remote.download_collection(manifest.upload_id, config.xml_path)
     except RemoteError as exc:
-        print(f"worker: download transport error; leaving run {run_id} to lease expiry: {exc}", file=sys.stderr)
+        _log(f"worker: download transport error; leaving run {run_id} to lease expiry: {exc}", err=True)
         return False
     except Exception as exc:  # any non-transport failure is reportable
         _safe_fail(
@@ -358,7 +364,7 @@ def _run_claimed(remote: MixLabRemote, config: WorkerConfig, manifest: RunManife
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:  # run already complete; history reconciles next cycle
-        print(f"worker: sync_up after complete failed (run {run_id} already complete): {exc}", file=sys.stderr)
+        _log(f"worker: sync_up after complete failed (run {run_id} already complete): {exc}", err=True)
 
     return True
 
@@ -370,7 +376,7 @@ def _safe_fail_map(remote: MixLabRemote, upload_id: str, *, error: str) -> None:
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:  # fail_map() is best-effort; the map job is already lost
-        print(f"worker: fail_map() for map job {upload_id} errored: {exc!r}", file=sys.stderr)
+        _log(f"worker: fail_map() for map job {upload_id} errored: {exc!r}", err=True)
 
 
 def _run_claimed_map(remote: MixLabRemote, config: WorkerConfig, upload_id: str) -> bool:
@@ -411,7 +417,7 @@ def _run_claimed_map(remote: MixLabRemote, config: WorkerConfig, upload_id: str)
         return True
 
     remote.complete_map(upload_id, completed.stdout)
-    print(f"map job {upload_id}: completed", file=sys.stderr)
+    _log(f"map job {upload_id}: completed", err=True)
     return True
 
 
@@ -437,7 +443,7 @@ def process_one(remote: MixLabRemote, config: WorkerConfig) -> bool:
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as exc:  # the loop must survive any pipeline/API surprise
-        print(f"worker: unexpected error in process_one: {exc!r}", file=sys.stderr)
+        _log(f"worker: unexpected error in process_one: {exc!r}", err=True)
         if manifest is not None:
             _safe_fail(
                 remote, manifest.run_id, error=f"worker error: {exc!r}", log_tail=traceback.format_exc()[-_TAIL_LEN:]
@@ -479,10 +485,7 @@ def run_worker(remote: MixLabRemote, config: WorkerConfig, *, poll_seconds: floa
         process_one(remote, config)
         return 0
 
-    print(
-        f"Worker online — polling {remote.base_url} every {poll_seconds:g}s (worker_id={config.worker_id})",
-        flush=True,
-    )
+    _log(f"Worker online — polling {remote.base_url} every {poll_seconds:g}s (worker_id={config.worker_id})")
 
     stop = _StopSignal()
     previous: dict[int, object] = {}
