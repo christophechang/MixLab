@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.13.2 — 2026-08-07
+
+- **Concept titles stop naming the craft.** Operator feedback: titles built from DJ
+  mechanics ("The 139 Dip", "Fader Down at Six") are unwanted — nobody cares about the
+  BPM or the fader. The number/BPM naming lens is gone, the booth-object lens now points
+  at the dancefloor rather than the equipment, both Stage 2 prompts carry an explicit
+  ban (no BPM numbers, no keys/Camelot codes, no equipment or mixing moves), and a
+  deterministic warn-only guard flags any mechanics-built title that slips through.
+
 ## v1.13.1 — 2026-08-07
 
 - **Worker log lines carry timestamps.** Every line the worker itself writes (online banner,
