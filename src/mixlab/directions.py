@@ -804,10 +804,14 @@ def _named_candidates(pool: list[Track], *, seed: int, collection: list[Track] |
     point shared by the map path and the run path (previously duplicated)."""
     candidates: list[Direction] = []
     for builder in _BUILDERS:
-        if builder is _build_label_spotlight:
-            direction = builder(pool, seed=seed, collection=collection)
-        else:
-            direction = builder(pool, seed=seed)
+        # Dispatch by name, not through the union-typed loop variable: only
+        # label_spotlight takes `collection`, and mypy (rightly) rejects the
+        # extra kwarg on the tuple's joined callable type.
+        direction = (
+            _build_label_spotlight(pool, seed=seed, collection=collection)
+            if builder is _build_label_spotlight
+            else builder(pool, seed=seed)
+        )
         if direction is not None:
             candidates.append(direction)
     return candidates
