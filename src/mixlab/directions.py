@@ -636,6 +636,12 @@ _BUILDERS = (
 )
 
 
+def _named_candidates(pool: list[Track], *, seed: int) -> list[Direction]:
+    """Every surviving named-builder candidate, unsorted. Single enumeration
+    point shared by the map path and the run path (previously duplicated)."""
+    return [direction for builder in _BUILDERS if (direction := builder(pool, seed=seed)) is not None]
+
+
 def enumerate_directions(pool: list[Track], *, seed: int) -> list[Direction]:
     """Every surviving Direction candidate over ``pool``, exhaustively.
 
@@ -644,7 +650,7 @@ def enumerate_directions(pool: list[Track], *, seed: int) -> list[Direction]:
     MixCanvas, and no run-log printing — the caller wants the full candidate
     field with feasibility scores, deterministically ordered.
     """
-    candidates = [direction for builder in _BUILDERS if (direction := builder(pool, seed=seed)) is not None]
+    candidates = _named_candidates(pool, seed=seed)
     candidates.sort(key=lambda d: (-d.feasibility, d.direction_type))
     return candidates
 
@@ -670,7 +676,7 @@ def generate_directions(
     records which directions fired without threading feasibility back through the caller.
     Deterministic: same pool + same seed → identical output.
     """
-    candidates = [direction for builder in _BUILDERS if (direction := builder(pool, seed=seed)) is not None]
+    candidates = _named_candidates(pool, seed=seed)
     # One diagnostic line so non-firing builders are visible in the run log —
     # genre_traverse silently returning None took three production runs to notice.
     proposed = ", ".join(sorted(d.direction_type for d in candidates)) if candidates else "none"
