@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.14.0 — 2026-08-08
+
+- **Conjunction mining: directions the vocabulary has no name for (#53 follow-up).** Each
+  genre pool is now scanned for dense two-predicate conjunctions (label × era, tag × tempo
+  pocket, remixer × key neighbourhood, …) and the ones materially denser than chance —
+  lift ≥ 1.3 over ≥ 15 shared tracks, subsumed pairs pruned — ship as
+  `found_1`/`found_2`/`found_3` directions with their own briefs. BPM and key predicates
+  can be mined but never named, so no title or mood carries DJ mechanics (the v1.13.2
+  rule). The library map shows up to three per pool; a run materialises at most one, so a
+  discovery adds to the day's variety instead of taking it over.
+- **Direction feasibility means something again.** The old score was pool fill, BPM-path
+  viability and a type-specific signal — the first two are 1.0 for every candidate that
+  gets built, so 44 of 49 live rows landed in [0.70, 1.00] and the ranking carried almost
+  no information. Pool size and path viability are now pass/fail gates, and feasibility is
+  `0.25·freshness + 0.45·identity + 0.30·distinctiveness`: how recently the shipped tracks
+  were added (a rank percentile, so an all-unplayed pool still spreads), how strong the
+  defining idea is (per-builder renormalisation — pole balance on untruncated counts,
+  collection-relative label lift, mined lift on a log scale, fresh_crate's recency
+  concentration), and how little the shipped tracks overlap the pool's other surviving
+  directions. Named and mined candidates go through one scorer and one dedupe, so a found
+  set and a label spotlight compete on equal terms. Payload shape is unchanged;
+  `feasibility` keeps its name and 0–1 range, so mixlab-web and the API need no changes.
+
 ## v1.13.2 — 2026-08-07
 
 - **Concept titles stop naming the craft.** Operator feedback: titles built from DJ

@@ -12,6 +12,11 @@ feasibility, seed-rotates the pick so different days surface different angles, a
 materialises the survivors as :class:`~mixlab.models.MixCanvas` objects carrying a
 DIRECTION BRIEF for Stage 2.
 
+Alongside the named vocabulary sits an unnamed one: :mod:`mixlab.mining` mines the
+pool for statistically dense predicate conjunctions the vocabulary has no word for
+(``found`` rows). Both axes go through the same scorer and the same dedupe, so a
+found set competes with a label spotlight on equal terms — see :func:`_combined_field`.
+
 Everything here is pure and deterministic: same pool + same seed → byte-identical
 output. No I/O beyond the one-line-per-direction stdout note emitted by
 :func:`generate_directions` (an intentional application-layer convenience).
@@ -19,11 +24,13 @@ output. No I/O beyond the one-line-per-direction stdout note emitted by
 
 from __future__ import annotations
 
+import math
 import random
 import statistics
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from mixlab import mining
 from mixlab.clustering import _centrality_rank, build_mix_canvas, camelot_compatible
 from mixlab.models import MixCanvas, MixConcept, Track
 from mixlab.transitions import score_transition, tempo_relation
@@ -59,6 +66,18 @@ _LABEL_MIN_COUNT = 8
 _ENERGY_COVERAGE = 0.70
 _FRESH_MIN_COUNT = 10
 
+# Field-scorer weights (see _score_field). They sum to 1.0, so feasibility stays in
+# [0, 1] and the three components are directly comparable across pools.
+_W_FRESHNESS = 0.25
+_W_IDENTITY = 0.45
+_W_DISTINCT = 0.30
+_DEDUPE_JACCARD = 0.6
+
+# Mined ("found") rows are open-ended — the miner shortlists up to twelve pairs — so
+# they are capped after scoring, before they can crowd out the named vocabulary.
+_MAX_MINED_PER_POOL = 3
+_MINED_TYPE = "found"
+
 
 @dataclass(frozen=True)
 class Direction:
@@ -69,6 +88,8 @@ class Direction:
     brief: str
     feasibility: float
     thread_artist: str = ""
+    identity: float = 0.0
+    freshness: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -127,31 +148,34 @@ def _finalise(
     chosen: list[Track],
     brief: str,
     signal: float,
+    pool: list[Track],
     thread_artist: str = "",
 ) -> Direction | None:
-    """Cap/validate a candidate pool and compute its feasibility score.
+    """Cap and gate a candidate pool, emitting an *unscored* Direction.
 
-    Returns ``None`` when the pool falls below :data:`MIN_DIRECTION_POOL` after de-dup
-    and capping, or when the BPM-sorted ordering is not path-feasible. Feasibility is
-    ``0.4·pool_fill + 0.3·path_ok_ratio + 0.3·signal_strength``.
+    Gates only: returns ``None`` when the pool falls below :data:`MIN_DIRECTION_POOL`
+    after de-dup and capping, or when the BPM-sorted ordering is not path-feasible.
+    Pool size and path feasibility used to be 70% of the score, which saturated —
+    every surviving candidate is full-size and path-feasible by construction, so they
+    carried no information. They are pass/fail here and ``feasibility`` is left at 0.0
+    for :func:`_shape_field`, which owns ranking over the whole candidate field.
     """
-    pool = _dedupe(chosen)[:MAX_DIRECTION_POOL]
-    if len(pool) < MIN_DIRECTION_POOL:
+    chosen_capped = _dedupe(chosen)[:MAX_DIRECTION_POOL]
+    if len(chosen_capped) < MIN_DIRECTION_POOL:
         return None
-    ok, ratio = _path_feasible(pool)
+    ok, _ratio = _path_feasible(chosen_capped)
     if not ok:
         return None
-    pool_fill = min(len(pool) / MAX_DIRECTION_POOL, 1.0)
-    signal_clamped = min(max(signal, 0.0), 1.0)
-    feasibility = 0.4 * pool_fill + 0.3 * ratio + 0.3 * signal_clamped
     return Direction(
         direction_type=direction_type,
         title=title,
         mood=mood,
-        track_ids=[t.track_id for t in pool],
+        track_ids=[t.track_id for t in chosen_capped],
         brief=brief,
-        feasibility=round(feasibility, 4),
+        feasibility=0.0,
         thread_artist=thread_artist,
+        identity=round(min(max(signal, 0.0), 1.0), 4),
+        freshness=round(_freshness(chosen_capped, pool), 4),
     )
 
 
@@ -159,6 +183,126 @@ def _balance(a: int, b: int) -> float:
     """Symmetric balance signal: 1.0 when the two counts are equal, → 0 as they diverge."""
     hi = max(a, b)
     return min(a, b) / hi if hi else 0.0
+
+
+def _freshness(chosen: list[Track], pool: list[Track]) -> float:
+    """Median date_added count-percentile of ``chosen`` within ``pool``.
+
+    Rank-based (ISO strings sort lexicographically — no date parsing), so it
+    cannot saturate under an all-unplayed pool. Empty date_added sorts oldest.
+    """
+    if len(pool) < 2:
+        return 0.5
+    ordered = sorted(pool, key=lambda t: (t.date_added, t.track_id))
+    pct = {t.track_id: i / (len(ordered) - 1) for i, t in enumerate(ordered)}
+    return statistics.median(pct[t.track_id] for t in chosen)
+
+
+def _log_lift(ratio: float) -> float:
+    """Common identity scale for concentration ratios: 1x→0, 2x→1/3, 8x+→1."""
+    return min(math.log2(max(ratio, 1.0)) / 3.0, 1.0)
+
+
+def _jaccard(a: list[str], b: list[str]) -> float:
+    """Track-id overlap of two candidate pools: |A∩B| / |A∪B|.
+
+    Two empty pools are *identical*, not disjoint, so they score 1.0 — the metric
+    is total over any pair of id lists rather than depending on callers to filter
+    empty pools out first. (Builders and the miner both floor their pools at
+    :data:`MIN_DIRECTION_POOL`, so this is a contract guard, not a live case.)
+    """
+    sa, sb = set(a), set(b)
+    union = len(sa | sb)
+    if not union:
+        return 1.0
+    return len(sa & sb) / union
+
+
+def _rank_key(direction: Direction) -> tuple[float, str, str, tuple[str, ...], str, str, str, float, float]:
+    """Pass-1 ordering: best distinctiveness-free score first, then total tie-breaks.
+
+    Every field except ``feasibility`` (uniformly 0.0 on input — the field scorer
+    computes it) participates, so the key is a total order over the candidates and
+    the survivor of a dedupe never depends on input order. The trailing components
+    matter for mined rows in particular: they all share ``direction_type ==
+    "found"`` and two pairs over the same members can share a title too, which
+    ``(score, type, title, track_ids)`` alone cannot separate.
+    """
+    score = _W_FRESHNESS * direction.freshness + _W_IDENTITY * direction.identity
+    return (
+        -score / (_W_FRESHNESS + _W_IDENTITY),
+        direction.direction_type,
+        direction.title,
+        tuple(sorted(direction.track_ids)),
+        direction.mood,
+        direction.brief,
+        direction.thread_artist,
+        direction.identity,
+        direction.freshness,
+    )
+
+
+def _final_key(direction: Direction) -> tuple[float, str, str, tuple[str, ...], str, str, str, float, float]:
+    """Pass-2 ordering: best feasibility first, then :func:`_rank_key`'s total tie-break.
+
+    ``(-feasibility, direction_type)`` alone is NOT a total order over this field:
+    mined rows all carry ``direction_type == "found"`` until :func:`_shape_field`
+    renumbers them, so two equally-scored mined rows would be separated only by
+    sort stability. Reusing the rank key's trailing components makes the order
+    total and the output order-independent for real.
+    """
+    return (-direction.feasibility, *_rank_key(direction)[1:])
+
+
+def _rank_and_dedupe(candidates: list[Direction]) -> list[Direction]:
+    """Pass 1 of the two-pass scorer: rank on the distinctiveness-free score, drop clones.
+
+    Walks :func:`_rank_key` order (``(0.25·freshness + 0.45·identity) / 0.70``) and
+    keeps a candidate only when it overlaps every already-kept candidate at Jaccard
+    <= :data:`_DEDUPE_JACCARD`. Returns the survivors **in rank order**, still
+    unscored (``feasibility`` 0.0) — callers may drop further rows (see
+    :func:`_shape_field`'s mined cap) before pass 2 measures distinctiveness.
+    """
+    kept: list[Direction] = []
+    for cand in sorted(candidates, key=_rank_key):
+        if all(_jaccard(cand.track_ids, k.track_ids) <= _DEDUPE_JACCARD for k in kept):
+            kept.append(cand)
+    return kept
+
+
+def _score_final(field: list[Direction]) -> list[Direction]:
+    """Pass 2 of the two-pass scorer: distinctiveness and feasibility over ``field``.
+
+    Distinctiveness is measured against **exactly the rows passed in** and nothing
+    else, so the caller decides what the field is. :func:`_shape_field` passes the
+    post-dedupe *post-cap* field — the rows the operator actually sees — which is
+    what the design calls for: measuring against rows that get dropped afterwards
+    would let a capped-away row reorder the ones that ship.
+
+    Two passes rather than one because distinctiveness depends on which candidates
+    survive and survival depends on rank; scoring them together would be circular.
+    Deterministic: total sort key (:func:`_final_key`), order-independent output.
+    """
+    out: list[Direction] = []
+    for cand in field:
+        others = [k for k in field if k is not cand]
+        # A lone survivor has nothing to be distinct from: neutral 0.5 rather than a
+        # free 1.0, so a one-direction pool cannot out-score a contested field.
+        distinct = 1.0 - max(_jaccard(cand.track_ids, k.track_ids) for k in others) if others else 0.5
+        feasibility = _W_FRESHNESS * cand.freshness + _W_IDENTITY * cand.identity + _W_DISTINCT * distinct
+        out.append(replace(cand, feasibility=round(feasibility, 4)))
+    return sorted(out, key=_final_key)
+
+
+def _score_field(candidates: list[Direction]) -> list[Direction]:
+    """Both passes over ``candidates`` with no cap in between: dedupe, then score.
+
+    The uncapped composition — distinctiveness is measured against every candidate
+    that survived the clone dedupe. That is the right field only when the caller
+    ships all of them; the production path caps mined rows first and therefore calls
+    :func:`_rank_and_dedupe` and :func:`_score_final` itself (see :func:`_shape_field`).
+    """
+    return _score_final(_rank_and_dedupe(candidates))
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +334,7 @@ def _build_mood_journey(pool: list[Track], *, seed: int) -> Direction | None:
     bridge_ranked = _rank(bridge_pool)[:5]
 
     chosen = start_ranked + bridge_ranked + end_ranked
-    signal = _balance(len(start_ranked), len(end_ranked))
+    signal = _balance(len(start_tracks), len(end_tracks))
     brief = (
         f"This set is a mood journey from '{start_pole}' to '{end_pole}'. Open in the {start_pole} pole, "
         f"then move deliberately through the neutral bridge tracks, and land in the {end_pole} pole. "
@@ -205,6 +349,7 @@ def _build_mood_journey(pool: list[Track], *, seed: int) -> Direction | None:
         chosen=chosen,
         brief=brief,
         signal=signal,
+        pool=pool,
     )
 
 
@@ -263,10 +408,11 @@ def _build_era_dialogue(pool: list[Track], *, seed: int) -> Direction | None:
         chosen=old_ranked + new_ranked,
         brief=brief,
         signal=signal,
+        pool=pool,
     )
 
 
-def _build_label_spotlight(pool: list[Track], *, seed: int) -> Direction | None:
+def _build_label_spotlight(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> Direction | None:
     """A single label's scene DNA, optionally braced by adjacent-key outsiders (type index 2)."""
     label_counts = Counter(t.label for t in pool if t.label)
     qualifying = sorted(label for label, count in label_counts.items() if count >= _LABEL_MIN_COUNT)
@@ -285,7 +431,12 @@ def _build_label_spotlight(pool: list[Track], *, seed: int) -> Direction | None:
         adjacent = [t for t in non_label if dominant_key and camelot_compatible(dominant_key, t.camelot_key)]
         chosen = chosen + _rank(adjacent)[:5]
 
-    share = label_counts[label] / len(pool) if pool else 0.0
+    share_pool = label_counts[label] / len(pool) if pool else 0.0
+    if collection:
+        share_coll = sum(1 for t in collection if t.label == label) / len(collection)
+        signal = _log_lift(share_pool / share_coll) if share_coll else 0.0
+    else:
+        signal = share_pool
     brief = (
         f"This set is a label spotlight on {label}. Treat the label as the scene DNA — the reason these "
         f"records share a sound. Lean into that house style rather than smoothing it out: the coherence is the "
@@ -298,7 +449,8 @@ def _build_label_spotlight(pool: list[Track], *, seed: int) -> Direction | None:
         mood=f"{label} scene DNA",
         chosen=chosen,
         brief=brief,
-        signal=share,
+        signal=signal,
+        pool=pool,
     )
 
 
@@ -351,6 +503,7 @@ def _build_artist_thread(pool: list[Track], *, seed: int) -> Direction | None:
         chosen=thread_tracks + companions,
         brief=brief,
         signal=min(max(tightness, 0.0), 1.0),
+        pool=pool,
         thread_artist=thread_artist,
     )
 
@@ -401,6 +554,7 @@ def _build_energy_shape_first(pool: list[Track], *, seed: int) -> Direction | No
         chosen=chosen,
         brief=brief,
         signal=signal,
+        pool=pool,
     )
 
 
@@ -425,7 +579,14 @@ def _build_fresh_crate(pool: list[Track], *, seed: int) -> Direction | None:
     anchor_candidates.sort(key=lambda t: (-(t.rating or 0), -t.play_count, t.track_id))
     chosen = list(newest) + anchor_candidates[:5]
 
-    signal = min(1.0, len(newest_slice) / 15.0)
+    # Identity = recency CONCENTRATION of the shipped set, not "does the pool carry
+    # dates". The dated share (len(dated)/len(pool)) pinned at 1.0 on every real
+    # pool — Rekordbox stamps DateAdded on ~every track — which is exactly the
+    # saturation this scorer exists to remove. Rescaled from the median date-added
+    # count-percentile: 0 at or below the pool's median age, 1.0 only when the
+    # shipped set sits at the very newest end. ``chosen`` is what _finalise ships
+    # (<= 25 tracks, no duplicates by construction), so the two agree.
+    signal = max(0.0, 2 * (_freshness(chosen, pool) - 0.5))
     brief = (
         "This set is a fresh-crate debut showcase — the point is surfacing what just arrived. Frame the newest "
         "additions as discoveries worth their first play, and use the handful of grounding anchor tracks only to "
@@ -439,6 +600,7 @@ def _build_fresh_crate(pool: list[Track], *, seed: int) -> Direction | None:
         chosen=chosen,
         brief=brief,
         signal=signal,
+        pool=pool,
     )
 
 
@@ -622,6 +784,7 @@ def _build_genre_traverse(pool: list[Track], *, seed: int) -> Direction | None:
         chosen=chosen,
         brief=brief,
         signal=signal,
+        pool=pool,
     )
 
 
@@ -636,17 +799,115 @@ _BUILDERS = (
 )
 
 
-def enumerate_directions(pool: list[Track], *, seed: int) -> list[Direction]:
+def _named_candidates(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> list[Direction]:
+    """Every surviving named-builder candidate, unsorted. Single enumeration
+    point shared by the map path and the run path (previously duplicated)."""
+    candidates: list[Direction] = []
+    for builder in _BUILDERS:
+        # Dispatch by name, not through the union-typed loop variable: only
+        # label_spotlight takes `collection`, and mypy (rightly) rejects the
+        # extra kwarg on the tuple's joined callable type.
+        direction = (
+            _build_label_spotlight(pool, seed=seed, collection=collection)
+            if builder is _build_label_spotlight
+            else builder(pool, seed=seed)
+        )
+        if direction is not None:
+            candidates.append(direction)
+    return candidates
+
+
+def _is_mined(direction: Direction) -> bool:
+    """True for a mined row, before (``found``) or after (``found_1``) renumbering."""
+    return direction.direction_type.startswith(_MINED_TYPE)
+
+
+def _shape_field(candidates: list[Direction]) -> list[Direction]:
+    """The production pipeline: rank & dedupe, cap the mined rows, then score them.
+
+    Order matters and is the whole point of splitting the scorer in two:
+
+    1. :func:`_rank_and_dedupe` — pass 1, clones removed in rank order.
+    2. **Shape the mined rows** by walking that rank order: keep at most
+       :data:`_MAX_MINED_PER_POOL`, and at most one row per title (two pairs can
+       name themselves the same thing — a tag pairs with both a tempo pocket and a
+       key neighbourhood — so the higher-ranked wins). Named rows pass through
+       untouched: they are a fixed vocabulary of seven and cap themselves.
+    3. :func:`_score_final` — pass 2 over **exactly the surviving field**, so
+       distinctiveness reflects the rows that ship. Measuring it before the cap
+       would let a row that never ships reorder (or dedupe-drop) the ones that do.
+    4. Renumber ``found`` -> ``found_1``/``found_2``/... in *final* rank order, so
+       downstream consumers get stable, distinguishable direction types and
+       ``found_1`` really is the best-scoring mined row.
+    """
+    survivors: list[Direction] = []
+    seen_titles: set[str] = set()
+    mined_kept = 0
+    for cand in _rank_and_dedupe(candidates):  # pass-1 rank order
+        if cand.direction_type == _MINED_TYPE:
+            if mined_kept >= _MAX_MINED_PER_POOL or cand.title in seen_titles:
+                continue
+            mined_kept += 1
+            seen_titles.add(cand.title)
+        survivors.append(cand)
+
+    out: list[Direction] = []
+    mined_rank = 0
+    for cand in _score_final(survivors):  # final (-feasibility, ...) order
+        if cand.direction_type == _MINED_TYPE:
+            mined_rank += 1
+            cand = replace(cand, direction_type=f"{_MINED_TYPE}_{mined_rank}")
+        out.append(cand)
+    return out
+
+
+def _field_parts(
+    pool: list[Track], *, seed: int, collection: list[Track] | None = None
+) -> tuple[list[Direction], list[Direction]]:
+    """Every candidate source over ``pool``, pre-scoring: ``(named, mined)``.
+
+    THE single assembly point for the candidate field — a new source of Directions
+    is added here and nowhere else, so the map path and the run path cannot drift
+    apart on what the field contains (adding a third part changes this signature,
+    which breaks both callers loudly rather than silently skipping one).
+
+    Returned as parts rather than one list because :func:`generate_directions`
+    reports proposal counts per source in its run-log diagnostic, and those counts
+    are measured *before* scoring drops anything.
+    """
+    return _named_candidates(pool, seed=seed, collection=collection), mining.mine_pool(pool)
+
+
+def _combined_field(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> list[Direction]:
+    """The whole candidate field over ``pool``: named builders plus mined pairs.
+
+    Both axes go through the one scorer so a found set and a label spotlight are
+    ranked on the same footing (and dedupe against each other — a mined pair that
+    is really just a label's catalogue loses to, or beats, the label spotlight
+    rather than shipping alongside it).
+    """
+    named, mined = _field_parts(pool, seed=seed, collection=collection)
+    return _shape_field(named + mined)
+
+
+def enumerate_directions(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> list[Direction]:
     """Every surviving Direction candidate over ``pool``, exhaustively.
 
     The library-map path (#40): unlike :func:`generate_directions` there is no
     seed-derived rotation, no ``max_directions`` cap, no materialisation into
     MixCanvas, and no run-log printing — the caller wants the full candidate
-    field with feasibility scores, deterministically ordered.
+    field with feasibility scores, deterministically ordered. ``collection`` is the
+    whole scoped library, used by builders that measure a pool's concentration
+    against the library baseline (label_spotlight).
+
+    Named and mined rows both appear; mined ones carry ``direction_type``
+    ``found_1``..``found_{_MAX_MINED_PER_POOL}`` (the map shows the whole capped
+    field, the run path picks at most one of them).
     """
-    candidates = [direction for builder in _BUILDERS if (direction := builder(pool, seed=seed)) is not None]
-    candidates.sort(key=lambda d: (-d.feasibility, d.direction_type))
-    return candidates
+    return sorted(
+        _combined_field(pool, seed=seed, collection=collection),
+        key=lambda d: (-d.feasibility, d.direction_type),
+    )
 
 
 def generate_directions(
@@ -655,34 +916,50 @@ def generate_directions(
     *,
     seed: int,
     max_directions: int = 3,
+    collection: list[Track] | None = None,
 ) -> list[MixCanvas]:
     """Enumerate, score, seed-rotate, and materialise concept directions over ``pool``.
 
-    Each builder proposes a :class:`Direction` only when the material supports it.
-    Survivors are sorted by ``(-feasibility, direction_type)``, then rotated by a
-    seed-derived offset so different seeds/days surface different directions while the
-    strongest ones appear often. Up to ``max_directions`` are materialised as
-    :class:`~mixlab.models.MixCanvas` objects (via ``build_mix_canvas``) carrying the
-    direction's ``brief``/``direction_type``/``thread_artist``.
+    Each builder proposes a :class:`Direction` only when the material supports it and
+    the miner proposes conjunctions the vocabulary has no name for;
+    :func:`_shape_field` then dedupes clones, scores the surviving field, and caps
+    and renumbers the mined rows. Named survivors are sorted by
+    ``(-feasibility, direction_type)``, then rotated by a seed-derived offset so
+    different seeds/days surface different directions while the strongest ones appear
+    often. Mined rows do not rotate: a run ships at most one found set, always the
+    best-scoring, because they are the speculative axis. Up to ``max_directions``
+    canvases are materialised (via ``build_mix_canvas``) carrying the direction's
+    ``brief``/``direction_type``/``thread_artist``. ``collection`` is the whole scoped
+    library, used by builders that measure a pool's concentration against the library
+    baseline (label_spotlight) — pass it so the run path scores identically to the map.
 
     Prints one ``Direction: <type> — <title> (feasibility <f>)`` line per materialised
     direction to stdout — an intentional application-layer convenience so the run log
     records which directions fired without threading feasibility back through the caller.
     Deterministic: same pool + same seed → identical output.
     """
-    candidates = [direction for builder in _BUILDERS if (direction := builder(pool, seed=seed)) is not None]
+    proposals, mined_proposals = _field_parts(pool, seed=seed, collection=collection)
     # One diagnostic line so non-firing builders are visible in the run log —
     # genre_traverse silently returning None took three production runs to notice.
-    proposed = ", ".join(sorted(d.direction_type for d in candidates)) if candidates else "none"
-    print(f"Directions proposed: {proposed} ({len(candidates)}/{len(_BUILDERS)} builders)")
-    if not candidates:
+    # Measured pre-scoring: _shape_field can also drop a clone or cap a mined row,
+    # and that is not the same failure as a builder never proposing anything.
+    proposed = ", ".join(sorted(d.direction_type for d in proposals)) if proposals else "none"
+    print(f"Directions proposed: {proposed} ({len(proposals)}/{len(_BUILDERS)} builders, {len(mined_proposals)} found)")
+    field = _shape_field(proposals + mined_proposals)
+    if not field:
         return []
 
-    candidates.sort(key=lambda d: (-d.feasibility, d.direction_type))
-    rng = random.Random(seed)
-    offset = rng.randrange(len(candidates))
-    ordered = [candidates[(offset + i) % len(candidates)] for i in range(len(candidates))]
-    picked = ordered[:max_directions]
+    named = [d for d in field if not _is_mined(d)]
+    mined = [d for d in field if _is_mined(d)]
+    named.sort(key=lambda d: (-d.feasibility, d.direction_type))
+    # A run ships at most one found set — and none at all when the caller asked for
+    # no directions, which the unguarded mined[:1] would have overridden.
+    picked = mined[:1] if max_directions >= 1 else []
+    if named:
+        rng = random.Random(seed)
+        offset = rng.randrange(len(named))
+        ordered = [named[(offset + i) % len(named)] for i in range(len(named))]
+        picked += ordered[: max(max_directions - len(picked), 0)]
 
     result: list[MixCanvas] = []
     for direction in picked:
