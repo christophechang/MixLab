@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Pinned runs are now a study of the direction, not a menu around it.** Operator call:
+  when intent comes from the library map, quality beats quantity. A pinned run now ships
+  the pinned canvas plus **one** classic canvas (was five), and Stage 2 is asked for two
+  or three **contrasting readings** of the pinned direction — same spine and brief every
+  time (key tracks enforced per reading), different companions, arc, and sequencing —
+  borrowing playlist mode's practical/balanced/adventurous framing, plus at most one
+  contrast concept from the classic canvas. Non-pinned runs keep their exact prompts and
+  canvas mix.
+
 ## v1.16.0 — 2026-08-08
 
 - **Pinned directions now enforce their defining tracks.** First pinned production run
