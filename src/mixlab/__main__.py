@@ -1011,11 +1011,22 @@ async def run(
     # same-genre outliers. Directions are cross-strata by construction, so they draw from
     # this whole pool rather than any single BPM stratum.
     direction_pool = genre_unplayed_track_ids_source + genre_outliers
+    # Baseline for concentration-scored directions (label_spotlight): the whole
+    # mode-scoped pool, all genres — the run-path counterpart of the map path's
+    # `scoped` (see library_map.build_map_payload). Without it a label's identity
+    # collapses to its share of its own genre pool and the two paths disagree.
+    direction_collection = unplayed
 
     if directions == "off":
         selected_canvases = select_canvases(all_canvases, history, mode=mode, risk=risk, debug=debug)
     elif directions == "only":
-        selected_canvases = generate_directions(direction_pool, tracks_by_id, seed=effective_seed, max_directions=6)
+        selected_canvases = generate_directions(
+            direction_pool,
+            tracks_by_id,
+            seed=effective_seed,
+            max_directions=6,
+            collection=direction_collection,
+        )
         if not selected_canvases:
             print(
                 "--directions only: no feasible directions for this pool — falling back to classic canvas selection.",
@@ -1023,7 +1034,13 @@ async def run(
             )
             selected_canvases = select_canvases(all_canvases, history, mode=mode, risk=risk, debug=debug)
     else:  # "mixed"
-        direction_canvases = generate_directions(direction_pool, tracks_by_id, seed=effective_seed, max_directions=3)
+        direction_canvases = generate_directions(
+            direction_pool,
+            tracks_by_id,
+            seed=effective_seed,
+            max_directions=3,
+            collection=direction_collection,
+        )
         classic_n = max(3, 6 - len(direction_canvases))
         classic_selected = select_canvases(all_canvases, history, n=classic_n, mode=mode, risk=risk, debug=debug)
         selected_canvases = classic_selected + direction_canvases

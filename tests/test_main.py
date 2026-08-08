@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import textwrap
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -1120,6 +1120,51 @@ async def test_run_genre_mode_attaches_html_report(
     written = list(report_dir.glob("*.html"))
     assert len(written) == 1
     assert written[0].name.startswith("mixlab-house-")
+
+
+async def test_run_genre_mode_scores_directions_against_the_scoped_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """generate_directions gets the whole mode-scoped pool as `collection`, not just
+    the genre-scoped direction pool. label_spotlight measures a label's concentration
+    against that baseline; without it the run path and the library map (#40), which
+    passes its own scoped collection, would score the same label differently."""
+    xml_path = tmp_path / "rekordbox.xml"
+    # 18 house tracks (the direction pool) plus 4 techno tracks that are in the
+    # collection but out of scope for a --genre house run.
+    lines = _house_collection_xml(18).split("\n")
+    techno_rows = "\n".join(
+        f'    <TRACK TrackID="{100 + i}" Name="T{i}" Artist="A{i}" AverageBpm="140.00" '
+        f'Tonality="8A" Genre="Techno" TotalTime="300" Rating="0"/>'
+        for i in range(4)
+    )
+    closing = lines.index("  </COLLECTION>")
+    xml_path.write_text("\n".join(lines[:closing] + [techno_rows] + lines[closing:]))
+
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setenv("MIXLAB_REPORT_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", tmp_path / "history.json")
+    monkeypatch.chdir(tmp_path)
+
+    concepts = [MixConcept(title="Deep Cuts", mood="warm", track_ids=["1", "2", "3", "4"])]
+    stage2 = AsyncMock(return_value=(concepts, "concept prose\n\n---\n\nmain-brain note"))
+    directions_mock = Mock(return_value=[])
+
+    with (
+        patch("mixlab.__main__.generate_directions", directions_mock),
+        patch("mixlab.__main__.stage2_curate_and_report", stage2),
+        patch("mixlab.__main__.validate_stage2_output", return_value=[]),
+        patch("mixlab.__main__.send_report", AsyncMock()),
+    ):
+        await run(genre="house", export_dir=None, directions="mixed")
+
+    assert directions_mock.call_args is not None
+    collection = directions_mock.call_args.kwargs["collection"]
+    direction_pool = directions_mock.call_args.args[0]
+    assert {t.genre for t in collection} == {"House", "Techno"}  # whole scope, not just the pool
+    assert len(collection) > len(direction_pool)
 
 
 # ---------------------------------------------------------------------------
