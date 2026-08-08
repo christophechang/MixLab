@@ -39,6 +39,12 @@ def _direction_entry(direction: Direction) -> dict[str, object]:
         # Round-tripped by mixlab-web into --direction-spec so the artist-thread
         # validator keeps its spine name without re-deriving it from the title.
         "thread_artist": direction.thread_artist,
+        # Defining subsets (models.KeyGroup) — round-tripped into --direction-spec
+        # so the pinned-run validator can enforce the direction's promise.
+        "key_groups": [
+            {"label": g.label, "required": g.required, "track_ids": list(g.track_ids)}
+            for g in direction.key_groups
+        ],
     }
 
 

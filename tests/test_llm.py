@@ -6196,3 +6196,64 @@ async def test_stage2_curate_unpinned_canvases_omit_pinned_rule(
     assert captured, "no Anthropic call captured"
     system = str(captured[0]["system"])
     assert "PINNED DIRECTION (for this run)" not in system
+
+
+# ---------------------------------------------------------------------------
+# Pinned-direction key tracks — validator + revision trigger
+# ---------------------------------------------------------------------------
+
+
+def _pinned_keyed_canvas(ids: list[str], key_ids: list[str], required: int) -> MixCanvas:
+    from mixlab.models import KeyGroup
+
+    canvas = _make_canvas(ids)
+    canvas.pinned = True
+    canvas.brief = "b"
+    canvas.direction_type = "artist_thread"
+    canvas.key_groups = [KeyGroup(label="Dusky spine", required=required, track_ids=key_ids)]
+    return canvas
+
+
+def test_validate_pinned_concept_missing_key_tracks_warns_with_names() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 12)]
+    canvas = _pinned_keyed_canvas(ids, key_ids=["1", "2", "3"], required=3)
+    concept = MixConcept(title="C", mood="dark", track_ids=[i for i in ids if i != "3"][:8])
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+    keyed = [w for w in warnings if "direction key tracks missing" in w]
+    assert len(keyed) == 1
+    assert "2 of 3 required from Dusky spine" in keyed[0]
+    assert "Artist_3 — Title_3" in keyed[0]
+
+
+def test_validate_pinned_concept_with_all_key_tracks_is_quiet() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 9)]
+    canvas = _pinned_keyed_canvas(ids, key_ids=["1", "2", "3"], required=3)
+    concept = MixConcept(title="C", mood="dark", track_ids=ids)
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+    assert not any("direction key tracks missing" in w for w in warnings)
+
+
+def test_validate_unpinned_canvas_key_groups_not_enforced() -> None:
+    from mixlab.llm import validate_stage2_output
+
+    ids = [str(i) for i in range(1, 12)]
+    canvas = _pinned_keyed_canvas(ids, key_ids=["1", "2", "3"], required=3)
+    canvas.pinned = False  # enumerated daily direction canvas — gate stays closed
+    concept = MixConcept(title="C", mood="dark", track_ids=[i for i in ids if i != "3"][:8])
+    warnings = validate_stage2_output([concept], [canvas], _lib(ids), set(), set())
+    assert not any("direction key tracks missing" in w for w in warnings)
+
+
+def test_single_key_tracks_finding_qualifies_for_revision() -> None:
+    from mixlab.llm import _qualifies_for_revision
+
+    concept = MixConcept(title="C", mood="dark", track_ids=["1", "2"])
+    warning = "[C] direction key tracks missing: 2 of 3 required from Dusky spine — missing: X — Y"
+    assert _qualifies_for_revision(concept, [warning]) is True
+    # An unrelated single hard finding still does NOT qualify on its own.
+    other = "[C] track ID 9 not found in library"
+    assert _qualifies_for_revision(concept, [other]) is False

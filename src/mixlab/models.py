@@ -223,6 +223,22 @@ class ConceptShape:
     has_peak: bool
 
 
+@dataclass(frozen=True)
+class KeyGroup:
+    """One defining subset of a concept direction (the 'key tracks').
+
+    Emitted by the direction builders — the spine of an artist thread, one pole of a
+    mood journey, a label's catalogue slice — and enforced by the Stage 2 validator on
+    pinned canvases: a curated concept must retain at least ``required`` tracks from
+    ``track_ids`` or the drop is a hard finding that feeds the self-revision pass.
+    ``label`` names the subset in findings ("Dusky spine", "'dark' pole").
+    """
+
+    label: str
+    required: int
+    track_ids: list[str]
+
+
 @dataclass
 class MixCanvas:
     canvas_id: str
@@ -268,6 +284,10 @@ class MixCanvas:
     # skip-a-canvas allowance in the canvas rules does not apply). False everywhere
     # else — enumerated directions and classic canvases are never pinned.
     pinned: bool = False
+    # Defining subsets of a direction canvas (see KeyGroup). Populated for direction
+    # canvases (enumerated and pinned); enforcement is pinned-only for now — the
+    # validator gates on ``pinned`` so daily mixed runs keep their exact behaviour.
+    key_groups: list[KeyGroup] = field(default_factory=list)
 
 
 SeedTier = Literal["anchor", "supporting", "optional"]
