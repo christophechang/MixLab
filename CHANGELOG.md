@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.16.0 — 2026-08-08
+
+- **Pinned directions now enforce their defining tracks.** First pinned production run
+  shipped an artist thread whose thesis said "three Dusky tracks" while the tracklist
+  held two — Stage 2 curated away a pillar and kept the language. Every direction
+  builder now declares its defining subsets as `key_groups` (the spine of an artist
+  thread — all of it; both poles of a mood journey; both sides of an era dialogue; a
+  label's catalogue slice; an energy arc's troughs and crests; a found set's
+  conjunction members; fresh_crate and genre_traverse deliberately declare none), the
+  map payload and `--direction-spec` round-trip them, and a single generic validator
+  turns a shortfall on a **pinned** canvas into a hard finding that alone qualifies
+  the concept for the existing self-revision repair pass — the missing tracks are
+  named so the repair can put them back or rewrite the thesis honestly. Requirements
+  are clamped to what actually ships (and to what still resolves after collection
+  drift), so a group can never be unsatisfiable by construction. Enumerated daily-run
+  direction canvases carry `key_groups` too but are not yet enforced — the gate is
+  pinned-only so existing runs keep their exact behaviour and cost.
+
 ## v1.15.0 — 2026-08-08
 
 - **`--direction-spec` — "Run this direction" actually runs the direction.** The web app's

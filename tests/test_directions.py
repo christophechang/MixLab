@@ -1001,3 +1001,101 @@ class TestPinnedCanvasFromSpec:
         pool = _spec_pool()
         canvas = pinned_canvas_from_spec(_spec_json(pool, mood=""), _tbi(pool))
         assert canvas.source_concept.mood == ""
+
+
+# ---------------------------------------------------------------------------
+# key_groups — defining subsets emitted by builders and enforced on pinned runs
+# ---------------------------------------------------------------------------
+
+
+class TestBuilderKeyGroups:
+    def test_artist_thread_requires_every_spine_track(self) -> None:
+        d = _build_artist_thread(_rich_pool(), seed=0)
+        assert d is not None
+        (group,) = d.key_groups
+        assert group.label == "SpineGuy spine"
+        assert group.required == len(group.track_ids) == 3
+
+    def test_mood_journey_keys_both_poles(self) -> None:
+        d = _build_mood_journey(_rich_pool(), seed=0)
+        assert d is not None
+        labels = {g.label for g in d.key_groups}
+        assert len(d.key_groups) == 2
+        assert any("pole" in lab for lab in labels)
+        for g in d.key_groups:
+            assert g.required == 2
+            assert set(g.track_ids) <= set(d.track_ids)
+
+    def test_era_dialogue_keys_both_sides(self) -> None:
+        d = _build_era_dialogue(_rich_pool(), seed=0)
+        assert d is not None
+        assert len(d.key_groups) == 2
+        for g in d.key_groups:
+            assert "era" in g.label
+            assert g.required == 2
+
+    def test_label_spotlight_keys_the_catalogue(self) -> None:
+        d = _build_label_spotlight(_rich_pool(), seed=0)
+        assert d is not None
+        (group,) = d.key_groups
+        assert group.label == "Hospital catalogue"
+        assert group.required == 4
+        assert set(group.track_ids) <= set(d.track_ids)
+
+    def test_energy_shape_keys_troughs_and_crests(self) -> None:
+        d = _build_energy_shape_first(_rich_pool(), seed=0)
+        assert d is not None
+        assert {g.label for g in d.key_groups} == {"low-energy troughs", "high-energy crests"}
+        for g in d.key_groups:
+            assert g.required == 2
+
+    def test_fresh_crate_emits_no_key_groups(self) -> None:
+        # 60 dated tracks so the top-20% slice (12) clears _FRESH_MIN_COUNT (10).
+        pool = [
+            _track(track_id=f"f{i}", date_added=f"2026-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}", rating=3 if i < 5 else 0)
+            for i in range(60)
+        ]
+        d = _build_fresh_crate(pool, seed=0)
+        assert d is not None
+        assert d.key_groups == []
+
+    def test_generate_directions_stamps_key_groups_on_canvases(self) -> None:
+        pool = _rich_pool()
+        canvases = generate_directions(pool, _tbi(pool), seed=0, max_directions=6)
+        assert canvases
+        keyed = [c for c in canvases if c.key_groups]
+        assert keyed, "at least one direction canvas must carry key groups"
+        for canvas in keyed:
+            canvas_ids = set(canvas.source_concept.track_ids)
+            for g in canvas.key_groups:
+                assert set(g.track_ids) <= canvas_ids
+                assert 1 <= g.required <= len(g.track_ids)
+
+
+class TestSpecKeyGroups:
+    def test_key_groups_round_trip_and_clamp(self) -> None:
+        pool = _spec_pool()
+        spec = _spec_json(
+            pool,
+            key_groups=[
+                {"label": "Dusky spine", "required": 3, "track_ids": ["s0", "s1", "ghost"]},
+                {"label": "all ghosts", "required": 2, "track_ids": ["nope1", "nope2"]},
+            ],
+        )
+        canvas = pinned_canvas_from_spec(spec, _tbi(pool))
+        # "ghost" dropped, required clamped 3 -> 2; the all-ghost group vanishes.
+        (group,) = canvas.key_groups
+        assert group.label == "Dusky spine"
+        assert group.required == 2
+        assert group.track_ids == ["s0", "s1"]
+
+    def test_key_groups_absent_is_fine(self) -> None:
+        pool = _spec_pool()
+        canvas = pinned_canvas_from_spec(_spec_json(pool), _tbi(pool))
+        assert canvas.key_groups == []
+
+    def test_malformed_key_groups_raise(self) -> None:
+        pool = _spec_pool()
+        for bad in [{"label": "x"}, {"label": 1, "required": 2, "track_ids": []}, "nope"]:
+            with pytest.raises(DirectionSpecError, match="key_groups"):
+                pinned_canvas_from_spec(_spec_json(pool, key_groups=[bad]), _tbi(pool))

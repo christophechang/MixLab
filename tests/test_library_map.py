@@ -247,7 +247,7 @@ class TestMapPayloadWithMining:
         ]
         assert found, "fixture collection must mine at least one found row"
         for d in found:
-            assert set(d) == {"direction_type", "title", "mood", "brief", "feasibility", "track_ids", "thread_artist"}
+            assert set(d) == {"direction_type", "title", "mood", "brief", "feasibility", "track_ids", "thread_artist", "key_groups"}
             assert cast(str, d["title"]).startswith("Found: ")
             assert 0.0 < cast(float, d["feasibility"]) <= 1.0
             assert 15 <= len(cast("list[str]", d["track_ids"])) <= 25
@@ -273,3 +273,25 @@ def test_direction_entries_carry_thread_artist() -> None:
         if d["direction_type"] == "artist_thread":
             assert d["thread_artist"], "artist_thread entries must name the spine artist"
         assert isinstance(d["thread_artist"], str)
+
+
+def test_direction_entries_carry_key_groups() -> None:
+    """key_groups round-trip to the web app; every group is satisfiable within the entry."""
+    payload = build_map_payload(conj_pool(), mode="all", seed=0, played=[])
+    pools = cast("dict[str, dict[str, object]]", payload["pools"])
+    entries = [
+        d for e in pools.values() for d in cast("list[dict[str, object]]", e["directions"])
+    ]
+    assert entries
+    keyed = 0
+    for d in entries:
+        groups = cast("list[dict[str, object]]", d["key_groups"])
+        entry_ids = set(cast("list[str]", d["track_ids"]))
+        for g in groups:
+            keyed += 1
+            assert isinstance(g["label"], str) and g["label"]
+            ids = cast("list[str]", g["track_ids"])
+            assert ids and set(ids) <= entry_ids
+            required = cast(int, g["required"])
+            assert 1 <= required <= len(ids)
+    assert keyed, "fixture must produce at least one keyed direction"

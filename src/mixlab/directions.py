@@ -30,10 +30,11 @@ import random
 import statistics
 from collections import Counter
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 
 from mixlab import mining
 from mixlab.clustering import _centrality_rank, build_mix_canvas, camelot_compatible
-from mixlab.models import MixCanvas, MixConcept, Track
+from mixlab.models import KeyGroup, MixCanvas, MixConcept, Track
 from mixlab.transitions import score_transition, tempo_relation
 
 MIN_DIRECTION_POOL = 15
@@ -91,6 +92,10 @@ class Direction:
     thread_artist: str = ""
     identity: float = 0.0
     freshness: float = 0.0
+    # Defining subsets (see models.KeyGroup) — what a curated concept must retain
+    # for the direction's promise to hold. Empty for types whose canvas is
+    # homogeneous (fresh_crate) or already validator-covered (genre_traverse).
+    key_groups: list[KeyGroup] = dataclass_field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +156,7 @@ def _finalise(
     signal: float,
     pool: list[Track],
     thread_artist: str = "",
+    key_groups: list[KeyGroup] | None = None,
 ) -> Direction | None:
     """Cap and gate a candidate pool, emitting an *unscored* Direction.
 
@@ -168,6 +174,7 @@ def _finalise(
     if not ok:
         return None
     return Direction(
+        key_groups=_clamp_key_groups(key_groups or [], {t.track_id for t in chosen_capped}),
         direction_type=direction_type,
         title=title,
         mood=mood,
@@ -178,6 +185,22 @@ def _finalise(
         identity=round(min(max(signal, 0.0), 1.0), 4),
         freshness=round(_freshness(chosen_capped, pool), 4),
     )
+
+
+def _clamp_key_groups(groups: list[KeyGroup], shipped_ids: set[str]) -> list[KeyGroup]:
+    """Intersect each group with what actually ships and clamp ``required`` to match.
+
+    The dedupe/cap in :func:`_finalise` (or collection drift, for spec-supplied
+    groups) can drop key tracks; a requirement above what is present would be
+    unsatisfiable by construction. Groups left empty vanish.
+    """
+    out: list[KeyGroup] = []
+    for g in groups:
+        ids = [tid for tid in dict.fromkeys(g.track_ids) if tid in shipped_ids]
+        required = min(g.required, len(ids))
+        if ids and required >= 1:
+            out.append(KeyGroup(label=g.label, required=required, track_ids=ids))
+    return out
 
 
 def _balance(a: int, b: int) -> float:
@@ -351,6 +374,10 @@ def _build_mood_journey(pool: list[Track], *, seed: int) -> Direction | None:
         brief=brief,
         signal=signal,
         pool=pool,
+        key_groups=[
+            KeyGroup(f"'{start_pole}' pole", min(2, len(start_ranked)), [t.track_id for t in start_ranked]),
+            KeyGroup(f"'{end_pole}' pole", min(2, len(end_ranked)), [t.track_id for t in end_ranked]),
+        ],
     )
 
 
@@ -410,6 +437,10 @@ def _build_era_dialogue(pool: list[Track], *, seed: int) -> Direction | None:
         brief=brief,
         signal=signal,
         pool=pool,
+        key_groups=[
+            KeyGroup(f"{old_lo}-{old_hi} era", min(2, len(old_ranked)), [t.track_id for t in old_ranked]),
+            KeyGroup(f"{new_lo}-{new_hi} era", min(2, len(new_ranked)), [t.track_id for t in new_ranked]),
+        ],
     )
 
 
@@ -444,6 +475,7 @@ def _build_label_spotlight(pool: list[Track], *, seed: int, collection: list[Tra
         f"point. Where a non-label track appears, it should extend the label's aesthetic, not dilute it. Say in "
         f"the report what makes {label}'s sound identifiable."
     )
+    label_shipped = [t for t in chosen if t.label == label]
     return _finalise(
         direction_type="label_spotlight",
         title=f"Label spotlight: {label}",
@@ -452,6 +484,9 @@ def _build_label_spotlight(pool: list[Track], *, seed: int, collection: list[Tra
         brief=brief,
         signal=signal,
         pool=pool,
+        key_groups=[
+            KeyGroup(f"{label} catalogue", min(4, len(label_shipped)), [t.track_id for t in label_shipped]),
+        ],
     )
 
 
@@ -506,6 +541,11 @@ def _build_artist_thread(pool: list[Track], *, seed: int) -> Direction | None:
         signal=min(max(tightness, 0.0), 1.0),
         pool=pool,
         thread_artist=thread_artist,
+        # Every chapter marker is load-bearing — the brief names their count, so
+        # dropping one falsifies the thesis (the "2 of 3 pillars" failure).
+        key_groups=[
+            KeyGroup(f"{thread_artist} spine", len(thread_tracks), [t.track_id for t in thread_tracks]),
+        ],
     )
 
 
@@ -548,6 +588,9 @@ def _build_energy_shape_first(pool: list[Track], *, seed: int) -> Direction | No
         f"high-energy tracks the crests, and the sequence must make the shape audible, not merely present. "
         f"Choose an opener and closer that frame the arc's start and resolution."
     )
+    chosen_ids_final = {t.track_id for t in chosen}
+    low_shipped = [t for t in low if t.track_id in chosen_ids_final]
+    high_shipped = [t for t in high if t.track_id in chosen_ids_final]
     return _finalise(
         direction_type="energy_shape_first",
         title=f"Energy shape: {arc}",
@@ -556,6 +599,12 @@ def _build_energy_shape_first(pool: list[Track], *, seed: int) -> Direction | No
         brief=brief,
         signal=signal,
         pool=pool,
+        # Troughs and crests only — an arc survives losing mid-band filler, but not
+        # its low or high ends.
+        key_groups=[
+            KeyGroup("low-energy troughs", min(2, len(low_shipped)), [t.track_id for t in low_shipped]),
+            KeyGroup("high-energy crests", min(2, len(high_shipped)), [t.track_id for t in high_shipped]),
+        ],
     )
 
 
@@ -969,6 +1018,7 @@ def generate_directions(
         canvas.brief = direction.brief
         canvas.direction_type = direction.direction_type
         canvas.thread_artist = direction.thread_artist
+        canvas.key_groups = list(direction.key_groups)
         result.append(canvas)
         print(f"Direction: {direction.direction_type} — {direction.title} (feasibility {direction.feasibility:.2f})")
     return result
@@ -1048,10 +1098,31 @@ def pinned_canvas_from_spec(spec_json: str, tracks_by_id: dict[str, Track]) -> M
     if not thread_artist and direction_type == "artist_thread" and title.startswith(_THREAD_TITLE_PREFIX):
         thread_artist = title[len(_THREAD_TITLE_PREFIX) :]
 
+    raw_groups = raw.get("key_groups", [])
+    if not isinstance(raw_groups, list):
+        raise DirectionSpecError("--direction-spec field 'key_groups' must be a list")
+    key_groups: list[KeyGroup] = []
+    for i, g in enumerate(raw_groups):
+        if (
+            not isinstance(g, dict)
+            or not isinstance(g.get("label"), str)
+            or not isinstance(g.get("required"), int)
+            or isinstance(g.get("required"), bool)
+            or not isinstance(g.get("track_ids"), list)
+            or not all(isinstance(tid, str) for tid in g["track_ids"])
+        ):
+            raise DirectionSpecError(
+                f"--direction-spec key_groups[{i}] must be {{label: str, required: int, track_ids: [str]}}"
+            )
+        key_groups.append(KeyGroup(label=g["label"], required=g["required"], track_ids=list(g["track_ids"])))
+
     concept = MixConcept(title=title, mood=mood, track_ids=resolved)
     canvas = build_mix_canvas(concept, tracks_by_id)
     canvas.brief = raw["brief"].strip()
     canvas.direction_type = direction_type
     canvas.thread_artist = thread_artist
     canvas.pinned = True
+    # Clamp against what actually resolved — drift can drop key tracks, and a
+    # requirement above what is present would be unsatisfiable by construction.
+    canvas.key_groups = _clamp_key_groups(key_groups, set(resolved))
     return canvas
