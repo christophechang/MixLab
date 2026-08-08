@@ -1322,6 +1322,28 @@ def validate_stage2_output(
                     continue
                 warnings.append(f"{label} artist '{artist}' appears {count} times")
 
+        # Pinned-direction key tracks (--direction-spec): the defining subsets the
+        # concept must retain for the direction's promise to hold. Pinned-only —
+        # enumerated direction canvases carry key_groups too, but enforcing them
+        # would add revision passes to every daily mixed run; flip the gate when
+        # that trade is wanted. One finding per short group is enough: the marker
+        # alone qualifies the concept for revision (see _qualifies_for_revision).
+        if thread_canvas is not None and thread_canvas.pinned:
+            concept_id_set_for_keys = set(concept.track_ids)
+            for group in thread_canvas.key_groups:
+                have = sum(1 for tid in group.track_ids if tid in concept_id_set_for_keys)
+                if have < group.required:
+                    missing = [tid for tid in group.track_ids if tid not in concept_id_set_for_keys]
+                    names = ", ".join(
+                        f"{tracks_by_id[tid].artist} — {tracks_by_id[tid].title}"
+                        for tid in missing[:3]
+                        if tid in tracks_by_id
+                    )
+                    warnings.append(
+                        f"{label} direction key tracks missing: {have} of {group.required} required from "
+                        f"{group.label} — missing: {names or 'unresolvable ids'}"
+                    )
+
         # Tempo-regime crossings must ride pitch-locked ratio bridges. For genre_traverse
         # concepts (#82) an unbridged crossing is a HARD structural error (marker in
         # _HARD_FINDING_MARKERS triggers self-revision) and is never suppressed by
@@ -2693,6 +2715,7 @@ _HARD_FINDING_MARKERS: tuple[str, ...] = (
     "used without a justified transition",
     "blend risk",
     "unbridged regime crossing",
+    "direction key tracks missing",
 )
 
 # Hard-finding marker → short human label used in the report annotation's resolved list.
@@ -2706,6 +2729,7 @@ _HARD_FINDING_KIND_LABELS: tuple[tuple[str, str], ...] = (
     ("used without a justified transition", "unjustified transition"),
     ("blend risk", "blend risk"),
     ("unbridged regime crossing", "unbridged crossing"),
+    ("direction key tracks missing", "direction key tracks"),
 )
 
 _STAGE2_REVISION_SYSTEM = """\
@@ -2761,8 +2785,13 @@ def _critique_triggers_revision(concept: MixConcept) -> bool:
 
 def _qualifies_for_revision(concept: MixConcept, warnings: list[str]) -> bool:
     """Revision trigger (#55): >=2 hard findings, a weak critique, or a needs_attention
-    critique carrying a suggested substitution."""
-    if len(_hard_findings_for_concept(concept, warnings)) >= 2:
+    critique carrying a suggested substitution. A single pinned-direction key-tracks
+    finding also qualifies — the operator explicitly pinned those tracks, so one
+    missing pillar is already a broken promise, not a marginal defect."""
+    hard = _hard_findings_for_concept(concept, warnings)
+    if len(hard) >= 2:
+        return True
+    if any("direction key tracks missing" in w for w in hard):
         return True
     return _critique_triggers_revision(concept)
 

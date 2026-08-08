@@ -168,6 +168,7 @@ def mine_pool(pool: list[Track]) -> list[Direction]:
         _path_feasible,
         _rank,
     )
+    from mixlab.models import KeyGroup
 
     by_id = {t.track_id: t for t in pool}
     out: list[Direction] = []
@@ -208,6 +209,11 @@ def mine_pool(pool: list[Track]) -> list[Direction]:
                 feasibility=0.0,
                 identity=round(_log_lift(pair.lift), 4),
                 freshness=round(_freshness(shipped, pool), 4),
+                # Every shipped track is a conjunction member; the found set stops
+                # being "found" if the concept keeps only a couple of them.
+                key_groups=[
+                    KeyGroup("conjunction members", min(4, len(shipped)), [t.track_id for t in shipped]),
+                ],
             )
         )
     return out
