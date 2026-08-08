@@ -755,11 +755,40 @@ class TestRunPathMinedCap:
         assert len(found) == 1
         assert found[0].brief.startswith("FOUND SET.")
 
+    def test_three_mined_survivors_still_ship_only_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The live fixture mines exactly one pair, so the run-path cap needs a pool
+        that yields several. Three disjoint found rows survive the field scorer and
+        get numbered found_1..3; only the best-scoring one may be materialised."""
+        pool = _minable_pool()
+        ids = [t.track_id for t in pool]
+        # Ten-track slices: pairwise disjoint, and small enough that even total
+        # containment in a 25-track named pool stays under the 0.6 dedupe threshold.
+        mined = [_found(f"Found: t{i}", ids[i * 10 : (i + 1) * 10], identity=0.9 - i * 0.1) for i in range(3)]
+        monkeypatch.setattr("mixlab.directions.mining.mine_pool", lambda _pool: mined)
+        assert [d.direction_type for d in enumerate_directions(pool, seed=3) if "found" in d.direction_type] == [
+            "found_1",
+            "found_2",
+            "found_3",
+        ]
+        canvases = generate_directions(pool, _tbi(pool), seed=3, max_directions=3)
+        assert [c.direction_type for c in canvases if c.direction_type.startswith("found")] == ["found_1"]
+
     def test_diagnostic_line_reports_found_separately(self, capsys: pytest.CaptureFixture[str]) -> None:
         pool = _minable_pool()
         generate_directions(pool, _tbi(pool), seed=3)
         out = capsys.readouterr().out
         assert "found)" in out and "builders" in out
+
+    def test_diagnostic_line_counts_proposals_not_survivors(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Both counts are pre-scoring: a builder that proposed and then lost the
+        clone dedupe is a different failure from one that never fired, and the run
+        log exists to tell them apart. On _minable_pool label_spotlight proposes but
+        is deduped, so the line must still say 2 builders."""
+        pool = _minable_pool()
+        canvases = generate_directions(pool, _tbi(pool), seed=3, max_directions=6)
+        out = capsys.readouterr().out
+        assert "Directions proposed: fresh_crate, label_spotlight (2/7 builders, 1 found)" in out
+        assert "label_spotlight" not in [c.direction_type for c in canvases]
 
     def test_collection_kwarg_reaches_label_spotlight_scoring(self, capsys: pytest.CaptureFixture[str]) -> None:
         """The run path must score label_spotlight the way the map path does.

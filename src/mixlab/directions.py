@@ -816,6 +816,10 @@ def enumerate_directions(pool: list[Track], *, seed: int, collection: list[Track
     field with feasibility scores, deterministically ordered. ``collection`` is the
     whole scoped library, used by builders that measure a pool's concentration
     against the library baseline (label_spotlight).
+
+    Named and mined rows both appear; mined ones carry ``direction_type``
+    ``found_1``..``found_{_MAX_MINED_PER_POOL}`` (the map shows the whole capped
+    field, the run path picks at most one of them).
     """
     return sorted(
         _combined_field(pool, seed=seed, collection=collection),
