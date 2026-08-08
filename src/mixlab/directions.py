@@ -193,20 +193,41 @@ def _log_lift(ratio: float) -> float:
 
 
 def _jaccard(a: list[str], b: list[str]) -> float:
-    """Track-id overlap of two candidate pools: |A∩B| / |A∪B|."""
+    """Track-id overlap of two candidate pools: |A∩B| / |A∪B|.
+
+    Two empty pools are *identical*, not disjoint, so they score 1.0 — the metric
+    is total over any pair of id lists rather than depending on callers to filter
+    empty pools out first. (Builders and the miner both floor their pools at
+    :data:`MIN_DIRECTION_POOL`, so this is a contract guard, not a live case.)
+    """
     sa, sb = set(a), set(b)
     union = len(sa | sb)
-    return len(sa & sb) / union if union else 0.0
+    if not union:
+        return 1.0
+    return len(sa & sb) / union
 
 
-def _rank_key(direction: Direction) -> tuple[float, str, str, tuple[str, ...]]:
-    """Pass-1 ordering: best distinctiveness-free score first, then total tie-breaks."""
+def _rank_key(direction: Direction) -> tuple[float, str, str, tuple[str, ...], str, str, str, float, float]:
+    """Pass-1 ordering: best distinctiveness-free score first, then total tie-breaks.
+
+    Every field except ``feasibility`` (uniformly 0.0 on input — the field scorer
+    computes it) participates, so the key is a total order over the candidates and
+    the survivor of a dedupe never depends on input order. The trailing components
+    matter for mined rows in particular: they all share ``direction_type ==
+    "found"`` and two pairs over the same members can share a title too, which
+    ``(score, type, title, track_ids)`` alone cannot separate.
+    """
     score = _W_FRESHNESS * direction.freshness + _W_IDENTITY * direction.identity
     return (
         -score / (_W_FRESHNESS + _W_IDENTITY),
         direction.direction_type,
         direction.title,
         tuple(sorted(direction.track_ids)),
+        direction.mood,
+        direction.brief,
+        direction.thread_artist,
+        direction.identity,
+        direction.freshness,
     )
 
 

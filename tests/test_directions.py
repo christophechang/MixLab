@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -17,6 +18,7 @@ from mixlab.directions import (
     _build_label_spotlight,
     _build_mood_journey,
     _freshness,
+    _jaccard,
     _log_lift,
     _path_feasible,
     _score_field,
@@ -604,3 +606,24 @@ class TestScoreField:
         a = _cand("x1", [f"a{i}" for i in range(25)], identity=0.5, freshness=0.5)
         b = _cand("x2", [f"b{i}" for i in range(25)], identity=0.5, freshness=0.4)
         assert _score_field([a, b]) == _score_field([b, a])
+
+    def test_deterministic_when_candidates_tie_on_type_title_and_pool(self) -> None:
+        """Mined rows share direction_type ("found") far more readily than named ones,
+        and two pairs over the same members can share a title too. Without mood/brief
+        in the rank key the survivor of the dedupe would depend on input order."""
+        ids = [f"s{i}" for i in range(20)]
+        a = replace(_cand("found", ids, identity=0.5, freshness=0.5), title="Found: liquid", mood="m1", brief="b1")
+        b = replace(_cand("found", ids, identity=0.5, freshness=0.5), title="Found: liquid", mood="m2", brief="b2")
+        forward, reverse = _score_field([a, b]), _score_field([b, a])
+        assert len(forward) == 1  # clones — one survives
+        assert forward == reverse
+
+
+class TestJaccard:
+    def test_two_empty_pools_are_identical_not_disjoint(self) -> None:
+        # _score_field ingests mine_pool output, so make the metric total rather
+        # than relying on every caller to pre-filter empty candidate pools.
+        assert _jaccard([], []) == 1.0
+
+    def test_empty_versus_non_empty_is_disjoint(self) -> None:
+        assert _jaccard([], ["a"]) == 0.0
