@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable, cast
 
 import pytest
+from conftest import conj_pool
 
 from mixlab.config import CUSTOM_GENRES, GENRE_MAP
 from mixlab.library_map import build_map_payload, render_map_json
@@ -221,3 +222,38 @@ def test_run_map_cli_out_write_failure_reports_stderr_keeps_stdout_json(
     assert str(target) in captured.err
     payload = json.loads(captured.out)
     assert payload["mode"] == "all"
+
+
+class TestMapPayloadWithMining:
+    """Integration coverage for mined ``found_N`` rows reaching the map payload (Task 8).
+
+    Reuses tests/conftest.py's ``conj_pool`` (Task 6) rather than assembling a new
+    fixture: its 80 tracks plant a Hospital Records x Liquid conjunction that
+    provably fires (support=20, lift=2.56 — see conftest for why the brief's
+    original 20/20/20/20 split under-lifted), and every track carries the
+    default genre "Drum & Bass", which lands the whole pool in
+    ``build_map_payload``'s "drum_and_bass" GENRE_MAP pool — so the miner runs on
+    exactly the pool it was tuned against.
+    """
+
+    def test_found_rows_ship_with_valid_shape(self) -> None:
+        payload = build_map_payload(conj_pool(), mode="all", seed=0, played=[])
+        pools = cast("dict[str, dict[str, object]]", payload["pools"])
+        found = [
+            d
+            for e in pools.values()
+            for d in cast("list[dict[str, object]]", e["directions"])
+            if cast(str, d["direction_type"]).startswith("found_")
+        ]
+        assert found, "fixture collection must mine at least one found row"
+        for d in found:
+            assert set(d) == {"direction_type", "title", "mood", "brief", "feasibility", "track_ids"}
+            assert cast(str, d["title"]).startswith("Found: ")
+            assert 0.0 < cast(float, d["feasibility"]) <= 1.0
+            assert 15 <= len(cast("list[str]", d["track_ids"])) <= 25
+            assert cast(str, d["mood"]).isascii()
+
+    def test_payload_byte_identical_across_runs(self) -> None:
+        a = render_map_json(build_map_payload(conj_pool(), mode="all", seed=0, played=[]))
+        b = render_map_json(build_map_payload(conj_pool(), mode="all", seed=0, played=[]))
+        assert a == b
