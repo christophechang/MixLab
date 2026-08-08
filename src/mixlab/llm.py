@@ -761,10 +761,12 @@ _STAGE2_CANVAS_RULES = """\
 # (--direction-spec), so every other run's prompt stays byte-identical.
 _STAGE2_PINNED_RULE = """\
 \nPINNED DIRECTION (for this run):\n\
-The operator explicitly chose the canvas marked [PINNED DIRECTION] from the library map. You MUST \
-produce at least one concept from that canvas, honouring its DIRECTION BRIEF — the allowance above \
-to skip a structurally weak canvas does not apply to it. Build the pinned concept first, then curate \
-the rest of the run around it.\
+The operator explicitly chose the canvas marked [PINNED DIRECTION] from the library map, so this run \
+is a study of that direction, not a menu of alternatives. You MUST produce two or three CONTRASTING \
+readings of the pinned canvas — when three: one practical, one balanced, one adventurous. Every \
+reading honours the DIRECTION BRIEF and retains its key tracks; the readings differ in companions, \
+arc, and sequencing, never in thesis. The allowance above to skip a structurally weak canvas does \
+not apply to the pinned canvas. Any other canvas contributes at most one concept, as contrast.\
 """
 
 
@@ -3537,13 +3539,24 @@ async def stage2_curate_and_report(
         )
     else:
         if canvases is not None:
-            prompt = (
-                f"{recent_concepts_block}"
-                f"{genre_intent_block}"
-                f"Curate a set of mix concepts from the following {n} candidate canvases. "
-                f"Produce between 3 and 6 distinct concepts total. Each concept must draw only from tracks within a single canvas.\n\n"
-                + "\n\n".join(sections)
-            )
+            if any(c.pinned for c in canvases):
+                prompt = (
+                    f"{recent_concepts_block}"
+                    f"{genre_intent_block}"
+                    f"Curate this run as a study of the pinned direction. From the following {n} candidate "
+                    f"canvases, produce 3 or 4 distinct concepts total: two or three contrasting readings of "
+                    f"the [PINNED DIRECTION] canvas, plus at most one concept from another canvas as contrast. "
+                    f"Each concept must draw only from tracks within a single canvas.\n\n"
+                    + "\n\n".join(sections)
+                )
+            else:
+                prompt = (
+                    f"{recent_concepts_block}"
+                    f"{genre_intent_block}"
+                    f"Curate a set of mix concepts from the following {n} candidate canvases. "
+                    f"Produce between 3 and 6 distinct concepts total. Each concept must draw only from tracks within a single canvas.\n\n"
+                    + "\n\n".join(sections)
+                )
         else:
             prompt = (
                 f"{recent_concepts_block}"

@@ -6257,3 +6257,72 @@ def test_single_key_tracks_finding_qualifies_for_revision() -> None:
     # An unrelated single hard finding still does NOT qualify on its own.
     other = "[C] track ID 9 not found in library"
     assert _qualifies_for_revision(concept, [other]) is False
+
+
+def test_stage2_pinned_rule_demands_contrasting_readings() -> None:
+    from mixlab.llm import _STAGE2_PINNED_RULE
+
+    assert "CONTRASTING" in _STAGE2_PINNED_RULE
+    assert "practical" in _STAGE2_PINNED_RULE
+    assert "at most one concept" in _STAGE2_PINNED_RULE
+    assert "does not apply" in _STAGE2_PINNED_RULE
+
+
+@respx.mock
+async def test_stage2_curate_pinned_prompt_is_a_direction_study(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    captured: list[dict[str, object]] = []
+
+    def capture(request: object) -> Response:
+        body = json.loads(request.content)  # type: ignore[attr-defined]
+        captured.append(body)
+        return Response(200, json={"content": [{"text": "[]"}], "stop_reason": "end_turn"})
+
+    respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
+
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=124.0, camelot_key="6A", genre="House")
+        for i in range(1, 3)
+    }
+    canvas = _pinned_canvas(["1", "2"])
+
+    await stage2_curate_and_report([canvas.source_concept], tracks_by_id, canvases=[canvas])
+
+    assert captured, "no Anthropic call captured"
+    user_prompt = str(captured[0]["messages"])
+    assert "study of the pinned direction" in user_prompt
+    assert "contrasting readings" in user_prompt
+
+
+@respx.mock
+async def test_stage2_curate_unpinned_prompt_keeps_classic_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    captured: list[dict[str, object]] = []
+
+    def capture(request: object) -> Response:
+        body = json.loads(request.content)  # type: ignore[attr-defined]
+        captured.append(body)
+        return Response(200, json={"content": [{"text": "[]"}], "stop_reason": "end_turn"})
+
+    respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
+
+    tracks_by_id = {
+        "1": Track(track_id="1", artist="A", title="T", bpm=124.0, camelot_key="6A", genre="House"),
+    }
+    roles = CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[])
+    canvas = _canvas_with_role_candidates(["1"], roles)
+
+    await stage2_curate_and_report([canvas.source_concept], tracks_by_id, canvases=[canvas])
+
+    assert captured, "no Anthropic call captured"
+    user_prompt = str(captured[0]["messages"])
+    assert "Produce between 3 and 6 distinct concepts total" in user_prompt
+    assert "study of the pinned direction" not in user_prompt
