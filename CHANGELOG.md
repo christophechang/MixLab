@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.17.0 — 2026-08-08
 
 - **Pinned runs are now a study of the direction, not a menu around it.** Operator call:
   when intent comes from the library map, quality beats quantity. A pinned run now ships
