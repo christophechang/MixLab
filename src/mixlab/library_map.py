@@ -39,10 +39,10 @@ def _direction_entry(direction: Direction) -> dict[str, object]:
     }
 
 
-def _pool_entry(pool: list[Track], *, seed: int) -> dict[str, object]:
+def _pool_entry(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> dict[str, object]:
     return {
         "track_count": len(pool),
-        "directions": [_direction_entry(d) for d in enumerate_directions(pool, seed=seed)],
+        "directions": [_direction_entry(d) for d in enumerate_directions(pool, seed=seed, collection=collection)],
     }
 
 
@@ -70,10 +70,10 @@ def build_map_payload(
         pool: list[Track] = []
         for tag in rb_tags:
             pool.extend(by_genre.get(tag, []))
-        pools[key] = _pool_entry(pool, seed=seed)
+        pools[key] = _pool_entry(pool, seed=seed, collection=scoped)
     for key in CUSTOM_GENRES:
         custom_pool = build_custom_genre_pool(key, scoped, CUSTOM_GENRES, GENRE_MAP)
-        pools[key] = _pool_entry(custom_pool, seed=seed)
+        pools[key] = _pool_entry(custom_pool, seed=seed, collection=scoped)
 
     return {
         "version": 1,

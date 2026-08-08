@@ -118,9 +118,9 @@ order; no RNG.
    rank order. Title from namable predicates only:
    `Found: Hospital Records × 2015–2019`; a single-namable pair titles from its
    namable half alone (`Found: liquid`). Mood: ASCII kind pair for prose/id use —
-   `label x era`, `tag x harmonic` (first 8 chars ASCII and kind-distinct;
-   `_canvas_id` truncates mood to 8 chars, and `×` is non-ASCII — use `x`).
-   `thread_artist: ""`.
+   `label x era`, `tag x harmonic`. ASCII is load-bearing (`_canvas_id` truncates
+   mood to 8 chars and `×` is non-ASCII — use `x`); kind-distinctness within those
+   8 chars is **not** required — see §10. `thread_artist: ""`.
 
 ## 4. Shared scorer (replaces the `_finalise` formula)
 
@@ -162,7 +162,7 @@ Terms:
     | label_spotlight | label share of pool (0.048 on a live 418-track pool — incomparably small) | collection-lift: `min(log2(max(share_in_pool / share_in_collection, 1)) / 3, 1)` — same scale as mined identity |
     | artist_thread | mean transition tightness | unchanged |
     | energy_shape_first | `_balance(len(low), len(high))` | unchanged |
-    | fresh_crate | `min(newest_slice / 15, 1)` (pins at 1.0 on any real pool) | count-percentile form (spread restored) |
+    | fresh_crate | `min(newest_slice / 15, 1)` (pins at 1.0 on any real pool) | recency **concentration** of the shipped set: `max(0, 2·(freshness − 0.5))` — 0 at or below the pool's median age, → 1 as the set concentrates at the newest end |
     | genre_traverse | bridge-count + size-balance blend | unchanged |
 
 - **distinctiveness** — `1 − max(shipped-set Jaccard vs every other row in the
@@ -276,3 +276,25 @@ tautology-generator (M5); prune-then-score (M6); seed-invariance claim withdrawn
 (M7); shared enumeration + 1-slot run-path cap (M8); title uniqueness +
 display-noun rule (M9); imperative-first briefs (M10). Minor findings folded into
 §2–§7 text.
+
+**Final whole-branch review (post-implementation, same reviewer protocol).** Three
+corrections landed against the implemented branch and are reflected in the text
+above:
+
+- **`fresh_crate` identity was still saturating.** The implementation read
+  `len(dated) / len(pool)`, which is 1.0 on any pool Rekordbox produced (it stamps
+  `DateAdded` on ~every track) — the §4 table's "count-percentile form (spread
+  restored)" had been read as a dated-share. The row now states the formula:
+  `max(0, 2·(freshness − 0.5))`, recency *concentration* of the shipped set.
+- **Distinctiveness was measured pre-cap.** §4 always said post-dedupe *post-cap*;
+  the implementation scored the post-dedupe field and capped afterwards, so a mined
+  row that never ships could reorder — or, at the run path's `mined[:1]`, replace —
+  the one that does. The scorer is now split into `_rank_and_dedupe` (pass 1) and
+  `_score_final` (pass 2 over exactly the field handed to it), with the mined cap
+  and title-uniqueness rules applied in between.
+- **§3.8's "first 8 chars kind-distinct" clause is withdrawn**, not implemented.
+  With seven kind nouns the 8-char prefix collides for most pairs (`tempo x era`
+  and `tempo x label` both truncate to `tempo x `), and no cheap reordering fixes
+  it. The clause was also not load-bearing: only one mined row ships per run, so
+  two mined moods never contend for a `_canvas_id`. ASCII-ness, which *is*
+  load-bearing, stays.
