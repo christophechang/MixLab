@@ -174,7 +174,7 @@ def _finalise(
         brief=brief,
         feasibility=0.0,
         thread_artist=thread_artist,
-        identity=min(max(signal, 0.0), 1.0),
+        identity=round(min(max(signal, 0.0), 1.0), 4),
         freshness=round(_freshness(chosen_capped, pool), 4),
     )
 
@@ -542,7 +542,14 @@ def _build_fresh_crate(pool: list[Track], *, seed: int) -> Direction | None:
     anchor_candidates.sort(key=lambda t: (-(t.rating or 0), -t.play_count, t.track_id))
     chosen = list(newest) + anchor_candidates[:5]
 
-    signal = len(dated) / len(pool)
+    # Identity = recency CONCENTRATION of the shipped set, not "does the pool carry
+    # dates". The dated share (len(dated)/len(pool)) pinned at 1.0 on every real
+    # pool — Rekordbox stamps DateAdded on ~every track — which is exactly the
+    # saturation this scorer exists to remove. Rescaled from the median date-added
+    # count-percentile: 0 at or below the pool's median age, 1.0 only when the
+    # shipped set sits at the very newest end. ``chosen`` is what _finalise ships
+    # (<= 25 tracks, no duplicates by construction), so the two agree.
+    signal = max(0.0, 2 * (_freshness(chosen, pool) - 0.5))
     brief = (
         "This set is a fresh-crate debut showcase — the point is surfacing what just arrived. Frame the newest "
         "additions as discoveries worth their first play, and use the handful of grounding anchor tracks only to "

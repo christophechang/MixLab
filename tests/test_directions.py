@@ -255,12 +255,20 @@ def test_build_energy_shape_first_no_energy_data_returns_none() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_fresh_crate_with_date_density_proposes() -> None:
-    pool = [
-        _track(track_id=str(i), bpm=172.0, date_added=f"2020-01-01T00:{i:02d}:00", play_count=1 if i < 3 else 0)
-        for i in range(55)
+def _dated_pool(n: int, *, anchors: int) -> list[Track]:
+    """``n`` tracks, one per minute so track index == date-added rank.
+
+    The first ``anchors`` tracks carry a play count, which is what makes them
+    eligible as fresh_crate's grounding anchors (everything else is unplayed).
+    """
+    return [
+        _track(track_id=str(i), bpm=172.0, date_added=f"2020-01-01T00:{i:02d}:00", play_count=1 if i < anchors else 0)
+        for i in range(n)
     ]
-    direction = _build_fresh_crate(pool, seed=1)
+
+
+def test_build_fresh_crate_with_date_density_proposes() -> None:
+    direction = _build_fresh_crate(_dated_pool(55, anchors=3), seed=1)
     assert direction is not None
     assert direction.direction_type == "fresh_crate"
     assert MIN_DIRECTION_POOL <= len(direction.track_ids) <= MAX_DIRECTION_POOL
@@ -554,14 +562,49 @@ class TestIdentityRenormalisation:
         collection = pool + [_t(f"c{i}") for i in range(80)]
         d = _build_label_spotlight(pool, seed=1, collection=collection)
         assert d is not None
-        # share_in_pool 0.5, share_in_collection 0.1 → ratio 5 → log2(5)/3 ≈ 0.774
-        assert abs(d.identity - math.log2(5) / 3) < 1e-6  # add `import math` at file top
+        # share_in_pool 0.5, share_in_collection 0.1 → ratio 5 → log2(5)/3 ≈ 0.7737,
+        # stored rounded to 4dp like freshness.
+        assert d.identity == round(math.log2(5) / 3, 4) == 0.774
 
     def test_label_spotlight_without_collection_falls_back_to_share(self) -> None:
         pool = [_t(f"l{i}", label="Metalheadz") for i in range(10)] + [_t(f"p{i}") for i in range(10)]
         d = _build_label_spotlight(pool, seed=1)
         assert d is not None
         assert abs(d.identity - 0.5) < 1e-9
+
+    def test_fresh_crate_identity_is_recency_concentration_not_dated_share(self) -> None:
+        """The old signal was ``len(dated)/len(pool)``, which pins at 1.0 whenever the
+        pool carries dates at all — and Rekordbox stamps DateAdded on ~every track, so
+        it was 1.0 in production, always. The new signal rescales the shipped set's
+        median date-added percentile: ``max(0, 2*(freshness - 0.5))``.
+
+        55 dated tracks, one per minute, so track index == date rank and percentile
+        of index i is i/54. Three anchors (indices 0-2, the only played tracks).
+        fresh_crate ships ``dated_sorted[-20:]`` = indices 35-54 plus those anchors,
+        23 tracks whose sorted percentiles are 0,1,2,35..54 → median is index 43.
+        """
+        d = _build_fresh_crate(_dated_pool(55, anchors=3), seed=1)
+        assert d is not None
+        assert d.freshness == round(43 / 54, 4) == 0.7963
+        assert d.identity == round(2 * (43 / 54 - 0.5), 4) == 0.5926
+        assert d.identity < 1.0  # the whole point: the old formula returned 55/55
+
+    def test_fresh_crate_identity_spreads_across_equally_dated_pools(self) -> None:
+        """Same size, same full date coverage, different recency concentration.
+
+        With no played tracks there are no anchors, so the shipped set is just the
+        newest 20 (indices 35-54) and its median percentile is the mean of indices
+        44 and 45 = 44.5/54. The dated-share formula scored both pools 1.0.
+        """
+        d = _build_fresh_crate(_dated_pool(55, anchors=0), seed=1)
+        assert d is not None
+        assert len(d.track_ids) == 20
+        assert d.freshness == round(44.5 / 54, 4) == 0.8241
+        assert d.identity == round(2 * (44.5 / 54 - 0.5), 4) == 0.6481
+        # Anchoring on older material genuinely lowers identity — spread, not a pin.
+        anchored = _build_fresh_crate(_dated_pool(55, anchors=3), seed=1)
+        assert anchored is not None
+        assert anchored.identity < d.identity
 
 
 # ---------------------------------------------------------------------------
