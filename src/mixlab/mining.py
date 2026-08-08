@@ -19,6 +19,11 @@ _COVERAGE_CAP = 0.70  # documentation only — enforced via integer arithmetic b
 # float rounding at exact-boundary pool sizes (e.g. 63/90 == 0.70 exactly, but
 # 0.70 * 90 == 62.99999999999999 in IEEE-754 double precision).
 
+MIN_SUPPORT = 15  # must equal directions.MIN_DIRECTION_POOL — a pair too small to build is not worth mining
+MIN_LIFT = 1.3
+_SUBSUME_JACCARD = 0.9
+SHORTLIST = 12
+
 
 @dataclass(frozen=True)
 class Predicate:
@@ -26,6 +31,15 @@ class Predicate:
     value: str
     namable: bool
     track_ids: frozenset[str]
+
+
+@dataclass(frozen=True)
+class MinedPair:
+    a: Predicate
+    b: Predicate  # (a.kind, a.value) < (b.kind, b.value)
+    support: int
+    lift: float
+    member_ids: tuple[str, ...]
 
 
 def _gate(kind: str) -> int:
@@ -75,3 +89,41 @@ def extract_predicates(pool: list[Track]) -> list[Predicate]:
         if len(ids) >= _gate(k) and 10 * len(ids) <= 7 * pool_size
     ]
     return sorted(out, key=lambda p: (p.kind, p.value))
+
+
+def _jaccard_sets(a: frozenset[str], b: frozenset[str]) -> float:
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
+def scan_pairs(predicates: list[Predicate], pool_size: int) -> list[MinedPair]:
+    """Gated, pruned, shortlisted cross-kind conjunctions. Deterministic.
+
+    Gates: cross-kind only, support >= :data:`MIN_SUPPORT`, at least one namable
+    side, lift >= :data:`MIN_LIFT`. A pair whose member set is near-identical to
+    either parent (Jaccard > :data:`_SUBSUME_JACCARD`) is subsumed and dropped —
+    it says nothing the single predicate did not already say. Returns at most
+    :data:`SHORTLIST` pairs, strongest lift first.
+    """
+    if pool_size <= 0:
+        return []
+    ordered = sorted(predicates, key=lambda p: (p.kind, p.value))
+    pairs: list[MinedPair] = []
+    for i, a in enumerate(ordered):
+        for b in ordered[i + 1 :]:
+            if a.kind == b.kind or not (a.namable or b.namable):
+                continue
+            members = a.track_ids & b.track_ids
+            if len(members) < MIN_SUPPORT:
+                continue
+            lift = len(members) * pool_size / (len(a.track_ids) * len(b.track_ids))
+            if lift < MIN_LIFT:
+                continue
+            if (
+                _jaccard_sets(members, a.track_ids) > _SUBSUME_JACCARD
+                or _jaccard_sets(members, b.track_ids) > _SUBSUME_JACCARD
+            ):
+                continue
+            pairs.append(MinedPair(a=a, b=b, support=len(members), lift=lift, member_ids=tuple(sorted(members))))
+    pairs.sort(key=lambda p: (-p.lift, p.a.value, p.b.value, p.member_ids))
+    return pairs[:SHORTLIST]
