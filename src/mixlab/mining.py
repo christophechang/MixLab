@@ -15,7 +15,9 @@ from mixlab.models import Track
 
 _GATE_DEFAULT = 8
 _GATE_REMIXER = 5
-_COVERAGE_CAP = 0.70
+_COVERAGE_CAP = 0.70  # documentation only — enforced via integer arithmetic below to avoid
+# float rounding at exact-boundary pool sizes (e.g. 63/90 == 0.70 exactly, but
+# 0.70 * 90 == 62.99999999999999 in IEEE-754 double precision).
 
 
 @dataclass(frozen=True)
@@ -66,10 +68,10 @@ def extract_predicates(pool: list[Track]) -> list[Predicate]:
         for t in hood:
             _add("key_hood", key, False, t)
 
-    cap = _COVERAGE_CAP * len(pool)
+    pool_size = len(pool)
     out = [
         Predicate(kind=k, value=v, namable=n, track_ids=frozenset(ids))
         for (k, v, n), ids in groups.items()
-        if len(ids) >= _gate(k) and len(ids) <= cap
+        if len(ids) >= _gate(k) and 10 * len(ids) <= 7 * pool_size
     ]
     return sorted(out, key=lambda p: (p.kind, p.value))

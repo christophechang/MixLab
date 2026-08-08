@@ -39,6 +39,19 @@ class TestExtractPredicates:
         pool = [_t(f"a{i}", energy=8) for i in range(24)] + [_t("b0", energy=3)]
         assert ("energy", "high") not in {(p.kind, p.value) for p in extract_predicates(pool)}
 
+    def test_coverage_cap_boundary_exact_seventy_percent_kept(self):
+        # 63/90 == exactly 70% — must be KEPT (cap drops only strictly >70%).
+        # Regression for float rounding: 0.70 * 90 == 62.99999999999999 in IEEE-754
+        # double precision, which would falsely exclude the 63rd track under a
+        # float comparison (`63 <= 62.99999999999999` is False).
+        pool = [_t(f"a{i}", tags=["boundary"]) for i in range(63)] + [_t(f"b{i}") for i in range(27)]
+        assert ("tag", "boundary") in {(p.kind, p.value) for p in extract_predicates(pool)}
+
+    def test_coverage_cap_boundary_just_over_seventy_percent_dropped(self):
+        # 64/90 > 70% — must be DROPPED.
+        pool = [_t(f"a{i}", tags=["boundary"]) for i in range(64)] + [_t(f"b{i}") for i in range(26)]
+        assert ("tag", "boundary") not in {(p.kind, p.value) for p in extract_predicates(pool)}
+
     def test_era_calendar_aligned(self):
         pool = [_t(f"a{i}", year=2016 + (i % 4)) for i in range(10)] + [_t(f"b{i}") for i in range(5)]
         preds = {(p.kind, p.value) for p in extract_predicates(pool)}
