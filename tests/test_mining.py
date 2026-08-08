@@ -4,6 +4,7 @@ from mixlab.mining import (  # noqa: F401 — asserts public interface
     MinedPair,
     Predicate,
     extract_predicates,
+    mine_pool,
     scan_pairs,
 )
 from mixlab.models import Track
@@ -191,3 +192,83 @@ class TestScanPairs:
         assert scan_pairs([a, b], pool_size=200) != []  # survives at a real pool size
         assert scan_pairs([a, b], pool_size=0) == []
         assert scan_pairs([a, b], pool_size=-1) == []
+
+
+def _conj_pool():
+    """Hospital Records x Liquid inside an 80-track pool.
+
+    NOTE: adjusted from the brief's original 20/20/20/20 split. That split gave
+    label totals of 40 and tag totals of 40 with a 20-track overlap, i.e. lift =
+    20*80/(40*40) = 1.0 — exactly chance, so scan_pairs' MIN_LIFT=1.3 gate (Task
+    5) drops it and the planted conjunction never fires. Shrinking the
+    Hospital-only / Liquid-only populations to 5 each keeps the 20-track overlap
+    (support) the same but shrinks both marginal totals to 25, lifting lift to
+    20*80/(25*25) = 2.56 while Jaccard-vs-parent stays 20/25 = 0.8 (under the 0.9
+    subsumption threshold). year is dropped from the base groups entirely (kept
+    only on the widen-test's added trailing group) so no era predicate arises to
+    compete with or subsume the planted pair. bpm/camelot_key are left at the
+    `_t` defaults everywhere so bpm_regime/key_hood cover the whole pool and get
+    excluded by the 70% coverage cap, matching the original fixture's intent.
+    """
+    pool = []
+    for i in range(20):
+        pool.append(_t(f"hl{i}", label="Hospital Records", tags=["Liquid"], date_added=f"2022-0{1 + i % 6}-10"))
+    for i in range(5):
+        pool.append(_t(f"ho{i}", label="Hospital Records", date_added=f"2021-0{1 + i % 6}-10"))
+    for i in range(5):
+        pool.append(_t(f"lo{i}", tags=["Liquid"], date_added=f"2021-0{1 + i % 6}-10"))
+    for i in range(20):
+        pool.append(_t(f"p{i}", label="Shogun Audio", tags=["Deep"], date_added=f"2023-0{1 + i % 6}-10"))
+    for i in range(30):
+        pool.append(_t(f"n{i}", date_added=f"2020-0{1 + i % 6}-10"))
+    return pool
+
+
+class TestMinePool:
+    def test_finds_the_planted_conjunction(self):
+        found = mine_pool(_conj_pool())
+        assert found, "expected at least one mined direction"
+        top = found[0]
+        assert top.direction_type == "found"
+        assert top.title == "Found: Hospital Records × liquid"
+        assert 15 <= len(top.track_ids) <= 25
+        assert top.identity > 0.0
+        assert top.feasibility == 0.0  # field scorer owns the final score
+
+    def test_title_never_contains_mechanical_values(self):
+        for d in mine_pool(_conj_pool()):
+            for banned in ("BPM", "8A", "174"):
+                assert banned not in d.title
+                assert banned not in d.mood
+
+    def test_mood_is_ascii_kind_pair(self):
+        found = mine_pool(_conj_pool())
+        assert found[0].mood == "label x tag"
+        assert found[0].mood.isascii()
+
+    def test_brief_leads_with_imperative_not_statistic(self):
+        found = mine_pool(_conj_pool())
+        assert found[0].brief.startswith("FOUND SET. Play")
+        assert "denser than chance" in found[0].brief
+
+    def test_brief_cites_selection_when_support_exceeds_cap(self):
+        # widen overlap to 40 so support > 25
+        pool = _conj_pool() + [
+            _t(
+                f"hx{i}",
+                label="Hospital Records",
+                tags=["Liquid"],
+                year=2020,
+                bpm=174.0,
+                date_added=f"2026-0{1 + i % 6}-15",
+            )
+            for i in range(20)
+        ]
+        found = mine_pool(pool)
+        top = next(d for d in found if d.title == "Found: Hospital Records × liquid")
+        assert "most central are selected" in top.brief
+        assert len(top.track_ids) == 25
+
+    def test_empty_and_sparse_pools_mine_nothing(self):
+        assert mine_pool([]) == []
+        assert mine_pool([_t(f"s{i}") for i in range(10)]) == []
