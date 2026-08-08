@@ -12,6 +12,11 @@ feasibility, seed-rotates the pick so different days surface different angles, a
 materialises the survivors as :class:`~mixlab.models.MixCanvas` objects carrying a
 DIRECTION BRIEF for Stage 2.
 
+Alongside the named vocabulary sits an unnamed one: :mod:`mixlab.mining` mines the
+pool for statistically dense predicate conjunctions the vocabulary has no word for
+(``found`` rows). Both axes go through the same scorer and the same dedupe, so a
+found set competes with a label spotlight on equal terms — see :func:`_combined_field`.
+
 Everything here is pure and deterministic: same pool + same seed → byte-identical
 output. No I/O beyond the one-line-per-direction stdout note emitted by
 :func:`generate_directions` (an intentional application-layer convenience).
@@ -25,6 +30,7 @@ import statistics
 from collections import Counter
 from dataclasses import dataclass, replace
 
+from mixlab import mining
 from mixlab.clustering import _centrality_rank, build_mix_canvas, camelot_compatible
 from mixlab.models import MixCanvas, MixConcept, Track
 from mixlab.transitions import score_transition, tempo_relation
@@ -66,6 +72,11 @@ _W_FRESHNESS = 0.25
 _W_IDENTITY = 0.45
 _W_DISTINCT = 0.30
 _DEDUPE_JACCARD = 0.6
+
+# Mined ("found") rows are open-ended — the miner shortlists up to twelve pairs — so
+# they are capped after scoring, before they can crowd out the named vocabulary.
+_MAX_MINED_PER_POOL = 3
+_MINED_TYPE = "found"
 
 
 @dataclass(frozen=True)
@@ -758,6 +769,44 @@ def _named_candidates(pool: list[Track], *, seed: int, collection: list[Track] |
     return candidates
 
 
+def _shape_field(candidates: list[Direction]) -> list[Direction]:
+    """Score the combined named+mined field, then shape the mined rows.
+
+    Post-score because all three rules need the final ranking: the mined cap
+    (:data:`_MAX_MINED_PER_POOL`) keeps the strongest few, title uniqueness keeps
+    the higher-ranked of two pairs that named themselves the same thing (a tag can
+    pair with both a tempo pocket and a key neighbourhood), and the surviving rows
+    are renamed ``found`` -> ``found_1``/``found_2``/... in that rank order so
+    downstream consumers get stable, distinguishable direction types.
+
+    Named rows pass through untouched — they are a fixed vocabulary of seven and
+    cap themselves.
+    """
+    out: list[Direction] = []
+    seen_titles: set[str] = set()
+    mined_kept = 0
+    for cand in _score_field(candidates):  # already (-feasibility, direction_type) sorted
+        if cand.direction_type == _MINED_TYPE:
+            if mined_kept >= _MAX_MINED_PER_POOL or cand.title in seen_titles:
+                continue
+            mined_kept += 1
+            seen_titles.add(cand.title)
+            cand = replace(cand, direction_type=f"{_MINED_TYPE}_{mined_kept}")
+        out.append(cand)
+    return out
+
+
+def _combined_field(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> list[Direction]:
+    """The whole candidate field over ``pool``: named builders plus mined pairs.
+
+    Both axes go through the one scorer so a found set and a label spotlight are
+    ranked on the same footing (and dedupe against each other — a mined pair that
+    is really just a label's catalogue loses to, or beats, the label spotlight
+    rather than shipping alongside it).
+    """
+    return _shape_field(_named_candidates(pool, seed=seed, collection=collection) + mining.mine_pool(pool))
+
+
 def enumerate_directions(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> list[Direction]:
     """Every surviving Direction candidate over ``pool``, exhaustively.
 
@@ -768,7 +817,10 @@ def enumerate_directions(pool: list[Track], *, seed: int, collection: list[Track
     whole scoped library, used by builders that measure a pool's concentration
     against the library baseline (label_spotlight).
     """
-    return _score_field(_named_candidates(pool, seed=seed, collection=collection))
+    return sorted(
+        _combined_field(pool, seed=seed, collection=collection),
+        key=lambda d: (-d.feasibility, d.direction_type),
+    )
 
 
 def generate_directions(
@@ -777,37 +829,49 @@ def generate_directions(
     *,
     seed: int,
     max_directions: int = 3,
+    collection: list[Track] | None = None,
 ) -> list[MixCanvas]:
     """Enumerate, score, seed-rotate, and materialise concept directions over ``pool``.
 
-    Each builder proposes a :class:`Direction` only when the material supports it;
-    :func:`_score_field` then dedupes clones and scores the surviving field.
-    Survivors are sorted by ``(-feasibility, direction_type)``, then rotated by a
-    seed-derived offset so different seeds/days surface different directions while the
-    strongest ones appear often. Up to ``max_directions`` are materialised as
-    :class:`~mixlab.models.MixCanvas` objects (via ``build_mix_canvas``) carrying the
-    direction's ``brief``/``direction_type``/``thread_artist``.
+    Each builder proposes a :class:`Direction` only when the material supports it and
+    the miner proposes conjunctions the vocabulary has no name for;
+    :func:`_shape_field` then dedupes clones, scores the surviving field, and caps
+    and renumbers the mined rows. Named survivors are sorted by
+    ``(-feasibility, direction_type)``, then rotated by a seed-derived offset so
+    different seeds/days surface different directions while the strongest ones appear
+    often. Mined rows do not rotate: a run ships at most one found set, always the
+    best-scoring, because they are the speculative axis. Up to ``max_directions``
+    canvases are materialised (via ``build_mix_canvas``) carrying the direction's
+    ``brief``/``direction_type``/``thread_artist``. ``collection`` is the whole scoped
+    library, used by builders that measure a pool's concentration against the library
+    baseline (label_spotlight) — pass it so the run path scores identically to the map.
 
     Prints one ``Direction: <type> — <title> (feasibility <f>)`` line per materialised
     direction to stdout — an intentional application-layer convenience so the run log
     records which directions fired without threading feasibility back through the caller.
     Deterministic: same pool + same seed → identical output.
     """
-    proposals = _named_candidates(pool, seed=seed)
+    proposals = _named_candidates(pool, seed=seed, collection=collection)
+    mined_proposals = mining.mine_pool(pool)
     # One diagnostic line so non-firing builders are visible in the run log —
     # genre_traverse silently returning None took three production runs to notice.
-    # Measured pre-scoring: _score_field can also drop a clone, and that is not the
-    # same failure as a builder never proposing anything.
+    # Measured pre-scoring: _shape_field can also drop a clone or cap a mined row,
+    # and that is not the same failure as a builder never proposing anything.
     proposed = ", ".join(sorted(d.direction_type for d in proposals)) if proposals else "none"
-    print(f"Directions proposed: {proposed} ({len(proposals)}/{len(_BUILDERS)} builders)")
-    candidates = _score_field(proposals)
-    if not candidates:
+    print(f"Directions proposed: {proposed} ({len(proposals)}/{len(_BUILDERS)} builders, {len(mined_proposals)} found)")
+    field = _shape_field(proposals + mined_proposals)
+    if not field:
         return []
 
-    rng = random.Random(seed)
-    offset = rng.randrange(len(candidates))
-    ordered = [candidates[(offset + i) % len(candidates)] for i in range(len(candidates))]
-    picked = ordered[:max_directions]
+    named = [d for d in field if not d.direction_type.startswith(_MINED_TYPE)]
+    mined = [d for d in field if d.direction_type.startswith(_MINED_TYPE)]
+    named.sort(key=lambda d: (-d.feasibility, d.direction_type))
+    picked = mined[:1]
+    if named:
+        rng = random.Random(seed)
+        offset = rng.randrange(len(named))
+        ordered = [named[(offset + i) % len(named)] for i in range(len(named))]
+        picked += ordered[: max(max_directions - len(picked), 0)]
 
     result: list[MixCanvas] = []
     for direction in picked:

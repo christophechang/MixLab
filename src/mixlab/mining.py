@@ -23,7 +23,13 @@ _COVERAGE_CAP = 0.70  # documentation only — enforced via integer arithmetic b
 # float rounding at exact-boundary pool sizes (e.g. 63/90 == 0.70 exactly, but
 # 0.70 * 90 == 62.99999999999999 in IEEE-754 double precision).
 
-MIN_SUPPORT = 15  # must equal directions.MIN_DIRECTION_POOL — a pair too small to build is not worth mining
+# Must equal directions.MIN_DIRECTION_POOL — a pair too small to build is not worth
+# mining. Deliberately duplicated rather than imported: directions imports this module
+# at module load (it owns the combined named+mined field), so a module-level
+# `from mixlab.directions import MIN_DIRECTION_POOL` here would close the import cycle.
+# The lazy in-function imports below exist for the same reason, but a module-level
+# constant cannot use that escape hatch. tests/test_mining.py asserts the two stay equal.
+MIN_SUPPORT = 15
 MIN_LIFT = 1.3
 _SUBSUME_JACCARD = 0.9
 SHORTLIST = 12

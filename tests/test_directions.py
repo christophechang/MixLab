@@ -5,6 +5,7 @@ import re
 from dataclasses import replace
 
 import pytest
+from conftest import conj_pool
 
 from mixlab.directions import (
     MAX_DIRECTION_POOL,
@@ -22,6 +23,7 @@ from mixlab.directions import (
     _log_lift,
     _path_feasible,
     _score_field,
+    _shape_field,
     enumerate_directions,
     generate_directions,
 )
@@ -627,3 +629,151 @@ class TestJaccard:
 
     def test_empty_versus_non_empty_is_disjoint(self) -> None:
         assert _jaccard([], ["a"]) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# _combined_field — mined candidates join the shared field as found_N (Task 7)
+# ---------------------------------------------------------------------------
+
+
+def _minable_pool() -> list[Track]:
+    """Pool where named builders AND the miner both fire.
+
+    ``conj_pool`` (tests/conftest.py) plants a Hospital Records x Liquid
+    conjunction inside 80 tracks and carries ``date_added`` throughout, which
+    gives fresh_crate its material. label_spotlight also proposes. Verified by
+    ``test_fixture_yields_both_named_and_mined_rows`` below — a fixture whose
+    miner silently stops firing would make every assertion here vacuous.
+    """
+    return conj_pool()
+
+
+def _found(title: str, ids: list[str], *, identity: float, freshness: float = 0.5) -> Direction:
+    """A mined-shaped candidate: ``direction_type == "found"``, pre-score."""
+    return replace(_cand("found", ids, identity=identity, freshness=freshness), title=title)
+
+
+class TestCombinedField:
+    def test_collection_lifts_label_spotlight_identity(self) -> None:
+        # A label that is 10/40 of the pool but rare in the wider collection scores
+        # higher on identity than the same label measured pool-only. (_rich_pool,
+        # not _minable_pool: there label_spotlight is a clone of fresh_crate.)
+        pool = _rich_pool()
+        collection = pool + [_track(track_id=f"c{i}", label="Other") for i in range(400)]
+
+        def _label_identity(field: list[Direction]) -> float:
+            return next(d.identity for d in field if d.direction_type == "label_spotlight")
+
+        assert _label_identity(enumerate_directions(pool, seed=7, collection=collection)) > _label_identity(
+            enumerate_directions(pool, seed=7)
+        )
+
+    def test_fixture_yields_both_named_and_mined_rows(self) -> None:
+        out = enumerate_directions(_minable_pool(), seed=0)
+        types = [d.direction_type for d in out]
+        assert any(t.startswith("found") for t in types), types
+        assert any(not t.startswith("found") for t in types), types
+
+    def test_mined_rows_have_distinct_found_n_types(self) -> None:
+        out = enumerate_directions(_minable_pool(), seed=0)
+        found_types = [d.direction_type for d in out if d.direction_type.startswith("found")]
+        assert found_types == [f"found_{i + 1}" for i in range(len(found_types))]
+        assert len(found_types) <= 3
+
+    def test_mined_rows_scored_not_zero(self) -> None:
+        out = enumerate_directions(_minable_pool(), seed=0)
+        for d in out:
+            if d.direction_type.startswith("found"):
+                assert d.feasibility > 0.0
+
+    def test_no_duplicate_titles_among_mined(self) -> None:
+        out = enumerate_directions(_minable_pool(), seed=0)
+        titles = [d.title for d in out if d.direction_type.startswith("found")]
+        assert len(titles) == len(set(titles))
+
+    def test_same_seed_byte_identical(self) -> None:
+        a = enumerate_directions(_minable_pool(), seed=7)
+        b = enumerate_directions(_minable_pool(), seed=7)
+        assert a == b
+
+    def test_sorted_by_feasibility_then_type(self) -> None:
+        out = enumerate_directions(_minable_pool(), seed=0)
+        keys = [(-d.feasibility, d.direction_type) for d in out]
+        assert keys == sorted(keys)
+
+
+class TestMinedShaping:
+    """Cap, title uniqueness and found_N renaming, over hand-built mined rows.
+
+    The live fixture yields a single mined survivor, so the cap and the
+    uniqueness rule need candidates built directly. Pools are disjoint so the
+    scorer's clone dedupe cannot interfere with what is under test.
+    """
+
+    def test_caps_mined_survivors_at_three_in_rank_order(self) -> None:
+        cands = [_found(f"Found: t{i}", [f"{i}-{j}" for j in range(25)], identity=0.9 - i * 0.1) for i in range(5)]
+        out = _shape_field(cands)
+        assert [d.direction_type for d in out] == ["found_1", "found_2", "found_3"]
+        assert [d.title for d in out] == ["Found: t0", "Found: t1", "Found: t2"]
+
+    def test_duplicate_mined_title_keeps_the_higher_ranked_row(self) -> None:
+        # Two pairs can produce the same title from the same namable value.
+        hi = _found("Found: liquid", [f"a{i}" for i in range(25)], identity=0.9)
+        lo = _found("Found: liquid", [f"b{i}" for i in range(25)], identity=0.2)
+        other = _found("Found: Metalheadz", [f"c{i}" for i in range(25)], identity=0.5)
+        out = _shape_field([lo, other, hi])
+        assert [(d.direction_type, d.title) for d in out] == [
+            ("found_1", "Found: liquid"),
+            ("found_2", "Found: Metalheadz"),
+        ]
+        assert all(d.track_ids[0].startswith(("a", "c")) for d in out)  # the lo clone is gone
+
+    def test_named_rows_keep_their_type_and_are_uncapped(self) -> None:
+        named = [_cand(f"named_{i}", [f"n{i}-{j}" for j in range(25)], identity=0.5, freshness=0.5) for i in range(5)]
+        mined = [_found("Found: x", [f"m{j}" for j in range(25)], identity=0.5)]
+        out = _shape_field(named + mined)
+        assert sum(1 for d in out if d.direction_type.startswith("named_")) == 5
+        assert [d.direction_type for d in out if d.direction_type.startswith("found")] == ["found_1"]
+
+    def test_shaping_is_order_independent(self) -> None:
+        cands = [_found(f"Found: t{i}", [f"{i}-{j}" for j in range(25)], identity=0.9 - i * 0.1) for i in range(5)]
+        assert _shape_field(cands) == _shape_field(list(reversed(cands)))
+
+
+class TestRunPathMinedCap:
+    def test_at_most_one_found_canvas_per_run(self) -> None:
+        pool = _minable_pool()
+        tracks_by_id = _tbi(pool)
+        canvases = generate_directions(pool, tracks_by_id, seed=3, max_directions=3)
+        found = [c for c in canvases if c.direction_type.startswith("found")]
+        assert len(found) <= 1
+
+    def test_a_found_canvas_actually_materialises(self) -> None:
+        pool = _minable_pool()
+        canvases = generate_directions(pool, _tbi(pool), seed=3, max_directions=3)
+        found = [c for c in canvases if c.direction_type.startswith("found")]
+        assert len(found) == 1
+        assert found[0].brief.startswith("FOUND SET.")
+
+    def test_diagnostic_line_reports_found_separately(self, capsys: pytest.CaptureFixture[str]) -> None:
+        pool = _minable_pool()
+        generate_directions(pool, _tbi(pool), seed=3)
+        out = capsys.readouterr().out
+        assert "found)" in out and "builders" in out
+
+    def test_collection_kwarg_reaches_label_spotlight_scoring(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """The run path must score label_spotlight the way the map path does.
+
+        Diluting the label across a wider collection raises its lift-based
+        identity, which moves its feasibility — visible in the per-direction run
+        log lines. If ``generate_directions`` swallowed ``collection`` the two
+        runs would print identically.
+        """
+        pool = _rich_pool()
+        collection = pool + [_track(track_id=f"c{i}", label="Other") for i in range(400)]
+        generate_directions(pool, _tbi(pool), seed=7, max_directions=6)
+        without = capsys.readouterr().out
+        generate_directions(pool, _tbi(pool), seed=7, max_directions=6, collection=collection)
+        with_collection = capsys.readouterr().out
+        assert "label_spotlight" in without
+        assert without != with_collection
