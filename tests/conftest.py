@@ -23,6 +23,12 @@ def _isolate_report_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
 # functions. Shared here because both test_mining.py (the miner in isolation)
 # and test_directions.py (the miner wired into the shared candidate field) need
 # a pool where the planted conjunction provably fires.
+#
+# Test modules reach them with a plain ``from conftest import conj_pool``. That
+# works because there is no ``tests/__init__.py``: pytest's default prepend import
+# mode puts this file's directory on ``sys.path`` and loads it as the top-level
+# module ``conftest``. Adding ``tests/__init__.py`` would make ``tests`` a package
+# and break those imports.
 # ---------------------------------------------------------------------------
 
 

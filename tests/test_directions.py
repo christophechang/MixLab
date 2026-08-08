@@ -773,6 +773,12 @@ class TestRunPathMinedCap:
         canvases = generate_directions(pool, _tbi(pool), seed=3, max_directions=3)
         assert [c.direction_type for c in canvases if c.direction_type.startswith("found")] == ["found_1"]
 
+    def test_zero_max_directions_ships_nothing_not_the_found_row(self) -> None:
+        # mined[:1] sidesteps max_directions by construction — it must still honour
+        # a caller asking for no directions at all.
+        pool = _minable_pool()
+        assert generate_directions(pool, _tbi(pool), seed=3, max_directions=0) == []
+
     def test_diagnostic_line_reports_found_separately(self, capsys: pytest.CaptureFixture[str]) -> None:
         pool = _minable_pool()
         generate_directions(pool, _tbi(pool), seed=3)

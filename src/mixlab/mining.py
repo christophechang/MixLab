@@ -102,6 +102,14 @@ def extract_predicates(pool: list[Track]) -> list[Predicate]:
 
 
 def _jaccard_sets(a: frozenset[str], b: frozenset[str]) -> float:
+    """Set overlap, used for the subsumption check in :func:`scan_pairs`.
+
+    Empty-vs-empty is 0.0 here, where ``directions._jaccard`` returns 1.0. The
+    questions differ: that one asks "are these two candidate pools the same set of
+    tracks" (two empty pools are), this one asks "is this pair's member set just
+    its parent predicate restated" — and an empty overlap restates nothing. Don't
+    unify the two without re-reading both call sites.
+    """
     union = len(a | b)
     return len(a & b) / union if union else 0.0
 

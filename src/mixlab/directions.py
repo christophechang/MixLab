@@ -769,6 +769,11 @@ def _named_candidates(pool: list[Track], *, seed: int, collection: list[Track] |
     return candidates
 
 
+def _is_mined(direction: Direction) -> bool:
+    """True for a mined row, before (``found``) or after (``found_1``) renumbering."""
+    return direction.direction_type.startswith(_MINED_TYPE)
+
+
 def _shape_field(candidates: list[Direction]) -> list[Direction]:
     """Score the combined named+mined field, then shape the mined rows.
 
@@ -781,6 +786,12 @@ def _shape_field(candidates: list[Direction]) -> list[Direction]:
 
     Named rows pass through untouched — they are a fixed vocabulary of seven and
     cap themselves.
+
+    Note that a mined row dropped here still influenced the scoring: it was part of
+    the field :func:`_score_field` measured distinctiveness against. That is
+    deliberate — the cap is an output budget, not a claim that the row was never a
+    candidate, and a survivor's distinctiveness should reflect everything the pool
+    actually supports.
     """
     out: list[Direction] = []
     seen_titles: set[str] = set()
@@ -796,6 +807,23 @@ def _shape_field(candidates: list[Direction]) -> list[Direction]:
     return out
 
 
+def _field_parts(
+    pool: list[Track], *, seed: int, collection: list[Track] | None = None
+) -> tuple[list[Direction], list[Direction]]:
+    """Every candidate source over ``pool``, pre-scoring: ``(named, mined)``.
+
+    THE single assembly point for the candidate field — a new source of Directions
+    is added here and nowhere else, so the map path and the run path cannot drift
+    apart on what the field contains (adding a third part changes this signature,
+    which breaks both callers loudly rather than silently skipping one).
+
+    Returned as parts rather than one list because :func:`generate_directions`
+    reports proposal counts per source in its run-log diagnostic, and those counts
+    are measured *before* scoring drops anything.
+    """
+    return _named_candidates(pool, seed=seed, collection=collection), mining.mine_pool(pool)
+
+
 def _combined_field(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> list[Direction]:
     """The whole candidate field over ``pool``: named builders plus mined pairs.
 
@@ -804,7 +832,8 @@ def _combined_field(pool: list[Track], *, seed: int, collection: list[Track] | N
     is really just a label's catalogue loses to, or beats, the label spotlight
     rather than shipping alongside it).
     """
-    return _shape_field(_named_candidates(pool, seed=seed, collection=collection) + mining.mine_pool(pool))
+    named, mined = _field_parts(pool, seed=seed, collection=collection)
+    return _shape_field(named + mined)
 
 
 def enumerate_directions(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> list[Direction]:
@@ -855,8 +884,7 @@ def generate_directions(
     records which directions fired without threading feasibility back through the caller.
     Deterministic: same pool + same seed → identical output.
     """
-    proposals = _named_candidates(pool, seed=seed, collection=collection)
-    mined_proposals = mining.mine_pool(pool)
+    proposals, mined_proposals = _field_parts(pool, seed=seed, collection=collection)
     # One diagnostic line so non-firing builders are visible in the run log —
     # genre_traverse silently returning None took three production runs to notice.
     # Measured pre-scoring: _shape_field can also drop a clone or cap a mined row,
@@ -867,10 +895,12 @@ def generate_directions(
     if not field:
         return []
 
-    named = [d for d in field if not d.direction_type.startswith(_MINED_TYPE)]
-    mined = [d for d in field if d.direction_type.startswith(_MINED_TYPE)]
+    named = [d for d in field if not _is_mined(d)]
+    mined = [d for d in field if _is_mined(d)]
     named.sort(key=lambda d: (-d.feasibility, d.direction_type))
-    picked = mined[:1]
+    # A run ships at most one found set — and none at all when the caller asked for
+    # no directions, which the unguarded mined[:1] would have overridden.
+    picked = mined[:1] if max_directions >= 1 else []
     if named:
         rng = random.Random(seed)
         offset = rng.randrange(len(named))
