@@ -11,6 +11,7 @@ from mixlab.directions import (
     MAX_DIRECTION_POOL,
     MIN_DIRECTION_POOL,
     Direction,
+    DirectionSpecError,
     _build_artist_thread,
     _build_energy_shape_first,
     _build_era_dialogue,
@@ -27,6 +28,7 @@ from mixlab.directions import (
     _shape_field,
     enumerate_directions,
     generate_directions,
+    pinned_canvas_from_spec,
 )
 from mixlab.models import Track
 
@@ -907,3 +909,95 @@ class TestRunPathMinedCap:
         with_collection = capsys.readouterr().out
         assert "label_spotlight" in without
         assert without != with_collection
+
+
+# ---------------------------------------------------------------------------
+# pinned_canvas_from_spec — the --direction-spec materialiser
+# ---------------------------------------------------------------------------
+
+
+def _spec_pool(n: int = 20) -> list[Track]:
+    return [_track(track_id=f"s{i}", bpm=172.0 + (i % 3)) for i in range(n)]
+
+
+def _spec_json(pool: list[Track], **overrides: object) -> str:
+    import json as _json
+
+    spec: dict[str, object] = {
+        "direction_type": "artist_thread",
+        "title": "Artist thread: Dusky",
+        "mood": "Dusky as spine",
+        "brief": "This set threads Dusky through the mix as its spine.",
+        "track_ids": [t.track_id for t in pool],
+        "thread_artist": "Dusky",
+    }
+    spec.update(overrides)
+    return _json.dumps(spec)
+
+
+class TestPinnedCanvasFromSpec:
+    def test_happy_path_materialises_pinned_canvas(self) -> None:
+        pool = _spec_pool()
+        canvas = pinned_canvas_from_spec(_spec_json(pool), _tbi(pool))
+        assert canvas.pinned is True
+        assert canvas.direction_type == "artist_thread"
+        assert canvas.brief.startswith("This set threads Dusky")
+        assert canvas.thread_artist == "Dusky"
+        assert canvas.source_concept.title == "Artist thread: Dusky"
+        assert set(canvas.source_concept.track_ids) == {t.track_id for t in pool}
+
+    def test_unknown_keys_ignored_forward_compat(self) -> None:
+        pool = _spec_pool()
+        spec = _spec_json(pool, feasibility=0.42, future_field="x")
+        canvas = pinned_canvas_from_spec(spec, _tbi(pool))
+        assert canvas.pinned is True
+
+    def test_invalid_json_raises(self) -> None:
+        with pytest.raises(DirectionSpecError, match="not valid JSON"):
+            pinned_canvas_from_spec("{nope", {})
+
+    def test_non_object_raises(self) -> None:
+        with pytest.raises(DirectionSpecError, match="JSON object"):
+            pinned_canvas_from_spec("[1, 2]", {})
+
+    @pytest.mark.parametrize("key", ["direction_type", "title", "brief"])
+    def test_missing_required_string_raises(self, key: str) -> None:
+        pool = _spec_pool()
+        spec = _spec_json(pool, **{key: ""})
+        with pytest.raises(DirectionSpecError, match=key):
+            pinned_canvas_from_spec(spec, _tbi(pool))
+
+    def test_track_ids_must_be_string_list(self) -> None:
+        pool = _spec_pool()
+        with pytest.raises(DirectionSpecError, match="track_ids"):
+            pinned_canvas_from_spec(_spec_json(pool, track_ids=[1, 2, 3]), _tbi(pool))
+
+    def test_too_few_resolvable_ids_raises_with_counts(self) -> None:
+        pool = _spec_pool()
+        known = _tbi(pool[:5])  # only 5 of 20 ids resolve — below MIN_DIRECTION_POOL
+        with pytest.raises(DirectionSpecError, match=r"5 of 20"):
+            pinned_canvas_from_spec(_spec_json(pool), known)
+
+    def test_caps_at_max_direction_pool_preserving_order(self) -> None:
+        pool = _spec_pool(MAX_DIRECTION_POOL + 10)
+        canvas = pinned_canvas_from_spec(_spec_json(pool), _tbi(pool))
+        assert canvas.source_concept.track_ids == [t.track_id for t in pool[:MAX_DIRECTION_POOL]]
+
+    def test_thread_artist_derived_from_title_when_absent(self) -> None:
+        # Stale map payloads predate thread_artist in the wire entry; the artist-thread
+        # validator suppression still needs the name, so it is derived from the title.
+        pool = _spec_pool()
+        spec = _spec_json(pool, thread_artist="")
+        canvas = pinned_canvas_from_spec(spec, _tbi(pool))
+        assert canvas.thread_artist == "Dusky"
+
+    def test_thread_artist_stays_empty_for_other_types(self) -> None:
+        pool = _spec_pool()
+        spec = _spec_json(pool, direction_type="label_spotlight", title="Label spotlight: Hotflush", thread_artist="")
+        canvas = pinned_canvas_from_spec(spec, _tbi(pool))
+        assert canvas.thread_artist == ""
+
+    def test_mood_defaults_to_empty(self) -> None:
+        pool = _spec_pool()
+        canvas = pinned_canvas_from_spec(_spec_json(pool, mood=""), _tbi(pool))
+        assert canvas.source_concept.mood == ""

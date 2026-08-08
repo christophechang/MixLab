@@ -247,7 +247,7 @@ class TestMapPayloadWithMining:
         ]
         assert found, "fixture collection must mine at least one found row"
         for d in found:
-            assert set(d) == {"direction_type", "title", "mood", "brief", "feasibility", "track_ids"}
+            assert set(d) == {"direction_type", "title", "mood", "brief", "feasibility", "track_ids", "thread_artist"}
             assert cast(str, d["title"]).startswith("Found: ")
             assert 0.0 < cast(float, d["feasibility"]) <= 1.0
             assert 15 <= len(cast("list[str]", d["track_ids"])) <= 25
@@ -257,3 +257,19 @@ class TestMapPayloadWithMining:
         a = render_map_json(build_map_payload(conj_pool(), mode="all", seed=0, played=[]))
         b = render_map_json(build_map_payload(conj_pool(), mode="all", seed=0, played=[]))
         assert a == b
+
+
+def test_direction_entries_carry_thread_artist() -> None:
+    """Every direction entry ships thread_artist (empty for non-thread types) so the
+    web app can round-trip it into a --direction-spec without re-deriving it."""
+    payload = build_map_payload(conj_pool(), mode="all", seed=0, played=[])
+    pools = cast("dict[str, dict[str, object]]", payload["pools"])
+    entries = [
+        d for e in pools.values() for d in cast("list[dict[str, object]]", e["directions"])
+    ]
+    assert entries
+    for d in entries:
+        assert "thread_artist" in d
+        if d["direction_type"] == "artist_thread":
+            assert d["thread_artist"], "artist_thread entries must name the spine artist"
+        assert isinstance(d["thread_artist"], str)

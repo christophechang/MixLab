@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- **`--direction-spec` — "Run this direction" actually runs the direction.** The web app's
+  library-map "Run this direction" used to hand over only the genre and the brief-as-intent;
+  the run then re-enumerated directions from a different seed over a different pool, so the
+  clicked direction (its tracks included) almost never materialised — an artist-thread pick
+  could ship with none of the thread's tracks. The map's direction entry now round-trips as a
+  JSON spec (`directionSpec` on the run manifest → `--direction-spec` in the worker argv):
+  the pipeline materialises those exact tracks, brief, and type as a **pinned canvas**, the
+  Stage 2 prompt marks it and mandates a concept from it (the skip-a-weak-canvas allowance
+  explicitly does not apply), and a deterministic post-check logs a warning if Stage 2
+  somehow skipped it anyway. The pinned canvas replaces the enumerated-directions slot
+  (5 classic canvases + the pin); `--directions` off/only are superseded with a stderr note,
+  and playlist mode ignores the flag like the other genre-only levers. Map payload direction
+  entries now also carry `thread_artist` so artist-thread pins keep their spine for the
+  repeat-suppression validator; specs from older payloads derive it from the title. A spec
+  whose pinned tracks no longer resolve (stale analysis after collection drift) fails the
+  run with a message telling the operator to re-run the analysis, rather than silently
+  shipping a run without the chosen tracks. All existing paths are byte-identical when the
+  flag is absent.
+
 ## v1.14.0 — 2026-08-08
 
 - **Conjunction mining: directions the vocabulary has no name for (#53 follow-up).** Each
