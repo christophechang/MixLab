@@ -82,14 +82,14 @@ class CanvasEntryDebug:
     # selected entries: score from the round this canvas was picked (no self-overlap issue).
     # rejected entries: score recomputed debug-only after selection against full picked_core_ids.
     score: CanvasScore
-    novelty_penalty: float   # 1.0 - score.novelty
-    overlap_penalty: float   # 1.0 - score.distinctiveness; for rejected = vs full selected set
-    best_round_rank: int            # best rank achieved across all rounds (1 = ranked first)
-    best_round_candidate_count: int # candidate pool size in the round best_round_rank was achieved
-    rounds_evaluated: int           # number of rounds this canvas was scored in
+    novelty_penalty: float  # 1.0 - score.novelty
+    overlap_penalty: float  # 1.0 - score.distinctiveness; for rejected = vs full selected set
+    best_round_rank: int  # best rank achieved across all rounds (1 = ranked first)
+    best_round_candidate_count: int  # candidate pool size in the round best_round_rank was achieved
+    rounds_evaluated: int  # number of rounds this canvas was scored in
     # Human-readable, derived from data: e.g. "best rank 3/7 across 4 rounds"
     # Denominator is best_round_candidate_count (pool shrinks each round).
-    rejection_reason: str           # "" if selected
+    rejection_reason: str  # "" if selected
 
 
 @dataclass
@@ -110,6 +110,7 @@ def select_canvases(
     history: ConceptHistory,
     n: int = 6,
 ) -> list[MixCanvas]: ...
+
 
 # After
 def select_canvases(

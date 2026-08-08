@@ -70,9 +70,7 @@ def enumerate_directions(pool: list[Track], *, seed: int) -> list[Direction]:
     MixCanvas, and no run-log printing — the caller wants the full candidate
     field with feasibility scores, deterministically ordered.
     """
-    candidates = [
-        direction for builder in _BUILDERS if (direction := builder(pool, seed=seed)) is not None
-    ]
+    candidates = [direction for builder in _BUILDERS if (direction := builder(pool, seed=seed)) is not None]
     candidates.sort(key=lambda d: (-d.feasibility, d.direction_type))
     return candidates
 ```

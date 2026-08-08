@@ -154,6 +154,7 @@ _UNPLAYED_WEIGHT: float = 1.5
 _MAX_PLAYLIST_POOL: int = 120
 _MIN_PLAYLIST_TRACKS: int = 4
 
+
 def build_playlist_pool(
     seed_track_ids: list[str],
     all_tracks: list[Track],
@@ -199,6 +200,7 @@ This matches existing pipeline semantics: catalog API result takes precedence; R
        if unplayed_ids is not None:
            return t.track_id in unplayed_ids
        return t.play_count == 0
+
 
    def _score(t: Track) -> float:
        score = 1.0
@@ -503,10 +505,7 @@ mode_group.add_argument(
     type=str,
     default=None,
     metavar="NAME",
-    help=(
-        "Rekordbox playlist name (or folder/name path) to use as seed for a single "
-        "playlist-completion concept."
-    ),
+    help=("Rekordbox playlist name (or folder/name path) to use as seed for a single playlist-completion concept."),
 )
 ```
 

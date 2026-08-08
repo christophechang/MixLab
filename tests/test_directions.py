@@ -501,7 +501,7 @@ def _t(
 
 
 class TestFreshness:
-    def test_newest_half_scores_above_oldest_half(self):
+    def test_newest_half_scores_above_oldest_half(self) -> None:
         pool = [_t(f"o{i}", date_added=f"2020-01-{i + 1:02d}") for i in range(10)] + [
             _t(f"n{i}", date_added=f"2026-06-{i + 1:02d}") for i in range(10)
         ]
@@ -510,11 +510,11 @@ class TestFreshness:
         assert _freshness(newest, pool) > 0.7
         assert _freshness(oldest, pool) < 0.3
 
-    def test_missing_date_added_sorts_oldest(self):
+    def test_missing_date_added_sorts_oldest(self) -> None:
         pool = [_t("u1"), _t("u2")] + [_t(f"d{i}", date_added=f"2026-01-{i + 1:02d}") for i in range(8)]
         assert _freshness([pool[0], pool[1]], pool) < 0.2
 
-    def test_all_unplayed_pool_does_not_saturate(self):
+    def test_all_unplayed_pool_does_not_saturate(self) -> None:
         # freshness is date-rank based, so an "all-unplayed" pool still spreads
         pool = [_t(f"x{i}", date_added=f"20{20 + i // 5}-01-01") for i in range(20)]
         vals = {_freshness([t], pool) for t in pool}
@@ -522,7 +522,7 @@ class TestFreshness:
 
 
 class TestLogLift:
-    def test_anchor_points(self):
+    def test_anchor_points(self) -> None:
         assert _log_lift(1.0) == 0.0
         assert abs(_log_lift(2.0) - 1 / 3) < 1e-9
         assert abs(_log_lift(8.0) - 1.0) < 1e-9
@@ -531,7 +531,7 @@ class TestLogLift:
 
 
 class TestIdentityRenormalisation:
-    def test_mood_journey_balance_uses_untruncated_pole_counts(self):
+    def test_mood_journey_balance_uses_untruncated_pole_counts(self) -> None:
         # 40 dark vs 8 euphoric: old code truncated both to [:10] first → balance 0.8.
         # New: _balance(40, 8) = 0.2.
         pool = (
@@ -545,7 +545,7 @@ class TestIdentityRenormalisation:
         # stored signal directly (Task 2 exposes it — see Step 2)
         assert abs(d.identity - 0.2) < 1e-9
 
-    def test_label_spotlight_collection_lift(self):
+    def test_label_spotlight_collection_lift(self) -> None:
         pool = [_t(f"l{i}", label="Metalheadz") for i in range(10)] + [_t(f"p{i}") for i in range(10)]
         collection = pool + [_t(f"c{i}") for i in range(80)]
         d = _build_label_spotlight(pool, seed=1, collection=collection)
@@ -553,7 +553,7 @@ class TestIdentityRenormalisation:
         # share_in_pool 0.5, share_in_collection 0.1 → ratio 5 → log2(5)/3 ≈ 0.774
         assert abs(d.identity - math.log2(5) / 3) < 1e-6  # add `import math` at file top
 
-    def test_label_spotlight_without_collection_falls_back_to_share(self):
+    def test_label_spotlight_without_collection_falls_back_to_share(self) -> None:
         pool = [_t(f"l{i}", label="Metalheadz") for i in range(10)] + [_t(f"p{i}") for i in range(10)]
         d = _build_label_spotlight(pool, seed=1)
         assert d is not None
@@ -579,7 +579,7 @@ def _cand(dtype: str, ids: list[str], *, identity: float, freshness: float) -> D
 
 
 class TestScoreField:
-    def test_spread_where_old_formula_saturated(self):
+    def test_spread_where_old_formula_saturated(self) -> None:
         # Three full-size, path-feasible candidates that all scored ~1.0 before
         a = _cand("fresh_crate", [f"a{i}" for i in range(25)], identity=1.0, freshness=0.97)
         b = _cand("label_spotlight", [f"b{i}" for i in range(25)], identity=0.3, freshness=0.4)
@@ -587,20 +587,20 @@ class TestScoreField:
         scores = {d.direction_type: d.feasibility for d in _score_field([a, b, c])}
         assert max(scores.values()) - min(scores.values()) > 0.15
 
-    def test_dedupe_drops_lower_ranked_clone(self):
+    def test_dedupe_drops_lower_ranked_clone(self) -> None:
         shared = [f"s{i}" for i in range(20)]
         hi = _cand("era_dialogue", shared + ["h1", "h2"], identity=0.9, freshness=0.5)
         lo = _cand("found_1", shared + ["l1", "l2"], identity=0.2, freshness=0.5)
         out = _score_field([hi, lo])
         assert [d.direction_type for d in out] == ["era_dialogue"]
 
-    def test_lone_candidate_distinctiveness_is_half(self):
+    def test_lone_candidate_distinctiveness_is_half(self) -> None:
         a = _cand("artist_thread", [f"a{i}" for i in range(25)], identity=0.4, freshness=0.4)
         [scored] = _score_field([a])
         # 0.25*0.4 + 0.45*0.4 + 0.30*0.5 = 0.43
         assert abs(scored.feasibility - 0.43) < 1e-9
 
-    def test_deterministic_under_input_order(self):
+    def test_deterministic_under_input_order(self) -> None:
         a = _cand("x1", [f"a{i}" for i in range(25)], identity=0.5, freshness=0.5)
         b = _cand("x2", [f"b{i}" for i in range(25)], identity=0.5, freshness=0.4)
         assert _score_field([a, b]) == _score_field([b, a])

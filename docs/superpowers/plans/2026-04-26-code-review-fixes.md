@@ -276,11 +276,10 @@ import respx
 import httpx
 from mixlab.discord_client import DiscordClient
 
+
 @pytest.mark.anyio
 async def test_post_raw_raises_after_max_retries_on_429() -> None:
-    client = DiscordClient(
-        bot_token="tok", guild_id="g", channel_id="c123", channel_name="mix-lab"
-    )
+    client = DiscordClient(bot_token="tok", guild_id="g", channel_id="c123", channel_name="mix-lab")
     with respx.mock:
         respx.post("https://discord.com/api/v10/channels/c123/messages").mock(
             return_value=httpx.Response(429, json={"retry_after": 0.01})

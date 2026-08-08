@@ -41,10 +41,14 @@ In `src/mixlab/llm.py`, in the `_STAGE2_SYSTEM_PLAYLIST` definition (the `.repla
 
 ```python
 # OLD (line ~775):
-"- SELECT a coherent final tracklist from the pool. Prefer roughly 12–18 tracks when the material supports it, and allow a longer list when needed to preserve a strong seed-led arc. Exclude only tracks that genuinely weaken the journey. Weakness is practical: a track whose intro gives no workable mix point, a vocal that starts on bar one with no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment used so early it makes everything after feel like a comedown.",
+(
+    "- SELECT a coherent final tracklist from the pool. Prefer roughly 12–18 tracks when the material supports it, and allow a longer list when needed to preserve a strong seed-led arc. Exclude only tracks that genuinely weaken the journey. Weakness is practical: a track whose intro gives no workable mix point, a vocal that starts on bar one with no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment used so early it makes everything after feel like a comedown.",
+)
 
 # NEW:
-"- SELECT a coherent final tracklist from the pool. Prefer 10–12 tracks. Do not exceed 12 tracks unless dropping a 13th would break an anchor adjacency pair — in that case, include it and note the exception. Exclude tracks that genuinely weaken the journey. Weakness is practical: a track whose intro gives no workable mix point, a vocal that starts on bar one with no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment used so early it makes everything after feel like a comedown.",
+(
+    "- SELECT a coherent final tracklist from the pool. Prefer 10–12 tracks. Do not exceed 12 tracks unless dropping a 13th would break an anchor adjacency pair — in that case, include it and note the exception. Exclude tracks that genuinely weaken the journey. Weakness is practical: a track whose intro gives no workable mix point, a vocal that starts on bar one with no room to bring it in, a bass-heavy record dropped after another with no frequency relief, a big moment used so early it makes everything after feel like a comedown.",
+)
 ```
 
 - [ ] **Step 4: Run test to confirm it passes**
@@ -88,7 +92,7 @@ def test_make_selection_system_removes_report_format_instructions() -> None:
     from mixlab.llm import _make_selection_system, _STAGE2_SYSTEM
 
     result = _make_selection_system(_STAGE2_SYSTEM)
-    assert "The \"report\" value must be a single string" not in result
+    assert 'The "report" value must be a single string' not in result
     assert "Role options: opener" not in result  # part of the report-format section
 
 
@@ -230,7 +234,9 @@ async def test_call_stage2_reports_returns_one_report_per_concept(
         MixConcept(title="Set B", mood="light", track_ids=["1", "2", "3", "4"]),
     ]
     tracks_by_id = {
-        str(i): Track(track_id=str(i), artist=f"Artist {i}", title=f"Title {i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass")
+        str(i): Track(
+            track_id=str(i), artist=f"Artist {i}", title=f"Title {i}", bpm=174.0, camelot_key="8A", genre="Drum & Bass"
+        )
         for i in range(1, 5)
     }
 
@@ -360,10 +366,7 @@ async def _call_stage2_reports(
     """Generate prose reports for all concepts in parallel."""
     return list(
         await asyncio.gather(
-            *[
-                _call_stage2_report_single(c, tracks_by_id, seed_ids, unplayed_ids, stage2_key)
-                for c in concepts
-            ]
+            *[_call_stage2_report_single(c, tracks_by_id, seed_ids, unplayed_ids, stage2_key) for c in concepts]
         )
     )
 ```
@@ -474,6 +477,7 @@ The injection string-replaces a phrase that still exists in the selection prompt
 
 ```python
 from mixlab.llm import _STAGE2_SYSTEM_SELECTION
+
 assert "Give each concept a compelling creative name" in _STAGE2_SYSTEM_SELECTION
 ```
 
@@ -504,9 +508,7 @@ The source-playlist context and seed accounting will move to the report-generati
 
 ```python
 # OLD:
-raw, stage2_model_display = await _call_stage2_raw(
-    prompt, stage2_system, stage2_key, use_minimax, stage2_model_display
-)
+raw, stage2_model_display = await _call_stage2_raw(prompt, stage2_system, stage2_key, use_minimax, stage2_model_display)
 
 # NEW:
 raw = await _call_stage2_raw(prompt, stage2_system, stage2_key, max_tokens=8192)
@@ -568,68 +570,59 @@ The removed sentence ("For each one still excluded, give one sentence of musical
 Find the existing block that starts with `if variants:` (builds `ordered_reports`, `ordered_concepts`) and the `else:` that handles the retry path. Replace the entire block with:
 
 ```python
-        if variants:
-            ordered_variants = (
-                [best]
-                + sorted(
-                    [v for v in variants if v.concept is not concept],
-                    key=lambda v: _STRATEGY_PRIORITY.get(v.strategy, 99),
-                )
-            )
+if variants:
+    ordered_variants = [best] + sorted(
+        [v for v in variants if v.concept is not concept],
+        key=lambda v: _STRATEGY_PRIORITY.get(v.strategy, 99),
+    )
 
-            rejected_summary = ""
-            rejected = ordered_variants[1:]
-            if rejected:
-                parts = [
-                    f"{v.strategy} (practicality: {v.practicality_score.overall:.2f}, "
-                    f"anchor retention: {v.anchor_retention_rate:.0%}) — not selected"
-                    for v in rejected
-                ]
-                rejected_summary = "\nAlternative strategies considered: " + "; ".join(parts) + "."
+    rejected_summary = ""
+    rejected = ordered_variants[1:]
+    if rejected:
+        parts = [
+            f"{v.strategy} (practicality: {v.practicality_score.overall:.2f}, "
+            f"anchor retention: {v.anchor_retention_rate:.0%}) — not selected"
+            for v in rejected
+        ]
+        rejected_summary = "\nAlternative strategies considered: " + "; ".join(parts) + "."
 
-            reports = await _call_stage2_reports(
-                [v.concept for v in ordered_variants],
+    reports = await _call_stage2_reports(
+        [v.concept for v in ordered_variants],
+        tracks_by_id,
+        seed_ids,
+        unplayed_ids,
+        stage2_key,
+    )
+
+    ordered_reports: list[str] = []
+    ordered_concepts: list[MixConcept] = []
+    for variant, base_report in zip(ordered_variants, reports, strict=True):
+        is_winner = variant.concept is concept
+        if is_winner:
+            base_report = _rewrite_playlist_report(
+                base_report,
+                playlist_name,
+                variant.concept,
+                playlist_seed_track_ids,
                 tracks_by_id,
-                seed_ids,
-                unplayed_ids,
-                stage2_key,
+                rejected_summary,
             )
-
-            ordered_reports: list[str] = []
-            ordered_concepts: list[MixConcept] = []
-            for variant, base_report in zip(ordered_variants, reports, strict=True):
-                is_winner = variant.concept is concept
-                if is_winner:
-                    base_report = _rewrite_playlist_report(
-                        base_report,
-                        playlist_name,
-                        variant.concept,
-                        playlist_seed_track_ids,
-                        tracks_by_id,
-                        rejected_summary,
-                    )
-                ordered_reports.append(
-                    _label_playlist_report_section(base_report, variant.strategy, is_winner=is_winner)
-                )
-                ordered_concepts.append(
-                    _retitle_playlist_concept(variant.concept, variant.strategy, is_winner=is_winner)
-                )
-            report = "\n\n---\n\n".join(ordered_reports)
-            curated = ordered_concepts
-        else:
-            rejected_summary = ""
-            retry_reports = await _call_stage2_reports(
-                [concept], tracks_by_id, seed_ids, unplayed_ids, stage2_key
-            )
-            base_report = retry_reports[0] if retry_reports else ""
-            report = _label_playlist_report_section(
-                _rewrite_playlist_report(
-                    base_report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id, rejected_summary
-                ),
-                concept.mood.lower(),
-                is_winner=True,
-            )
-            curated = [_retitle_playlist_concept(concept, concept.mood.lower(), is_winner=True)]
+        ordered_reports.append(_label_playlist_report_section(base_report, variant.strategy, is_winner=is_winner))
+        ordered_concepts.append(_retitle_playlist_concept(variant.concept, variant.strategy, is_winner=is_winner))
+    report = "\n\n---\n\n".join(ordered_reports)
+    curated = ordered_concepts
+else:
+    rejected_summary = ""
+    retry_reports = await _call_stage2_reports([concept], tracks_by_id, seed_ids, unplayed_ids, stage2_key)
+    base_report = retry_reports[0] if retry_reports else ""
+    report = _label_playlist_report_section(
+        _rewrite_playlist_report(
+            base_report, playlist_name, concept, playlist_seed_track_ids, tracks_by_id, rejected_summary
+        ),
+        concept.mood.lower(),
+        is_winner=True,
+    )
+    curated = [_retitle_playlist_concept(concept, concept.mood.lower(), is_winner=True)]
 ```
 
 Note: the old code had `ordered_variants` and `rejected_summary` built before this block in separate steps. With the new structure, both are computed inside `if variants:`. Remove the old `ordered_variants =` and `rejected_summary =` assignments that preceded the old `if variants:` block.
@@ -716,7 +709,7 @@ async def test_stage2_returns_curated_concepts_and_report(monkeypatch: pytest.Mo
     respx.post(_ANTHROPIC_URL).mock(
         side_effect=[
             Response(200, json=_anthropic_response(_curated_payload())),  # selection
-            Response(200, json=_anthropic_response(_REPORT_TEXT)),         # report
+            Response(200, json=_anthropic_response(_REPORT_TEXT)),  # report
         ]
     )
 
@@ -813,8 +806,8 @@ async def test_stage2_playlist_mode_report_rewrites_seed_counts_deterministicall
     )
     respx.post(_ANTHROPIC_URL).mock(
         side_effect=[
-            Response(200, json=_anthropic_response(payload)),        # selection
-            Response(200, json=_anthropic_response(prose_report)),   # report
+            Response(200, json=_anthropic_response(payload)),  # selection
+            Response(200, json=_anthropic_response(prose_report)),  # report
         ]
     )
 
@@ -916,10 +909,10 @@ async def test_stage2_playlist_mode_returns_winner_first_with_labeled_titles(
     # ordered_variants = winner (Practical) + sorted remainder → Practical, Balanced, Adventurous
     respx.post(_ANTHROPIC_URL).mock(
         side_effect=[
-            Response(200, json=_anthropic_response(payload)),                                   # selection
-            Response(200, json=_anthropic_response(make_report("Practical Set"))),              # report: winner
-            Response(200, json=_anthropic_response(make_report("Balanced Set"))),               # report: balanced
-            Response(200, json=_anthropic_response(make_report("Adventurous Set"))),            # report: adventurous
+            Response(200, json=_anthropic_response(payload)),  # selection
+            Response(200, json=_anthropic_response(make_report("Practical Set"))),  # report: winner
+            Response(200, json=_anthropic_response(make_report("Balanced Set"))),  # report: balanced
+            Response(200, json=_anthropic_response(make_report("Adventurous Set"))),  # report: adventurous
         ]
     )
 

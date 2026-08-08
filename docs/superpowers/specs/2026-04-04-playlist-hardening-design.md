@@ -54,8 +54,8 @@ class Transition(BaseModel):
     from_id: str
     to_id: str
     is_risky: bool = False
-    risk_type: str = ""   # "chapter_pivot" | "peak_impact" | "deliberate_reset"
-                          # | "closer_move" | "cut_only" | "low_tonal_risk" | ""
+    risk_type: str = ""  # "chapter_pivot" | "peak_impact" | "deliberate_reset"
+    # | "closer_move" | "cut_only" | "low_tonal_risk" | ""
 ```
 
 **`DJPracticalityScore`** — dataclass, computed deterministically in Python:
@@ -63,17 +63,17 @@ class Transition(BaseModel):
 ```python
 @dataclass
 class DJPracticalityScore:
-    bpm_smoothness: float     # 0.0–1.0
-    harmonic_ratio: float     # 0.0–1.0
-    risk_justified: float     # 0.0–1.0
-    fragment_preserved: float # 0.0–1.0
+    bpm_smoothness: float  # 0.0–1.0
+    harmonic_ratio: float  # 0.0–1.0
+    risk_justified: float  # 0.0–1.0
+    fragment_preserved: float  # 0.0–1.0
 
     @property
     def overall(self) -> float:
         return (
-            self.bpm_smoothness    * 0.30
-            + self.harmonic_ratio  * 0.30
-            + self.risk_justified  * 0.25
+            self.bpm_smoothness * 0.30
+            + self.harmonic_ratio * 0.30
+            + self.risk_justified * 0.25
             + self.fragment_preserved * 0.15
         )
 ```
@@ -122,7 +122,7 @@ def camelot_distance(key_a: str, key_b: str) -> int:
     num_b, mode_b = int(mb.group(1)), mb.group(2).upper()
     if num_a == num_b and mode_a == mode_b:
         return 0
-    if num_a == num_b:             # same number, opposite ring
+    if num_a == num_b:  # same number, opposite ring
         return 1
     ring_dist = min(abs(num_a - num_b), 12 - abs(num_a - num_b))
     if mode_a == mode_b:
@@ -239,6 +239,7 @@ Changes:
 
 ```python
 _STRATEGY_PRIORITY = {"practical": 0, "balanced": 1, "adventurous": 2}
+
 
 def _select_best_variant(variants: list[CompletionVariant]) -> CompletionVariant:
     return max(
@@ -394,17 +395,17 @@ After parsing each item dict, also parse `transitions`. The parser stores all we
 ```python
 raw_transitions = item.get("transitions", [])
 transitions = []
-for tr in (raw_transitions if isinstance(raw_transitions, list) else []):
+for tr in raw_transitions if isinstance(raw_transitions, list) else []:
     if isinstance(tr, dict):
-        transitions.append(Transition(
-            from_id=str(tr.get("from_id", "")),
-            to_id=str(tr.get("to_id", "")),
-            is_risky=bool(tr.get("is_risky", False)),
-            risk_type=str(tr.get("risk_type", "")),
-        ))
-concept = MixConcept(
-    title=..., mood=..., track_ids=track_ids, transitions=transitions
-)
+        transitions.append(
+            Transition(
+                from_id=str(tr.get("from_id", "")),
+                to_id=str(tr.get("to_id", "")),
+                is_risky=bool(tr.get("is_risky", False)),
+                risk_type=str(tr.get("risk_type", "")),
+            )
+        )
+concept = MixConcept(title=..., mood=..., track_ids=track_ids, transitions=transitions)
 ```
 
 ---
