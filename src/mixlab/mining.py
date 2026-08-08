@@ -2,7 +2,7 @@
 
 Pure and deterministic: no I/O, no RNG. Extracts atomic predicates from a
 genre pool, scans cross-kind pairs, gates on support/lift, prunes subsumed
-pairs, and shortlists by lift for scoring in directions._score_field.
+pairs, and shortlists by lift for scoring in directions._shape_field.
 """
 
 from __future__ import annotations
@@ -19,9 +19,13 @@ if TYPE_CHECKING:
 
 _GATE_DEFAULT = 8
 _GATE_REMIXER = 5
-_COVERAGE_CAP = 0.70  # documentation only — enforced via integer arithmetic below to avoid
-# float rounding at exact-boundary pool sizes (e.g. 63/90 == 0.70 exactly, but
-# 0.70 * 90 == 62.99999999999999 in IEEE-754 double precision).
+# A predicate covering more than 70% of the pool is excluded from pairing — it rides
+# along with any partner and mines nothing. Held as an exact fraction and applied as
+# `_COVERAGE_CAP_DEN * support <= _COVERAGE_CAP_NUM * pool_size` rather than a float
+# 0.70, because float rounding misjudges exact-boundary pool sizes (63/90 == 0.70
+# exactly, but 0.70 * 90 == 62.99999999999999 in IEEE-754 double precision).
+_COVERAGE_CAP_NUM = 7
+_COVERAGE_CAP_DEN = 10
 
 # Must equal directions.MIN_DIRECTION_POOL — a pair too small to build is not worth
 # mining. Deliberately duplicated rather than imported: directions imports this module
@@ -96,7 +100,7 @@ def extract_predicates(pool: list[Track]) -> list[Predicate]:
     out = [
         Predicate(kind=k, value=v, namable=n, track_ids=frozenset(ids))
         for (k, v, n), ids in groups.items()
-        if len(ids) >= _gate(k) and 10 * len(ids) <= 7 * pool_size
+        if len(ids) >= _gate(k) and _COVERAGE_CAP_DEN * len(ids) <= _COVERAGE_CAP_NUM * pool_size
     ]
     return sorted(out, key=lambda p: (p.kind, p.value))
 
