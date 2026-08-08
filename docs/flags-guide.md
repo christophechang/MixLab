@@ -111,6 +111,14 @@ showcases, genre traverses — proposed only when the library supports them and
 rotated by the daily seed. `only` forces them to the front, which is the right
 way to test whether a specific direction (like a traverse) fires for your pool.
 
+`--direction-spec '<json>'` pins one exact direction: it takes a library-map
+direction entry (as JSON) and materialises those tracks, that brief, and that
+type as a mandatory canvas — Stage 2 must produce a concept from it. This is
+the machine flag behind mixlab-web's "Run this direction"; it supersedes
+`--directions` (the pinned canvas replaces the enumerated-directions slot) and
+is ignored in playlist mode. A spec whose tracks no longer resolve against the
+current collection fails the run rather than silently running without them.
+
 ### Narrowing the pool
 
 ```bash

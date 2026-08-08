@@ -36,6 +36,9 @@ def _direction_entry(direction: Direction) -> dict[str, object]:
         "brief": direction.brief,
         "feasibility": direction.feasibility,
         "track_ids": list(direction.track_ids),
+        # Round-tripped by mixlab-web into --direction-spec so the artist-thread
+        # validator keeps its spine name without re-deriving it from the title.
+        "thread_artist": direction.thread_artist,
     }
 
 

@@ -732,6 +732,10 @@ def _format_canvas_section(canvas: MixCanvas, tracks_by_id: dict[str, Track]) ->
     header = "\n".join(lines)
     if canvas.brief:
         header = f"DIRECTION BRIEF ({canvas.direction_type}):\n{canvas.brief}\n" + header
+    # Pinned direction (--direction-spec): marked in the prompt surface so the
+    # _STAGE2_PINNED_RULE mandate can point at it unambiguously.
+    if canvas.pinned:
+        header = "[PINNED DIRECTION — operator-chosen from the library map]\n" + header
     candidates = "Candidates:\n" + "\n".join(track_lines) if track_lines else ""
     return f"{header}\n{candidates}"
 
@@ -751,6 +755,16 @@ _STAGE2_CANVAS_RULES = """\
 - Anchor candidates shown on the canvas header (Anchors:) are tracks the system has identified as distinctive or identity-defining based on provenance, library rarity, and pool centrality. Prefer including one anchor in each concept's tracklist — the concept will feel more rooted. This is preference, not requirement; a concept built entirely from non-anchor tracks is acceptable if the narrative is stronger without anchor inclusion.\n\
 - Concept anchor candidates (Concept anchors: line) are bridge/wildcard tracks flagged as structurally interesting exceptions, tagged [peak], [identity], or [structural-exception]. If you use one in a structural role (opener, closer, pivot, reset, peak), name the specific role and why this track earns it. If you use a bridge/wildcard track that is not in this list, the bar for justification is higher — explain explicitly what concept-defining function it serves.\n\
 - When a canvas carries a DIRECTION BRIEF, the brief is that canvas's thesis. Honour it: the concept you build from that canvas must serve the stated direction, and the report's thesis line should echo it.\
+"""
+
+# Appended to the Stage 2 system prompt ONLY when a pinned canvas is present
+# (--direction-spec), so every other run's prompt stays byte-identical.
+_STAGE2_PINNED_RULE = """\
+\nPINNED DIRECTION (for this run):\n\
+The operator explicitly chose the canvas marked [PINNED DIRECTION] from the library map. You MUST \
+produce at least one concept from that canvas, honouring its DIRECTION BRIEF — the allowance above \
+to skip a structurally weak canvas does not apply to it. Build the pinned concept first, then curate \
+the rest of the run around it.\
 """
 
 
@@ -3533,6 +3547,8 @@ async def stage2_curate_and_report(
     stage2_system = _STAGE2_SYSTEM_PLAYLIST_SELECTION if playlist_name is not None else _STAGE2_SYSTEM_SELECTION
     if canvases is not None and playlist_name is None:
         stage2_system = stage2_system + _STAGE2_CANVAS_RULES
+        if any(c.pinned for c in canvases):
+            stage2_system = stage2_system + _STAGE2_PINNED_RULE
     # Mode-specific Stage 2 fragment (#18). Playlist mode has its own Stage 0 intent brief
     # path, so the mode-fragment is genre-mode only.
     if playlist_name is None and mode is not None:
