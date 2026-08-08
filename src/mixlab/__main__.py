@@ -1039,7 +1039,10 @@ async def run(
             )
 
     if pinned_canvas is not None:
-        classic_selected = select_canvases(all_canvases, history, n=5, mode=mode, risk=risk, debug=debug)
+        # A pinned run is a study of the chosen direction (quality over quantity —
+        # operator call, 2026-08-08): Stage 2 produces contrasting readings of the
+        # pinned canvas, so only one classic canvas rides along as contrast.
+        classic_selected = select_canvases(all_canvases, history, n=1, mode=mode, risk=risk, debug=debug)
         selected_canvases = classic_selected + [pinned_canvas]
     elif directions == "off":
         selected_canvases = select_canvases(all_canvases, history, mode=mode, risk=risk, debug=debug)
