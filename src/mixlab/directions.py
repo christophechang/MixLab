@@ -19,6 +19,7 @@ output. No I/O beyond the one-line-per-direction stdout note emitted by
 
 from __future__ import annotations
 
+import math
 import random
 import statistics
 from collections import Counter
@@ -69,6 +70,8 @@ class Direction:
     brief: str
     feasibility: float
     thread_artist: str = ""
+    identity: float = 0.0
+    freshness: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +130,7 @@ def _finalise(
     chosen: list[Track],
     brief: str,
     signal: float,
+    pool: list[Track],
     thread_artist: str = "",
 ) -> Direction | None:
     """Cap/validate a candidate pool and compute its feasibility score.
@@ -135,23 +139,25 @@ def _finalise(
     and capping, or when the BPM-sorted ordering is not path-feasible. Feasibility is
     ``0.4·pool_fill + 0.3·path_ok_ratio + 0.3·signal_strength``.
     """
-    pool = _dedupe(chosen)[:MAX_DIRECTION_POOL]
-    if len(pool) < MIN_DIRECTION_POOL:
+    chosen_capped = _dedupe(chosen)[:MAX_DIRECTION_POOL]
+    if len(chosen_capped) < MIN_DIRECTION_POOL:
         return None
-    ok, ratio = _path_feasible(pool)
+    ok, ratio = _path_feasible(chosen_capped)
     if not ok:
         return None
-    pool_fill = min(len(pool) / MAX_DIRECTION_POOL, 1.0)
+    pool_fill = min(len(chosen_capped) / MAX_DIRECTION_POOL, 1.0)
     signal_clamped = min(max(signal, 0.0), 1.0)
     feasibility = 0.4 * pool_fill + 0.3 * ratio + 0.3 * signal_clamped
     return Direction(
         direction_type=direction_type,
         title=title,
         mood=mood,
-        track_ids=[t.track_id for t in pool],
+        track_ids=[t.track_id for t in chosen_capped],
         brief=brief,
         feasibility=round(feasibility, 4),
         thread_artist=thread_artist,
+        identity=signal_clamped,
+        freshness=round(_freshness(chosen_capped, pool), 4),
     )
 
 
@@ -159,6 +165,24 @@ def _balance(a: int, b: int) -> float:
     """Symmetric balance signal: 1.0 when the two counts are equal, → 0 as they diverge."""
     hi = max(a, b)
     return min(a, b) / hi if hi else 0.0
+
+
+def _freshness(chosen: list[Track], pool: list[Track]) -> float:
+    """Median date_added count-percentile of ``chosen`` within ``pool``.
+
+    Rank-based (ISO strings sort lexicographically — no date parsing), so it
+    cannot saturate under an all-unplayed pool. Empty date_added sorts oldest.
+    """
+    if len(pool) < 2:
+        return 0.5
+    ordered = sorted(pool, key=lambda t: (t.date_added, t.track_id))
+    pct = {t.track_id: i / (len(ordered) - 1) for i, t in enumerate(ordered)}
+    return statistics.median(pct[t.track_id] for t in chosen)
+
+
+def _log_lift(ratio: float) -> float:
+    """Common identity scale for concentration ratios: 1x→0, 2x→1/3, 8x+→1."""
+    return min(math.log2(max(ratio, 1.0)) / 3.0, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +214,7 @@ def _build_mood_journey(pool: list[Track], *, seed: int) -> Direction | None:
     bridge_ranked = _rank(bridge_pool)[:5]
 
     chosen = start_ranked + bridge_ranked + end_ranked
-    signal = _balance(len(start_ranked), len(end_ranked))
+    signal = _balance(len(start_tracks), len(end_tracks))
     brief = (
         f"This set is a mood journey from '{start_pole}' to '{end_pole}'. Open in the {start_pole} pole, "
         f"then move deliberately through the neutral bridge tracks, and land in the {end_pole} pole. "
@@ -205,6 +229,7 @@ def _build_mood_journey(pool: list[Track], *, seed: int) -> Direction | None:
         chosen=chosen,
         brief=brief,
         signal=signal,
+        pool=pool,
     )
 
 
@@ -263,10 +288,11 @@ def _build_era_dialogue(pool: list[Track], *, seed: int) -> Direction | None:
         chosen=old_ranked + new_ranked,
         brief=brief,
         signal=signal,
+        pool=pool,
     )
 
 
-def _build_label_spotlight(pool: list[Track], *, seed: int) -> Direction | None:
+def _build_label_spotlight(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> Direction | None:
     """A single label's scene DNA, optionally braced by adjacent-key outsiders (type index 2)."""
     label_counts = Counter(t.label for t in pool if t.label)
     qualifying = sorted(label for label, count in label_counts.items() if count >= _LABEL_MIN_COUNT)
@@ -285,7 +311,12 @@ def _build_label_spotlight(pool: list[Track], *, seed: int) -> Direction | None:
         adjacent = [t for t in non_label if dominant_key and camelot_compatible(dominant_key, t.camelot_key)]
         chosen = chosen + _rank(adjacent)[:5]
 
-    share = label_counts[label] / len(pool) if pool else 0.0
+    share_pool = label_counts[label] / len(pool) if pool else 0.0
+    if collection:
+        share_coll = sum(1 for t in collection if t.label == label) / len(collection)
+        signal = _log_lift(share_pool / share_coll) if share_coll else 0.0
+    else:
+        signal = share_pool
     brief = (
         f"This set is a label spotlight on {label}. Treat the label as the scene DNA — the reason these "
         f"records share a sound. Lean into that house style rather than smoothing it out: the coherence is the "
@@ -298,7 +329,8 @@ def _build_label_spotlight(pool: list[Track], *, seed: int) -> Direction | None:
         mood=f"{label} scene DNA",
         chosen=chosen,
         brief=brief,
-        signal=share,
+        signal=signal,
+        pool=pool,
     )
 
 
@@ -351,6 +383,7 @@ def _build_artist_thread(pool: list[Track], *, seed: int) -> Direction | None:
         chosen=thread_tracks + companions,
         brief=brief,
         signal=min(max(tightness, 0.0), 1.0),
+        pool=pool,
         thread_artist=thread_artist,
     )
 
@@ -401,6 +434,7 @@ def _build_energy_shape_first(pool: list[Track], *, seed: int) -> Direction | No
         chosen=chosen,
         brief=brief,
         signal=signal,
+        pool=pool,
     )
 
 
@@ -425,7 +459,7 @@ def _build_fresh_crate(pool: list[Track], *, seed: int) -> Direction | None:
     anchor_candidates.sort(key=lambda t: (-(t.rating or 0), -t.play_count, t.track_id))
     chosen = list(newest) + anchor_candidates[:5]
 
-    signal = min(1.0, len(newest_slice) / 15.0)
+    signal = len(dated) / len(pool)
     brief = (
         "This set is a fresh-crate debut showcase — the point is surfacing what just arrived. Frame the newest "
         "additions as discoveries worth their first play, and use the handful of grounding anchor tracks only to "
@@ -439,6 +473,7 @@ def _build_fresh_crate(pool: list[Track], *, seed: int) -> Direction | None:
         chosen=chosen,
         brief=brief,
         signal=signal,
+        pool=pool,
     )
 
 
@@ -622,6 +657,7 @@ def _build_genre_traverse(pool: list[Track], *, seed: int) -> Direction | None:
         chosen=chosen,
         brief=brief,
         signal=signal,
+        pool=pool,
     )
 
 
@@ -636,10 +672,18 @@ _BUILDERS = (
 )
 
 
-def _named_candidates(pool: list[Track], *, seed: int) -> list[Direction]:
+def _named_candidates(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> list[Direction]:
     """Every surviving named-builder candidate, unsorted. Single enumeration
     point shared by the map path and the run path (previously duplicated)."""
-    return [direction for builder in _BUILDERS if (direction := builder(pool, seed=seed)) is not None]
+    candidates: list[Direction] = []
+    for builder in _BUILDERS:
+        if builder is _build_label_spotlight:
+            direction = builder(pool, seed=seed, collection=collection)
+        else:
+            direction = builder(pool, seed=seed)
+        if direction is not None:
+            candidates.append(direction)
+    return candidates
 
 
 def enumerate_directions(pool: list[Track], *, seed: int) -> list[Direction]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 
 import pytest
@@ -15,6 +16,8 @@ from mixlab.directions import (
     _build_genre_traverse,
     _build_label_spotlight,
     _build_mood_journey,
+    _freshness,
+    _log_lift,
     _path_feasible,
     enumerate_directions,
     generate_directions,
@@ -463,3 +466,94 @@ def test_enumerate_directions_same_seed_identical_output() -> None:
 def test_enumerate_directions_empty_pool_returns_empty(capsys: pytest.CaptureFixture[str]) -> None:
     assert enumerate_directions([], seed=0) == []
     assert capsys.readouterr().out == ""  # never prints, unlike generate_directions
+
+
+# ---------------------------------------------------------------------------
+# _freshness / _log_lift / per-builder identity renormalisation (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def _t(
+    track_id: str,
+    *,
+    date_added: str = "",
+    label: str = "",
+    year: int | None = None,
+    tags: list[str] | None = None,
+    energy: int | None = None,
+    bpm: float = 174.0,
+    key: str = "8A",
+) -> Track:
+    return Track(
+        track_id=track_id,
+        artist=f"A{track_id}",
+        title=f"T{track_id}",
+        bpm=bpm,
+        camelot_key=key,
+        genre="Drum & Bass",
+        label=label,
+        year=year,
+        tags=tags or [],
+        energy=energy,
+        date_added=date_added,
+    )
+
+
+class TestFreshness:
+    def test_newest_half_scores_above_oldest_half(self):
+        pool = [_t(f"o{i}", date_added=f"2020-01-{i + 1:02d}") for i in range(10)] + [
+            _t(f"n{i}", date_added=f"2026-06-{i + 1:02d}") for i in range(10)
+        ]
+        newest = [t for t in pool if t.track_id.startswith("n")]
+        oldest = [t for t in pool if t.track_id.startswith("o")]
+        assert _freshness(newest, pool) > 0.7
+        assert _freshness(oldest, pool) < 0.3
+
+    def test_missing_date_added_sorts_oldest(self):
+        pool = [_t("u1"), _t("u2")] + [_t(f"d{i}", date_added=f"2026-01-{i + 1:02d}") for i in range(8)]
+        assert _freshness([pool[0], pool[1]], pool) < 0.2
+
+    def test_all_unplayed_pool_does_not_saturate(self):
+        # freshness is date-rank based, so an "all-unplayed" pool still spreads
+        pool = [_t(f"x{i}", date_added=f"20{20 + i // 5}-01-01") for i in range(20)]
+        vals = {_freshness([t], pool) for t in pool}
+        assert len(vals) > 1
+
+
+class TestLogLift:
+    def test_anchor_points(self):
+        assert _log_lift(1.0) == 0.0
+        assert abs(_log_lift(2.0) - 1 / 3) < 1e-9
+        assert abs(_log_lift(8.0) - 1.0) < 1e-9
+        assert _log_lift(10.4) == 1.0  # live max saturates at the cap, not below it
+        assert _log_lift(0.5) == 0.0  # sub-chance clamps to 0, never negative
+
+
+class TestIdentityRenormalisation:
+    def test_mood_journey_balance_uses_untruncated_pole_counts(self):
+        # 40 dark vs 8 euphoric: old code truncated both to [:10] first → balance 0.8.
+        # New: _balance(40, 8) = 0.2.
+        pool = (
+            [_t(f"d{i}", tags=["dark"], year=2020) for i in range(40)]
+            + [_t(f"e{i}", tags=["euphoric"], year=2020) for i in range(8)]
+            + [_t(f"b{i}", year=2020) for i in range(10)]
+        )
+        d = _build_mood_journey(pool, seed=1)
+        assert d is not None
+        # signal lands in feasibility via the Task 3 scorer; here assert the builder's
+        # stored signal directly (Task 2 exposes it — see Step 2)
+        assert abs(d.identity - 0.2) < 1e-9
+
+    def test_label_spotlight_collection_lift(self):
+        pool = [_t(f"l{i}", label="Metalheadz") for i in range(10)] + [_t(f"p{i}") for i in range(10)]
+        collection = pool + [_t(f"c{i}") for i in range(80)]
+        d = _build_label_spotlight(pool, seed=1, collection=collection)
+        assert d is not None
+        # share_in_pool 0.5, share_in_collection 0.1 → ratio 5 → log2(5)/3 ≈ 0.774
+        assert abs(d.identity - math.log2(5) / 3) < 1e-6  # add `import math` at file top
+
+    def test_label_spotlight_without_collection_falls_back_to_share(self):
+        pool = [_t(f"l{i}", label="Metalheadz") for i in range(10)] + [_t(f"p{i}") for i in range(10)]
+        d = _build_label_spotlight(pool, seed=1)
+        assert d is not None
+        assert abs(d.identity - 0.5) < 1e-9
