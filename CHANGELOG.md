@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.15.0 — 2026-08-08
 
 - **`--direction-spec` — "Run this direction" actually runs the direction.** The web app's
   library-map "Run this direction" used to hand over only the genre and the brief-as-intent;
