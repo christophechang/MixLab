@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.16.0 — 2026-08-08
 
 - **Pinned directions now enforce their defining tracks.** First pinned production run
   shipped an artist thread whose thesis said "three Dusky tracks" while the tracklist
