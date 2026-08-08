@@ -69,7 +69,7 @@ class Transition(BaseModel):
     to_id: str
     is_risky: bool = False
     risk_type: str = ""  # "chapter_pivot" | "peak_impact" | "deliberate_reset"
-    # | "closer_move" | "cut_only" | "low_tonal_risk" | ""
+                         # | "closer_move" | "cut_only" | "low_tonal_risk" | ""
 
 
 class MixConcept(BaseModel):
@@ -123,17 +123,17 @@ class IntentBrief:
 
 @dataclass
 class DJPracticalityScore:
-    bpm_smoothness: float  # 0.0–1.0
-    harmonic_ratio: float  # 0.0–1.0
-    risk_justified: float  # 0.0–1.0
-    fragment_preserved: float  # 0.0–1.0
+    bpm_smoothness: float     # 0.0–1.0
+    harmonic_ratio: float     # 0.0–1.0
+    risk_justified: float     # 0.0–1.0
+    fragment_preserved: float # 0.0–1.0
 
     @property
     def overall(self) -> float:
         return (
-            self.bpm_smoothness * 0.30
-            + self.harmonic_ratio * 0.30
-            + self.risk_justified * 0.25
+            self.bpm_smoothness       * 0.30
+            + self.harmonic_ratio     * 0.30
+            + self.risk_justified     * 0.25
             + self.fragment_preserved * 0.15
         )
 
@@ -215,16 +215,12 @@ def test_select_best_variant_prefers_higher_practicality_score() -> None:
     concept_a = MixConcept(title="A", mood="practical", track_ids=["1", "2", "3"])
     concept_b = MixConcept(title="B", mood="balanced", track_ids=["1", "4", "5"])
     v_a = CompletionVariant(
-        strategy="practical",
-        concept=concept_a,
-        anchor_retention_rate=1.0,
-        practicality_score=_make_practicality(0.9),
+        strategy="practical", concept=concept_a,
+        anchor_retention_rate=1.0, practicality_score=_make_practicality(0.9),
     )
     v_b = CompletionVariant(
-        strategy="balanced",
-        concept=concept_b,
-        anchor_retention_rate=0.5,
-        practicality_score=_make_practicality(0.6),
+        strategy="balanced", concept=concept_b,
+        anchor_retention_rate=0.5, practicality_score=_make_practicality(0.6),
     )
     best = _select_best_variant([v_a, v_b])
     assert best.strategy == "practical"
@@ -233,10 +229,8 @@ def test_select_best_variant_prefers_higher_practicality_score() -> None:
 def test_select_best_variant_single_variant_returned_as_is() -> None:
     concept = MixConcept(title="T", mood="practical", track_ids=["1"])
     v = CompletionVariant(
-        strategy="practical",
-        concept=concept,
-        anchor_retention_rate=1.0,
-        practicality_score=_make_practicality(0.8),
+        strategy="practical", concept=concept,
+        anchor_retention_rate=1.0, practicality_score=_make_practicality(0.8),
     )
     assert _select_best_variant([v]) is v
 ```
@@ -407,7 +401,9 @@ def test_compute_deterministic_intent_chapter_split_sets_incoherent() -> None:
 
 def test_compute_deterministic_intent_tight_bpm_range_is_coherent() -> None:
     """Seeds within 10 BPM should yield is_coherent_set=True."""
-    tracks_by_id = {str(i): _make_track(str(i), bpm=120.0 + i) for i in range(5)}
+    tracks_by_id = {
+        str(i): _make_track(str(i), bpm=120.0 + i) for i in range(5)
+    }
     brief = compute_deterministic_intent([str(i) for i in range(5)], tracks_by_id)
     assert brief.is_coherent_set is True
 
@@ -558,8 +554,7 @@ def test_pair_consecutive_missing_id_returns_false() -> None:
 def test_compute_practicality_score_perfect_bpm_smoothness() -> None:
     """All same BPM → stdev of deltas is 0 → bpm_smoothness=1.0."""
     concept = MixConcept(
-        title="T",
-        mood="practical",
+        title="T", mood="practical",
         track_ids=["1", "2", "3", "4"],
     )
     tracks_by_id = {str(i): _make_track(str(i), bpm=124.0, camelot_key="8A") for i in range(1, 5)}
@@ -570,8 +565,7 @@ def test_compute_practicality_score_perfect_bpm_smoothness() -> None:
 def test_compute_practicality_score_perfect_harmonic_ratio() -> None:
     """All adjacent Camelot keys (distance ≤ 1) → harmonic_ratio=1.0."""
     concept = MixConcept(
-        title="T",
-        mood="practical",
+        title="T", mood="practical",
         track_ids=["1", "2", "3"],
     )
     tracks_by_id = {
@@ -586,8 +580,7 @@ def test_compute_practicality_score_perfect_harmonic_ratio() -> None:
 def test_compute_practicality_score_zero_harmonic_ratio() -> None:
     """Keys far apart → harmonic_ratio=0.0."""
     concept = MixConcept(
-        title="T",
-        mood="practical",
+        title="T", mood="practical",
         track_ids=["1", "2"],
     )
     tracks_by_id = {
@@ -609,8 +602,7 @@ def test_compute_practicality_score_no_transitions_gives_full_risk_score() -> No
 def test_compute_practicality_score_cut_only_penalises_risk_score() -> None:
     """All transitions cut_only → risk_justified=0.0."""
     concept = MixConcept(
-        title="T",
-        mood="practical",
+        title="T", mood="practical",
         track_ids=["1", "2", "3"],
         transitions=[
             Transition(from_id="1", to_id="2", is_risky=True, risk_type="cut_only"),
@@ -625,8 +617,7 @@ def test_compute_practicality_score_cut_only_penalises_risk_score() -> None:
 def test_compute_practicality_score_named_risk_type_not_penalised() -> None:
     """chapter_pivot is a justified risk → risk_justified=1.0 (0 unjustified of 1 risky)."""
     concept = MixConcept(
-        title="T",
-        mood="practical",
+        title="T", mood="practical",
         track_ids=["1", "2"],
         transitions=[
             Transition(from_id="1", to_id="2", is_risky=True, risk_type="chapter_pivot"),
@@ -641,14 +632,9 @@ def test_compute_practicality_score_fragment_preserved_with_adjacency() -> None:
     """Strong adjacency pair preserved in sequence → fragment_preserved=1.0."""
     frag = AdjacencyFragment(track_ids=["1", "2"], confidence=0.9, reason="bpm_close")
     brief = IntentBrief(
-        overall_vibe="Test",
-        energy_shape="unclear",
-        risk_tolerance="medium",
-        is_coherent_set=True,
-        seed_analyses=[],
-        missing_roles=[],
-        strong_adjacencies=[frag],
-        bpm_range=(120.0, 125.0),
+        overall_vibe="Test", energy_shape="unclear", risk_tolerance="medium",
+        is_coherent_set=True, seed_analyses=[], missing_roles=[],
+        strong_adjacencies=[frag], bpm_range=(120.0, 125.0),
     )
     concept = MixConcept(title="T", mood="practical", track_ids=["1", "2", "3"])
     tracks_by_id = {str(i): _make_track(str(i)) for i in range(1, 4)}
@@ -660,14 +646,9 @@ def test_compute_practicality_score_fragment_broken_reduces_score() -> None:
     """Strong adjacency pair broken (reversed) → fragment_preserved=0.0."""
     frag = AdjacencyFragment(track_ids=["1", "2"], confidence=0.9, reason="bpm_close")
     brief = IntentBrief(
-        overall_vibe="Test",
-        energy_shape="unclear",
-        risk_tolerance="medium",
-        is_coherent_set=True,
-        seed_analyses=[],
-        missing_roles=[],
-        strong_adjacencies=[frag],
-        bpm_range=(120.0, 125.0),
+        overall_vibe="Test", energy_shape="unclear", risk_tolerance="medium",
+        is_coherent_set=True, seed_analyses=[], missing_roles=[],
+        strong_adjacencies=[frag], bpm_range=(120.0, 125.0),
     )
     concept = MixConcept(title="T", mood="practical", track_ids=["2", "1", "3"])
     tracks_by_id = {str(i): _make_track(str(i)) for i in range(1, 4)}
@@ -757,8 +738,7 @@ def _compute_practicality_score(
     else:
         total_pairs = n - 1
         compatible = sum(
-            1
-            for i in range(total_pairs)
+            1 for i in range(total_pairs)
             if camelot_distance(track_sequence[i].camelot_key, track_sequence[i + 1].camelot_key) <= 1
         )
         harmonic_ratio = compatible / total_pairs
@@ -854,24 +834,12 @@ def test_select_best_variant_tiebreak_prefers_practical() -> None:
         MixConcept(title="A", mood="adventurous", track_ids=["3"]),
     ]
     variants = [
-        CompletionVariant(
-            strategy="adventurous",
-            concept=concepts[2],
-            anchor_retention_rate=1.0,
-            practicality_score=_make_practicality(0.7),
-        ),
-        CompletionVariant(
-            strategy="balanced",
-            concept=concepts[1],
-            anchor_retention_rate=1.0,
-            practicality_score=_make_practicality(0.7),
-        ),
-        CompletionVariant(
-            strategy="practical",
-            concept=concepts[0],
-            anchor_retention_rate=1.0,
-            practicality_score=_make_practicality(0.7),
-        ),
+        CompletionVariant(strategy="adventurous", concept=concepts[2],
+                          anchor_retention_rate=1.0, practicality_score=_make_practicality(0.7)),
+        CompletionVariant(strategy="balanced", concept=concepts[1],
+                          anchor_retention_rate=1.0, practicality_score=_make_practicality(0.7)),
+        CompletionVariant(strategy="practical", concept=concepts[0],
+                          anchor_retention_rate=1.0, practicality_score=_make_practicality(0.7)),
     ]
     best = _select_best_variant(variants)
     assert best.strategy == "practical"
@@ -883,18 +851,10 @@ def test_passes_floor_with_intent_brief_per_tier() -> None:
     # floor: ceil(4*0.75)=3 anchors, ceil(2*0.40)=1 supporting
     concept_pass = MixConcept(title="P", mood="practical", track_ids=["a1", "a2", "a3", "s1", "x1"])
     concept_fail = MixConcept(title="F", mood="practical", track_ids=["a1", "s1", "s2", "x1", "x2"])
-    v_pass = CompletionVariant(
-        strategy="practical",
-        concept=concept_pass,
-        anchor_retention_rate=0.75,
-        practicality_score=_make_practicality(0.8),
-    )
-    v_fail = CompletionVariant(
-        strategy="practical",
-        concept=concept_fail,
-        anchor_retention_rate=0.25,
-        practicality_score=_make_practicality(0.9),
-    )
+    v_pass = CompletionVariant(strategy="practical", concept=concept_pass,
+                               anchor_retention_rate=0.75, practicality_score=_make_practicality(0.8))
+    v_fail = CompletionVariant(strategy="practical", concept=concept_fail,
+                               anchor_retention_rate=0.25, practicality_score=_make_practicality(0.9))
     seed_ids = ["a1", "a2", "a3", "a4", "s1", "s2"]
     min_seeds = _minimum_playlist_seed_retention(len(seed_ids), brief)
     assert _passes_floor(v_pass, brief, seed_ids, min_seeds) is True
@@ -908,9 +868,8 @@ def test_passes_floor_optional_seeds_do_not_satisfy_anchor_requirement() -> None
     # concept keeps only 2 anchors but 10 optional seeds — total retained > floor sum, but per-tier fails
     opt_ids = [f"o{i}" for i in range(10)]
     concept = MixConcept(title="T", mood="practical", track_ids=["a1", "a2"] + opt_ids)
-    v = CompletionVariant(
-        strategy="practical", concept=concept, anchor_retention_rate=0.5, practicality_score=_make_practicality(0.9)
-    )
+    v = CompletionVariant(strategy="practical", concept=concept,
+                          anchor_retention_rate=0.5, practicality_score=_make_practicality(0.9))
     seed_ids = ["a1", "a2", "a3", "a4"]
     min_seeds = _minimum_playlist_seed_retention(len(seed_ids), brief)
     assert _passes_floor(v, brief, seed_ids, min_seeds) is False
@@ -918,7 +877,6 @@ def test_passes_floor_optional_seeds_do_not_satisfy_anchor_requirement() -> None
 
 def test_score_variant_returns_completion_variant_with_practicality_score() -> None:
     from mixlab.llm import _score_variant  # noqa: PLC2701
-
     concept = MixConcept(title="T", mood="practical", track_ids=["1", "2", "3"])
     tracks_by_id = {str(i): _make_track(str(i), bpm=124.0, camelot_key="8A") for i in range(1, 4)}
     variant = _score_variant(concept, ["1", "2"], None, tracks_by_id)
@@ -950,12 +908,9 @@ def _score_variant(
     concept_id_set = set(concept.track_ids)
     strategy_raw = concept.mood.lower()
     strategy: Literal["practical", "balanced", "adventurous"] = (
-        "practical"
-        if strategy_raw == "practical"
-        else "balanced"
-        if strategy_raw == "balanced"
-        else "adventurous"
-        if strategy_raw == "adventurous"
+        "practical" if strategy_raw == "practical"
+        else "balanced" if strategy_raw == "balanced"
+        else "adventurous" if strategy_raw == "adventurous"
         else "practical"
     )
 
@@ -1121,20 +1076,15 @@ Add to `tests/test_llm.py`:
 def test_parse_curated_concepts_parses_transitions() -> None:
     from mixlab.llm import _parse_curated_concepts
 
-    raw = json.dumps(
-        [
-            {
-                "title": "T",
-                "mood": "practical",
-                "track_ids": ["1", "2", "3", "4"],
-                "transitions": [
-                    {"from_id": "1", "to_id": "2", "is_risky": False, "risk_type": ""},
-                    {"from_id": "2", "to_id": "3", "is_risky": True, "risk_type": "chapter_pivot"},
-                ],
-                "report": "x",
-            }
-        ]
-    )
+    raw = json.dumps([{
+        "title": "T", "mood": "practical",
+        "track_ids": ["1", "2", "3", "4"],
+        "transitions": [
+            {"from_id": "1", "to_id": "2", "is_risky": False, "risk_type": ""},
+            {"from_id": "2", "to_id": "3", "is_risky": True, "risk_type": "chapter_pivot"},
+        ],
+        "report": "x",
+    }])
     concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
     assert len(concepts[0].transitions) == 2
     assert concepts[0].transitions[1].is_risky is True
@@ -1153,19 +1103,14 @@ def test_parse_curated_concepts_unmatched_transition_ids_stored_as_is() -> None:
     """Transition IDs not in track_ids are stored without filtering — ignored at scoring time."""
     from mixlab.llm import _parse_curated_concepts
 
-    raw = json.dumps(
-        [
-            {
-                "title": "T",
-                "mood": "m",
-                "track_ids": ["1", "2", "3", "4"],
-                "transitions": [
-                    {"from_id": "99", "to_id": "100", "is_risky": True, "risk_type": "cut_only"},
-                ],
-                "report": "x",
-            }
-        ]
-    )
+    raw = json.dumps([{
+        "title": "T", "mood": "m",
+        "track_ids": ["1", "2", "3", "4"],
+        "transitions": [
+            {"from_id": "99", "to_id": "100", "is_risky": True, "risk_type": "cut_only"},
+        ],
+        "report": "x",
+    }])
     concepts, _ = _parse_curated_concepts(raw, {"1", "2", "3", "4"})
     # stored verbatim — scorer ignores them when looking up consecutive pairs
     assert len(concepts[0].transitions) == 1
@@ -1185,26 +1130,26 @@ Expected: first test fails — `concepts[0].transitions` is empty list (not pars
 Find the `curated.append(MixConcept(...))` call inside `_parse_curated_concepts` (around line 835) and replace:
 
 ```python
-raw_transitions = item.get("transitions", [])
-transitions: list[Transition] = []
-for tr in raw_transitions if isinstance(raw_transitions, list) else []:
-    if isinstance(tr, dict):
-        transitions.append(
-            Transition(
-                from_id=str(tr.get("from_id", "")),
-                to_id=str(tr.get("to_id", "")),
-                is_risky=bool(tr.get("is_risky", False)),
-                risk_type=str(tr.get("risk_type", "")),
+        raw_transitions = item.get("transitions", [])
+        transitions: list[Transition] = []
+        for tr in (raw_transitions if isinstance(raw_transitions, list) else []):
+            if isinstance(tr, dict):
+                transitions.append(
+                    Transition(
+                        from_id=str(tr.get("from_id", "")),
+                        to_id=str(tr.get("to_id", "")),
+                        is_risky=bool(tr.get("is_risky", False)),
+                        risk_type=str(tr.get("risk_type", "")),
+                    )
+                )
+        curated.append(
+            MixConcept(
+                title=str(item.get("title", "")),
+                mood=str(item.get("mood", "")),
+                track_ids=track_ids,
+                transitions=transitions,
             )
         )
-curated.append(
-    MixConcept(
-        title=str(item.get("title", "")),
-        mood=str(item.get("mood", "")),
-        track_ids=track_ids,
-        transitions=transitions,
-    )
-)
 ```
 
 (This replaces the current single-line `curated.append(MixConcept(...))` call.)
@@ -1263,12 +1208,8 @@ def test_rewrite_playlist_report_injects_summary_at_track_order_marker() -> None
     concept = MixConcept(title="Set", mood="practical", track_ids=["1", "2", "5", "6"])
     tracks_by_id = {
         str(i): Track(
-            track_id=str(i),
-            artist=f"Artist {i}",
-            title=f"Title {i}",
-            bpm=120.0,
-            camelot_key="8A",
-            genre="House",
+            track_id=str(i), artist=f"Artist {i}", title=f"Title {i}",
+            bpm=120.0, camelot_key="8A", genre="House",
         )
         for i in range(1, 7)
     }
@@ -1329,7 +1270,11 @@ Expected: both the old test (`test_rewrite_playlist_report_overwrites_incorrect_
 Find in `tests/test_llm.py` the test `test_rewrite_playlist_report_overwrites_incorrect_counts` and update its report fixture:
 
 ```python
-report = "CONCEPT: Set\n\nSome thesis.\n\nTrack order:\nArtist 1 — Title 1 [8A · 120.0]"
+    report = (
+        "CONCEPT: Set\n\nSome thesis.\n\n"
+        "Track order:\n"
+        "Artist 1 — Title 1 [8A · 120.0]"
+    )
 ```
 
 - [ ] **Step 6: Run full test suite**

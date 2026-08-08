@@ -147,13 +147,13 @@ def partition_pool(tracks: list[Track], *, seed: int | None = None) -> list[MixC
     if len(tracks) < MIN_SHORTLIST:
         title, mood = _infer_shortlist_mood(bpm_sorted)  # BPM-sorted order for track_ids
         return [MixConcept(title=title, mood=mood, track_ids=[t.track_id for t in bpm_sorted])]
-    if bpm_sorted[-1].bpm - bpm_sorted[0].bpm < 4:  # flat-BPM guard (uses sorted extremes)
-        clusters: list[list[Track]] = [bpm_sorted]  # one cluster in BPM-sorted order
+    if bpm_sorted[-1].bpm - bpm_sorted[0].bpm < 4:       # flat-BPM guard (uses sorted extremes)
+        clusters: list[list[Track]] = [bpm_sorted]        # one cluster in BPM-sorted order
     else:
-        clusters = _find_bpm_peaks(bpm_sorted)  # Steps 1.1-1.7; returns clusters | None
-        if clusters is None:  # no peaks detected: uniform-spread fallback
+        clusters = _find_bpm_peaks(bpm_sorted)             # Steps 1.1-1.7; returns clusters | None
+        if clusters is None:                               # no peaks detected: uniform-spread fallback
             n_groups = min(MAX_POOL_COUNT, len(bpm_sorted) // MIN_SHORTLIST)
-            if n_groups < 2:  # n_groups=1 (15-29 tracks, no peaks)
+            if n_groups < 2:                               # n_groups=1 (15-29 tracks, no peaks)
                 title, mood = _infer_shortlist_mood(bpm_sorted)  # BPM-sorted order
                 return [MixConcept(title=title, mood=mood, track_ids=[t.track_id for t in bpm_sorted])]
             # n_groups >= 2: split into contiguous BPM-sorted slices (Step 1 uniform-spread)
@@ -168,18 +168,18 @@ def partition_pool(tracks: list[Track], *, seed: int | None = None) -> list[MixC
     # Step 2: Camelot sub-clustering (per BPM cluster — NOT once for the whole pool)
     shortlists: list[list[Track]] = []
     for cluster in clusters:
-        components = _camelot_components(cluster)  # Step 2 logic; returns list[list[Track]]
+        components = _camelot_components(cluster)     # Step 2 logic; returns list[list[Track]]
         shortlists.extend(components)
 
     # Step 3: Era split (per shortlist; applied independently to ALL shortlists including
     # those from n_groups>=2 uniform-spread — the "Proceed to Step 2" text implies 2-4)
     expanded: list[list[Track]] = []
     for sl in shortlists:
-        result = _era_split(sl, per_side_min=8)  # returns (era_old, era_new) | None
+        result = _era_split(sl, per_side_min=8)       # returns (era_old, era_new) | None
         if result is None:
             expanded.append(sl)
         else:
-            expanded.extend(result)  # era_old first, then era_new
+            expanded.extend(result)                   # era_old first, then era_new
 
     # Step 4: Sizing enforcement (oversized + undersized passes + pool-level merge)
     shortlists = _resize_shortlists(expanded)
@@ -187,7 +187,7 @@ def partition_pool(tracks: list[Track], *, seed: int | None = None) -> list[MixC
     # Steps 5-6: Mood/title inference and MixConcept assembly
     results: list[MixConcept] = []
     for sl in shortlists:
-        title, mood = _infer_shortlist_mood(sl)  # unpack — do NOT pass tuple as positional
+        title, mood = _infer_shortlist_mood(sl)       # unpack — do NOT pass tuple as positional
         results.append(MixConcept(title=title, mood=mood, track_ids=[t.track_id for t in sl]))
     return results
 ```
@@ -205,12 +205,12 @@ This pseudocode is the authoritative call-sequence reference. Key constraints:
 ### Shared constants
 
 ```python
-MIN_SHORTLIST = 15
-MAX_SHORTLIST = 25
-ABSOLUTE_MIN = 5  # shortlists below this are dropped rather than passed to Stage 2
-MIN_POOL_COUNT = 3
-MAX_POOL_COUNT = 5
-MIN_CAMELOT_COMPONENT = 8  # components smaller than this are merged in Step 2.4
+MIN_SHORTLIST          = 15
+MAX_SHORTLIST          = 25
+ABSOLUTE_MIN           = 5   # shortlists below this are dropped rather than passed to Stage 2
+MIN_POOL_COUNT         = 3
+MAX_POOL_COUNT         = 5
+MIN_CAMELOT_COMPONENT  = 8   # components smaller than this are merged in Step 2.4
 ```
 
 **`min_track_id(shortlist)`** is used as a sort key throughout Step 4. It means:
@@ -804,10 +804,16 @@ def _infer_shortlist_mood(tracks: list[Track]) -> tuple[str, str]:
 
     # Dominant Camelot key — use full key string (e.g. "8A", "5B"), not just number.
     # Normalise to uppercase before counting (IGNORECASE regex means '8a' == '8A').
-    parsed_keys = [t.camelot_key.upper() for t in tracks if t.camelot_key and _CAMELOT_RE.match(t.camelot_key)]
+    parsed_keys = [
+        t.camelot_key.upper() for t in tracks
+        if t.camelot_key and _CAMELOT_RE.match(t.camelot_key)
+    ]
     # Deterministic dominant_key: sort by (-count, key_str). Counter.most_common() is
     # non-deterministic for equal counts.
-    dominant_key = min(parsed_keys, key=lambda k: (-Counter(parsed_keys)[k], k)) if parsed_keys else "?"
+    dominant_key = (
+        min(parsed_keys, key=lambda k: (-Counter(parsed_keys)[k], k))
+        if parsed_keys else "?"
+    )
 
     # Era window
     years = [t.year for t in tracks if t.year is not None and t.year > 0]
@@ -818,11 +824,10 @@ def _infer_shortlist_mood(tracks: list[Track]) -> tuple[str, str]:
     tag_counts = Counter(all_tags)
     # Sort by (-count, tag_str) to break ties deterministically (Counter.most_common
     # uses heap order which is insertion-order for equal counts — non-deterministic).
-    top_tags = (
-        ", ".join(tag_str for tag_str, _ in sorted(tag_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:2])
-        if tag_counts
-        else ""
-    )
+    top_tags = ", ".join(
+        tag_str
+        for tag_str, _ in sorted(tag_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:2]
+    ) if tag_counts else ""
 
     parts = [f"{bpm_lo}–{bpm_hi} BPM", dominant_key]
     if era:
@@ -844,13 +849,11 @@ After sizing enforcement, `partition_pool` holds a list of track groups (each a
 results: list[MixConcept] = []
 for group in final_groups:
     title, mood = _infer_shortlist_mood(group)
-    results.append(
-        MixConcept(
-            title=title,
-            mood=mood,
-            track_ids=[t.track_id for t in group],
-        )
-    )
+    results.append(MixConcept(
+        title=title,
+        mood=mood,
+        track_ids=[t.track_id for t in group],
+    ))
 return results
 ```
 
@@ -907,9 +910,8 @@ async def run(
     intent: str | None = None,
     deep: bool = False,
     debug: bool = False,
-    stage1_seed: int | None = None,  # ← new — must come last (keyword-only safe)
+    stage1_seed: int | None = None,   # ← new — must come last (keyword-only safe)
 ) -> None: ...
-
 
 # asyncio.run(run(...)) call in main() — add the argument:
 asyncio.run(
@@ -918,7 +920,7 @@ asyncio.run(
         export_dir,
         args.mode,
         ...,
-        stage1_seed=args.stage1_seed,  # ← new
+        stage1_seed=args.stage1_seed,   # ← new
     )
 )
 ```
@@ -927,10 +929,7 @@ asyncio.run(
 
 ```python
 parser.add_argument(
-    "--stage1-seed",
-    type=int,
-    default=None,
-    dest="stage1_seed",
+    "--stage1-seed", type=int, default=None, dest="stage1_seed",
     help="Seed for deterministic Stage 1 tie-breaking. Default: None (stable sort).",
 )
 ```
@@ -947,7 +946,7 @@ centroids and histogram construction. If the pool-building code does not already
 exclude them, add:
 ```python
 bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # call site A
-sorted_tracks = [t for t in sorted_tracks if t.bpm > 0]  # call site B
+sorted_tracks   = [t for t in sorted_tracks   if t.bpm > 0]  # call site B
 # Call site C: apply inside the call site C code block, BEFORE the >= ABSOLUTE_MIN guard
 # (shown in the call site C code snippet below).
 ```
@@ -957,7 +956,7 @@ so both paths operate on the same cleaned pool.
 ```python
 # Before (lines ~578–584; include the sort line at ~578 as it is context for the filter
 # placement change — the After block replaces the filter but keeps the sort unchanged)
-bpm_sorted_pool = sorted(pool, key=lambda t: t.bpm)  # line ~578 — UNCHANGED; shown for context
+bpm_sorted_pool = sorted(pool, key=lambda t: t.bpm)   # line ~578 — UNCHANGED; shown for context
 stage1_pool = select_stage1_window(bpm_sorted_pool, MAX_STAGE1_POOL_CUSTOM)
 if len(stage1_pool) < len(pool):
     print(f"  Selected {len(stage1_pool)}-track window from pool for Stage 1 (randomised per run).")
@@ -968,7 +967,7 @@ all_shortlists.extend(await stage1_concepts(stage1_pool, genre, cascade_state, c
 # After — replaces the entire Before block shown above. Line 578 is kept verbatim
 # (the sort), and the filter (next line) is inserted immediately after it. Do NOT
 # keep the original line 578 AND add the After block — that would double-sort.
-bpm_sorted_pool = sorted(pool, key=lambda t: t.bpm)  # KEPT from Before (line 578 unchanged)
+bpm_sorted_pool = sorted(pool, key=lambda t: t.bpm)   # KEPT from Before (line 578 unchanged)
 bpm_sorted_pool = [t for t in bpm_sorted_pool if t.bpm > 0]  # INSERTED: precondition filter
 cfg = CUSTOM_GENRES[genre]
 custom_genre_sub_genres = cfg["genres"]
@@ -989,7 +988,7 @@ if os.environ.get("MIXLAB_STAGE1_LLM"):
         # capacity=120 returns all 119, so 119 < 119 is False → no message). Acceptable.
         print(f"  Selected {len(stage1_pool)}-track window from pool for Stage 1 (randomised per run).")
     shortlists = await stage1_concepts(stage1_pool, genre, cascade_state, custom=True)
-    stage1_pool_size = len(stage1_pool)  # capture before leaving this branch
+    stage1_pool_size = len(stage1_pool)   # capture before leaving this branch
 else:
     shortlists = partition_pool(bpm_sorted_pool, seed=stage1_seed)
     stage1_pool_size = len(bpm_sorted_pool)  # deterministic: full bpm>0-filtered pool
@@ -1045,12 +1044,11 @@ build per Ruff policy. Add this removal to the §6 file-change table.
 ```python
 # Before (wider context — show all lines that change or that MUST be kept)
 pools = partition_bpm_pools(cluster_tracks)
-bpm_filtered_counts[genre_label] = len(
-    pools.core
-)  # ← REPLACED — After records len(sorted_tracks) ONCE before if/else (not split into branches)
-if len(pools.core) < MIN_SHORTLIST_TRACKS:  # ← REMOVE this entire block
+bpm_filtered_counts[genre_label] = len(pools.core)     # ← REPLACED — After records len(sorted_tracks) ONCE before if/else (not split into branches)
+if len(pools.core) < MIN_SHORTLIST_TRACKS:             # ← REMOVE this entire block
     print(
-        f"Stage 1: skipping {genre_label} — {len(pools.core)} tracks in core BPM pool (minimum {MIN_SHORTLIST_TRACKS})"
+        f"Stage 1: skipping {genre_label} — {len(pools.core)} tracks in core BPM pool "
+        f"(minimum {MIN_SHORTLIST_TRACKS})"
     )
     continue
 sorted_tracks = sort_by_camelot(pools.core)
@@ -1062,7 +1060,7 @@ all_shortlists.extend(await stage1_concepts(sorted_tracks, genre_label, cascade_
 pools = partition_bpm_pools(cluster_tracks)
 sorted_tracks = sort_by_camelot(pools.core)
 sorted_tracks = [t for t in sorted_tracks if t.bpm > 0]  # precondition filter
-bpm_filtered_counts[genre_label] = len(sorted_tracks)  # both paths: what Stage 1 receives
+bpm_filtered_counts[genre_label] = len(sorted_tracks)    # both paths: what Stage 1 receives
 # IMPORTANT: capture the env flag ONCE before branching to avoid a second os.environ.get()
 # call — in tests, monkeypatching os.environ between the filter line and the branch would
 # leave stage1_pool unbound if the first branch is not entered.

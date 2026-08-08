@@ -89,49 +89,30 @@ Append to `tests/test_directions.py`:
 from mixlab.directions import _freshness, _log_lift, _balance
 
 
-def _t(
-    track_id: str,
-    *,
-    date_added: str = "",
-    label: str = "",
-    year: int | None = None,
-    tags: list[str] | None = None,
-    energy: int | None = None,
-    bpm: float = 174.0,
-    key: str = "8A",
-) -> Track:
-    return Track(
-        track_id=track_id,
-        artist=f"A{track_id}",
-        title=f"T{track_id}",
-        bpm=bpm,
-        camelot_key=key,
-        genre="Drum & Bass",
-        label=label,
-        year=year,
-        tags=tags or [],
-        energy=energy,
-        date_added=date_added,
-    )
+def _t(track_id: str, *, date_added: str = "", label: str = "", year: int | None = None,
+       tags: list[str] | None = None, energy: int | None = None, bpm: float = 174.0,
+       key: str = "8A") -> Track:
+    return Track(track_id=track_id, artist=f"A{track_id}", title=f"T{track_id}",
+                 bpm=bpm, camelot_key=key, genre="Drum & Bass", label=label,
+                 year=year, tags=tags or [], energy=energy, date_added=date_added)
 
 
 class TestFreshness:
     def test_newest_half_scores_above_oldest_half(self):
-        pool = [_t(f"o{i}", date_added=f"2020-01-{i + 1:02d}") for i in range(10)] + [
-            _t(f"n{i}", date_added=f"2026-06-{i + 1:02d}") for i in range(10)
-        ]
+        pool = [_t(f"o{i}", date_added=f"2020-01-{i+1:02d}") for i in range(10)] + \
+               [_t(f"n{i}", date_added=f"2026-06-{i+1:02d}") for i in range(10)]
         newest = [t for t in pool if t.track_id.startswith("n")]
         oldest = [t for t in pool if t.track_id.startswith("o")]
         assert _freshness(newest, pool) > 0.7
         assert _freshness(oldest, pool) < 0.3
 
     def test_missing_date_added_sorts_oldest(self):
-        pool = [_t("u1"), _t("u2")] + [_t(f"d{i}", date_added=f"2026-01-{i + 1:02d}") for i in range(8)]
+        pool = [_t("u1"), _t("u2")] + [_t(f"d{i}", date_added=f"2026-01-{i+1:02d}") for i in range(8)]
         assert _freshness([pool[0], pool[1]], pool) < 0.2
 
     def test_all_unplayed_pool_does_not_saturate(self):
         # freshness is date-rank based, so an "all-unplayed" pool still spreads
-        pool = [_t(f"x{i}", date_added=f"20{20 + i // 5}-01-01") for i in range(20)]
+        pool = [_t(f"x{i}", date_added=f"20{20+i//5}-01-01") for i in range(20)]
         vals = {_freshness([t], pool) for t in pool}
         assert len(vals) > 1
 
@@ -141,19 +122,17 @@ class TestLogLift:
         assert _log_lift(1.0) == 0.0
         assert abs(_log_lift(2.0) - 1 / 3) < 1e-9
         assert abs(_log_lift(8.0) - 1.0) < 1e-9
-        assert _log_lift(10.4) == 1.0  # live max saturates at the cap, not below it
-        assert _log_lift(0.5) == 0.0  # sub-chance clamps to 0, never negative
+        assert _log_lift(10.4) == 1.0     # live max saturates at the cap, not below it
+        assert _log_lift(0.5) == 0.0      # sub-chance clamps to 0, never negative
 
 
 class TestIdentityRenormalisation:
     def test_mood_journey_balance_uses_untruncated_pole_counts(self):
         # 40 dark vs 8 euphoric: old code truncated both to [:10] first → balance 0.8.
         # New: _balance(40, 8) = 0.2.
-        pool = (
-            [_t(f"d{i}", tags=["dark"], year=2020) for i in range(40)]
-            + [_t(f"e{i}", tags=["euphoric"], year=2020) for i in range(8)]
-            + [_t(f"b{i}", year=2020) for i in range(10)]
-        )
+        pool = ([_t(f"d{i}", tags=["dark"], year=2020) for i in range(40)] +
+                [_t(f"e{i}", tags=["euphoric"], year=2020) for i in range(8)] +
+                [_t(f"b{i}", year=2020) for i in range(10)])
         d = _build_mood_journey(pool, seed=1)
         assert d is not None
         # signal lands in feasibility via the Task 3 scorer; here assert the builder's
@@ -161,15 +140,17 @@ class TestIdentityRenormalisation:
         assert abs(d.identity - 0.2) < 1e-9
 
     def test_label_spotlight_collection_lift(self):
-        pool = [_t(f"l{i}", label="Metalheadz") for i in range(10)] + [_t(f"p{i}") for i in range(10)]
+        pool = [_t(f"l{i}", label="Metalheadz") for i in range(10)] + \
+               [_t(f"p{i}") for i in range(10)]
         collection = pool + [_t(f"c{i}") for i in range(80)]
         d = _build_label_spotlight(pool, seed=1, collection=collection)
         assert d is not None
         # share_in_pool 0.5, share_in_collection 0.1 → ratio 5 → log2(5)/3 ≈ 0.774
-        assert abs(d.identity - math.log2(5) / 3) < 1e-6  # add `import math` at file top
+        assert abs(d.identity - math.log2(5) / 3) < 1e-6   # add `import math` at file top
 
     def test_label_spotlight_without_collection_falls_back_to_share(self):
-        pool = [_t(f"l{i}", label="Metalheadz") for i in range(10)] + [_t(f"p{i}") for i in range(10)]
+        pool = [_t(f"l{i}", label="Metalheadz") for i in range(10)] + \
+               [_t(f"p{i}") for i in range(10)]
         d = _build_label_spotlight(pool, seed=1)
         assert d is not None
         assert abs(d.identity - 0.5) < 1e-9
@@ -276,16 +257,8 @@ from mixlab.directions import _score_field
 
 
 def _cand(dtype: str, ids: list[str], *, identity: float, freshness: float) -> Direction:
-    return Direction(
-        direction_type=dtype,
-        title=dtype,
-        mood="m",
-        track_ids=ids,
-        brief="b",
-        feasibility=0.0,
-        identity=identity,
-        freshness=freshness,
-    )
+    return Direction(direction_type=dtype, title=dtype, mood="m", track_ids=ids,
+                     brief="b", feasibility=0.0, identity=identity, freshness=freshness)
 
 
 class TestScoreField:
@@ -344,12 +317,8 @@ def _score_field(candidates: list[Direction]) -> list[Direction]:
     field only — the rows the operator actually sees — and computes the final
     feasibility. Deterministic: total sort keys, order-independent output.
     """
-    rank_key = lambda d: (
-        -(_W_FRESHNESS * d.freshness + _W_IDENTITY * d.identity) / 0.70,
-        d.direction_type,
-        d.title,
-        tuple(sorted(d.track_ids)),
-    )
+    rank_key = lambda d: (-(_W_FRESHNESS * d.freshness + _W_IDENTITY * d.identity) / 0.70,
+                          d.direction_type, d.title, tuple(sorted(d.track_ids)))
     kept: list[Direction] = []
     for cand in sorted(candidates, key=rank_key):
         if all(_jaccard(cand.track_ids, k.track_ids) <= _DEDUPE_JACCARD for k in kept):
@@ -434,36 +403,26 @@ from mixlab.mining import Predicate, extract_predicates
 from mixlab.models import Track
 
 
-def _t(track_id, *, label="", year=None, tags=None, energy=None, remixer="", bpm=174.0, key="8A", date_added=""):
-    return Track(
-        track_id=track_id,
-        artist=f"A{track_id}",
-        title=f"T{track_id}",
-        bpm=bpm,
-        camelot_key=key,
-        genre="Drum & Bass",
-        label=label,
-        year=year,
-        tags=tags or [],
-        energy=energy,
-        remixer=remixer,
-        date_added=date_added,
-    )
+def _t(track_id, *, label="", year=None, tags=None, energy=None, remixer="",
+       bpm=174.0, key="8A", date_added=""):
+    return Track(track_id=track_id, artist=f"A{track_id}", title=f"T{track_id}",
+                 bpm=bpm, camelot_key=key, genre="Drum & Bass", label=label,
+                 year=year, tags=tags or [], energy=energy, remixer=remixer,
+                 date_added=date_added)
 
 
 class TestExtractPredicates:
     def test_label_gate_eight(self):
-        pool = (
-            [_t(f"a{i}", label="Metalheadz") for i in range(8)]
-            + [_t(f"b{i}", label="Dispatch") for i in range(7)]
-            + [_t(f"c{i}") for i in range(10)]
-        )
+        pool = [_t(f"a{i}", label="Metalheadz") for i in range(8)] + \
+               [_t(f"b{i}", label="Dispatch") for i in range(7)] + \
+               [_t(f"c{i}") for i in range(10)]
         kinds = {(p.kind, p.value) for p in extract_predicates(pool)}
         assert ("label", "Metalheadz") in kinds
-        assert ("label", "Dispatch") not in kinds  # 7 < 8
+        assert ("label", "Dispatch") not in kinds        # 7 < 8
 
     def test_remixer_gate_five(self):
-        pool = [_t(f"a{i}", remixer="Calibre") for i in range(5)] + [_t(f"b{i}") for i in range(15)]
+        pool = [_t(f"a{i}", remixer="Calibre") for i in range(5)] + \
+               [_t(f"b{i}") for i in range(15)]
         assert ("remixer", "Calibre") in {(p.kind, p.value) for p in extract_predicates(pool)}
 
     def test_coverage_cap_seventy_percent(self):
@@ -482,17 +441,15 @@ class TestExtractPredicates:
         assert not any(p.kind == "era" for p in extract_predicates(pool))
 
     def test_mechanical_predicates_not_namable(self):
-        pool = [_t(f"a{i}", bpm=174.0, key="8A") for i in range(10)] + [
-            _t(f"b{i}", bpm=120.0, key="3B") for i in range(10)
-        ]
+        pool = [_t(f"a{i}", bpm=174.0, key="8A") for i in range(10)] + \
+               [_t(f"b{i}", bpm=120.0, key="3B") for i in range(10)]
         for p in extract_predicates(pool):
             if p.kind in ("bpm_regime", "key_hood"):
                 assert p.namable is False
 
     def test_deterministic_order(self):
-        pool = [_t(f"a{i}", label="Hospital Records", year=2020, tags=["Liquid"]) for i in range(10)] + [
-            _t(f"b{i}") for i in range(5)
-        ]
+        pool = [_t(f"a{i}", label="Hospital Records", year=2020, tags=["Liquid"]) for i in range(10)] + \
+               [_t(f"b{i}") for i in range(5)]
         assert extract_predicates(pool) == extract_predicates(list(reversed(pool)))
 
     def test_tags_lowercased(self):
@@ -653,7 +610,7 @@ class TestScanPairs:
     def test_support_floor_fifteen(self):
         a = _pred("label", "L", [f"x{i}" for i in range(14)] + ["a0"])
         b = _pred("era", "2020-2024", [f"x{i}" for i in range(14)] + ["b0"])
-        assert scan_pairs([a, b], pool_size=200) == []  # support 14
+        assert scan_pairs([a, b], pool_size=200) == []   # support 14
 
     def test_same_kind_pairs_skipped(self):
         a = _pred("key_hood", "8A", [f"x{i}" for i in range(20)], namable=False)
@@ -663,7 +620,7 @@ class TestScanPairs:
     def test_both_mechanical_skipped(self):
         a = _pred("bpm_regime", "174", [f"x{i}" for i in range(20)], namable=False)
         b = _pred("key_hood", "8A", [f"x{i}" for i in range(20)], namable=False)
-        assert scan_pairs([a, b], pool_size=200) == []  # no namable side
+        assert scan_pairs([a, b], pool_size=200) == []   # no namable side
 
     def test_subsumption_pair_identical_to_parent_dies(self):
         ids = [f"x{i}" for i in range(20)]
@@ -697,7 +654,7 @@ Expected: FAIL — `scan_pairs` not defined.
 - [ ] **Step 3: Implement**
 
 ```python
-MIN_SUPPORT = 15  # == directions.MIN_DIRECTION_POOL; import there, assert equal in tests
+MIN_SUPPORT = 15          # == directions.MIN_DIRECTION_POOL; import there, assert equal in tests
 MIN_LIFT = 1.3
 _SUBSUME_JACCARD = 0.9
 SHORTLIST = 12
@@ -724,7 +681,7 @@ def scan_pairs(predicates: list[Predicate], pool_size: int) -> list[MinedPair]:
     ordered = sorted(predicates, key=lambda p: (p.kind, p.value))
     pairs: list[MinedPair] = []
     for i, a in enumerate(ordered):
-        for b in ordered[i + 1 :]:
+        for b in ordered[i + 1:]:
             if a.kind == b.kind or not (a.namable or b.namable):
                 continue
             members = a.track_ids & b.track_ids
@@ -733,12 +690,11 @@ def scan_pairs(predicates: list[Predicate], pool_size: int) -> list[MinedPair]:
             lift = len(members) * pool_size / (len(a.track_ids) * len(b.track_ids))
             if lift < MIN_LIFT:
                 continue
-            if (
-                _jaccard_sets(frozenset(members), a.track_ids) > _SUBSUME_JACCARD
-                or _jaccard_sets(frozenset(members), b.track_ids) > _SUBSUME_JACCARD
-            ):
+            if (_jaccard_sets(frozenset(members), a.track_ids) > _SUBSUME_JACCARD
+                    or _jaccard_sets(frozenset(members), b.track_ids) > _SUBSUME_JACCARD):
                 continue
-            pairs.append(MinedPair(a=a, b=b, support=len(members), lift=lift, member_ids=tuple(sorted(members))))
+            pairs.append(MinedPair(a=a, b=b, support=len(members), lift=lift,
+                                   member_ids=tuple(sorted(members))))
     pairs.sort(key=lambda p: (-p.lift, p.a.value, p.b.value, p.member_ids))
     return pairs[:SHORTLIST]
 ```
@@ -784,26 +740,17 @@ def _conj_pool():
     that gates pass and lift is well above 1.3."""
     pool = []
     for i in range(20):
-        pool.append(
-            _t(
-                f"hl{i}",
-                label="Hospital Records",
-                tags=["Liquid"],
-                year=2016 + i % 4,
-                bpm=172.0 + (i % 5),
-                date_added=f"2026-0{1 + i % 6}-10",
-            )
-        )
+        pool.append(_t(f"hl{i}", label="Hospital Records", tags=["Liquid"], year=2016 + i % 4,
+                       bpm=172.0 + (i % 5), date_added=f"2026-0{1 + i % 6}-10"))
     for i in range(20):
-        pool.append(
-            _t(f"h{i}", label="Hospital Records", year=2005 + i % 5, bpm=174.0, date_added=f"2021-0{1 + i % 6}-10")
-        )
+        pool.append(_t(f"h{i}", label="Hospital Records", year=2005 + i % 5, bpm=174.0,
+                       date_added=f"2021-0{1 + i % 6}-10"))
     for i in range(20):
-        pool.append(_t(f"l{i}", tags=["Liquid"], year=2010 + i % 5, bpm=173.0, date_added=f"2022-0{1 + i % 6}-10"))
+        pool.append(_t(f"l{i}", tags=["Liquid"], year=2010 + i % 5, bpm=173.0,
+                       date_added=f"2022-0{1 + i % 6}-10"))
     for i in range(20):
-        pool.append(
-            _t(f"p{i}", label="Shogun Audio", tags=["Deep"], year=2018, bpm=174.0, date_added=f"2023-0{1 + i % 6}-10")
-        )
+        pool.append(_t(f"p{i}", label="Shogun Audio", tags=["Deep"], year=2018, bpm=174.0,
+                       date_added=f"2023-0{1 + i % 6}-10"))
     return pool
 
 
@@ -816,7 +763,7 @@ class TestMinePool:
         assert top.title == "Found: Hospital Records × liquid"
         assert 15 <= len(top.track_ids) <= 25
         assert top.identity > 0.0
-        assert top.feasibility == 0.0  # field scorer owns the final score
+        assert top.feasibility == 0.0          # field scorer owns the final score
 
     def test_title_never_contains_mechanical_values(self):
         for d in mine_pool(_conj_pool()):
@@ -837,16 +784,8 @@ class TestMinePool:
     def test_brief_cites_selection_when_support_exceeds_cap(self):
         # widen overlap to 40 so support > 25
         pool = _conj_pool() + [
-            _t(
-                f"hx{i}",
-                label="Hospital Records",
-                tags=["Liquid"],
-                year=2020,
-                bpm=174.0,
-                date_added=f"2026-0{1 + i % 6}-15",
-            )
-            for i in range(20)
-        ]
+            _t(f"hx{i}", label="Hospital Records", tags=["Liquid"], year=2020, bpm=174.0,
+               date_added=f"2026-0{1 + i % 6}-15") for i in range(20)]
         found = mine_pool(pool)
         top = next(d for d in found if d.title == "Found: Hospital Records × liquid")
         assert "most central are selected" in top.brief
@@ -874,7 +813,8 @@ def _kind_noun(kind: str) -> str:
 
 def mine_pool(pool: list[Track]) -> list[Direction]:
     """Extract → scan → materialise. feasibility stays 0.0 for the field scorer."""
-    from mixlab.directions import MAX_DIRECTION_POOL, Direction, _freshness, _log_lift, _path_feasible, _rank
+    from mixlab.directions import (MAX_DIRECTION_POOL, Direction, _freshness,
+                                   _log_lift, _path_feasible, _rank)
     # _rank = directions.py:79, the empty-tolerant _centrality_rank wrapper
 
     by_id = {t.track_id: t for t in pool}
@@ -889,15 +829,14 @@ def mine_pool(pool: list[Track]) -> list[Direction]:
         mech = [p for p in (pair.a, pair.b) if not p.namable]
         if len(namables) == 2:
             title = f"Found: {namables[0].value} × {namables[1].value}"
-            where = f"where {namables[0].value} meets {namables[1].value}"
+            where = (f"where {namables[0].value} meets {namables[1].value}")
         else:
             unit = " BPM" if mech[0].kind == "bpm_regime" else ""
             title = f"Found: {namables[0].value}"
-            where = (
-                f"where {namables[0].value} clusters in one "
-                f"{_kind_noun(mech[0].kind)} pocket (around {mech[0].value}{unit})"
-            )
-        sel = f", of which the {len(shipped)} most central are selected" if pair.support > len(shipped) else ""
+            where = (f"where {namables[0].value} clusters in one "
+                     f"{_kind_noun(mech[0].kind)} pocket (around {mech[0].value}{unit})")
+        sel = (f", of which the {len(shipped)} most central are selected"
+               if pair.support > len(shipped) else "")
         anchors = "; ".join(f"{t.artist} — {t.title}" for t in shipped[:3])
         brief = (
             f"FOUND SET. Play the corner of the crate {where} as a scene, not a "
@@ -906,18 +845,16 @@ def mine_pool(pool: list[Track]) -> list[Direction]:
             f"overlap, {pair.lift:.1f}x denser than chance{sel}. Anchors: {anchors}."
         )
         mood = f"{_kind_noun(pair.a.kind)} x {_kind_noun(pair.b.kind)}"
-        out.append(
-            Direction(
-                direction_type="found",
-                title=title,
-                mood=mood,
-                track_ids=[t.track_id for t in shipped],
-                brief=brief,
-                feasibility=0.0,
-                identity=round(_log_lift(pair.lift), 4),
-                freshness=round(_freshness(shipped, pool), 4),
-            )
-        )
+        out.append(Direction(
+            direction_type="found",
+            title=title,
+            mood=mood,
+            track_ids=[t.track_id for t in shipped],
+            brief=brief,
+            feasibility=0.0,
+            identity=round(_log_lift(pair.lift), 4),
+            freshness=round(_freshness(shipped, pool), 4),
+        ))
     return out
 ```
 
@@ -956,7 +893,7 @@ from mixlab.directions import enumerate_directions, generate_directions
 
 def _minable_pool():
     """Pool where at least one named builder AND the miner both fire."""
-    pool = _conj_pool()  # from test_mining fixtures — move to a shared conftest helper
+    pool = _conj_pool()          # from test_mining fixtures — move to a shared conftest helper
     # give fresh_crate its material: dated, rated anchors
     return pool
 
@@ -1016,11 +953,12 @@ _MAX_MINED_PER_POOL = 3
 def _combined_field(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> list[Direction]:
     """Named + mined candidates through the shared two-pass scorer, with the
     mined cap, title uniqueness, and found_N rename applied post-score."""
-    scored = _score_field(_named_candidates(pool, seed=seed, collection=collection) + mining.mine_pool(pool))
+    scored = _score_field(_named_candidates(pool, seed=seed, collection=collection)
+                          + mining.mine_pool(pool))
     out: list[Direction] = []
     mined_kept = 0
     seen_titles: set[str] = set()
-    for d in scored:  # already (-feasibility, direction_type) sorted
+    for d in scored:                      # already (-feasibility, direction_type) sorted
         if d.direction_type == "found":
             if mined_kept >= _MAX_MINED_PER_POOL or d.title in seen_titles:
                 continue
@@ -1031,10 +969,10 @@ def _combined_field(pool: list[Track], *, seed: int, collection: list[Track] | N
     return out
 
 
-def enumerate_directions(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> list[Direction]:
-    return sorted(
-        _combined_field(pool, seed=seed, collection=collection), key=lambda d: (-d.feasibility, d.direction_type)
-    )
+def enumerate_directions(pool: list[Track], *, seed: int,
+                         collection: list[Track] | None = None) -> list[Direction]:
+    return sorted(_combined_field(pool, seed=seed, collection=collection),
+                  key=lambda d: (-d.feasibility, d.direction_type))
 ```
 
 `generate_directions` gains a `collection: list[Track] | None = None` keyword (existing callers unchanged), and its body changes:
@@ -1087,12 +1025,12 @@ git commit -m "feat(directions): mined candidates join the field with found_N ty
 class TestMapPayloadWithMining:
     def test_found_rows_ship_with_valid_shape(self):
         payload = build_map_payload(_fixture_collection(), mode="all", seed=0, played=[])
-        found = [
-            d for e in payload["pools"].values() for d in e["directions"] if d["direction_type"].startswith("found_")
-        ]
+        found = [d for e in payload["pools"].values() for d in e["directions"]
+                 if d["direction_type"].startswith("found_")]
         assert found, "fixture collection must mine at least one found row"
         for d in found:
-            assert set(d) == {"direction_type", "title", "mood", "brief", "feasibility", "track_ids"}
+            assert set(d) == {"direction_type", "title", "mood", "brief",
+                              "feasibility", "track_ids"}
             assert d["title"].startswith("Found: ")
             assert 0.0 < d["feasibility"] <= 1.0
             assert 15 <= len(d["track_ids"]) <= 25

@@ -49,57 +49,52 @@ parse XML → filter denylist/range → fetch played tracks → filter unplayed
 @dataclass
 class BpmPools:
     """Three-tier BPM partition of a track pool."""
-
-    core: list[Track]  # |bpm - median| <= 6
-    bridge: list[Track]  # 6 < |bpm - median| <= 12
+    core: list[Track]      # |bpm - median| <= 6
+    bridge: list[Track]    # 6 < |bpm - median| <= 12
     wildcard: list[Track]  # |bpm - median| > 12
-
 
 @dataclass
 class CanvasRoleCandidates:
-    opener: list[str]  # track_ids
+    opener: list[str]        # track_ids
     groove_locker: list[str]
     builder: list[str]
     pivot: list[str]
     peak: list[str]
     closer: list[str]
 
-
 @dataclass
 class ContrastAssets:
-    vocal_moments: list[str]  # track_ids
+    vocal_moments: list[str]     # track_ids
     texture_changes: list[str]
     darker_turns: list[str]
     brighter_lifts: list[str]
     lower_pressure_resets: list[str]
 
-
 @dataclass
 class CanvasScore:
-    technical_viability: float  # 0–1
-    role_coverage: float  # 0–1, fraction of 6 roles with ≥1 candidate
-    anchor_strength: float  # 0–1, opener+closer candidate quality
-    contrast_potential: float  # 0–1
-    distinctiveness: float  # 0–1 vs other canvases in batch
-    novelty: float  # 0–1 vs concept history
-    overall: float  # weighted sum
-
+    technical_viability: float   # 0–1
+    role_coverage: float         # 0–1, fraction of 6 roles with ≥1 candidate
+    anchor_strength: float       # 0–1, opener+closer candidate quality
+    contrast_potential: float    # 0–1
+    distinctiveness: float       # 0–1 vs other canvases in batch
+    novelty: float               # 0–1 vs concept history
+    overall: float               # weighted sum
 
 @dataclass
 class MixCanvas:
-    canvas_id: str  # "{genre}_{bpm_center}_{camelot_zone}"
+    canvas_id: str               # "{genre}_{bpm_center}_{camelot_zone}"
     genre: str
     bpm_range: tuple[float, float]
-    dominant_bpm: float  # pool median
-    dominant_camelot: str  # most common key in core pool
-    core_track_ids: list[str]  # from BpmPools.core
+    dominant_bpm: float          # pool median
+    dominant_camelot: str        # most common key in core pool
+    core_track_ids: list[str]    # from BpmPools.core
     bridge_track_ids: list[str]
     wildcard_track_ids: list[str]
     roles: CanvasRoleCandidates
     contrast: ContrastAssets
-    risk_notes: list[str]  # strings, e.g. "weak closer pool"
+    risk_notes: list[str]        # strings, e.g. "weak closer pool"
     score: CanvasScore
-    source_concept: MixConcept  # original Stage 1 concept
+    source_concept: MixConcept   # original Stage 1 concept
 ```
 
 ---
@@ -343,13 +338,13 @@ Warnings appended to Discord report as a "⚠ Validation Notes" section.
 
 ```python
 # After stage1_concepts() returns:
-pools = partition_bpm_pools(cluster)  # new
+pools = partition_bpm_pools(cluster)            # new
 history = load_history(Path(".mixlab/concept-history.json"))  # new
 canvases = [build_mix_canvas(c, tracks_by_id) for c in concepts]  # new
-selected = select_canvases(canvases, history)  # replaces select_shortlists_for_stage2
+selected = select_canvases(canvases, history)   # replaces select_shortlists_for_stage2
 
 # After stage2_curate_and_report():
-warnings = validate_stage2_output(...)  # new
+warnings = validate_stage2_output(...)          # new
 entry = HistoryEntry.from_run(selected, final_concepts, genre, mode)  # new
 append_run(history, entry, Path(".mixlab/concept-history.json"))  # new
 ```

@@ -35,13 +35,12 @@ Add a `feedback` field to `HistoryEntry` in [`history.py`](../../src/mixlab/hist
 ```python
 ConceptFeedback = Literal["played", "played_modified", "rejected", "unused"]
 
-
 @dataclass
 class HistoryEntry:
     # … existing fields …
     feedback: ConceptFeedback | None = None
-    feedback_notes: str = ""  # free-text reason; never parsed structurally
-    feedback_recorded_at: str = ""  # ISO timestamp; "" when no feedback yet
+    feedback_notes: str = ""           # free-text reason; never parsed structurally
+    feedback_recorded_at: str = ""     # ISO timestamp; "" when no feedback yet
 ```
 
 The four-value enum is the maximum useful resolution. `played` and `rejected` are the load-bearing cases; `played_modified` is signal that the concept's *shape* was right but specific picks were wrong (interesting for #7-style shape novelty); `unused` is the explicit-noise state — the DJ deliberately looked and passed, distinct from no-signal-yet (`None`).
@@ -60,7 +59,7 @@ A single run typically produces 3–6 concepts. The DJ usually picks one. Record
 @dataclass
 class HistoryEntry:
     # … existing …
-    concept_ids: list[str] = field(default_factory=list)  # uuids, parallel to concept_track_ids
+    concept_ids: list[str] = field(default_factory=list)   # uuids, parallel to concept_track_ids
     feedback_by_concept: dict[str, ConceptFeedback] = field(default_factory=dict)
     feedback_notes_by_concept: dict[str, str] = field(default_factory=dict)
 ```
@@ -118,17 +117,17 @@ Today `similarity_to_history` returns `combined ∈ [0, 1]`. Feedback amplifies 
 
 ```python
 FEEDBACK_MULTIPLIER = {
-    "played": 1.4,  # played concepts penalise novelty more strongly
+    "played":          1.4,  # played concepts penalise novelty more strongly
     "played_modified": 1.2,  # shape was right; slight extra weight
-    "rejected": 0.0,  # DJ said no — do not penalise the next run
-    "unused": 0.6,  # DJ looked and passed — partial signal
-    None: 1.0,  # no signal — current behaviour
+    "rejected":        0.0,  # DJ said no — do not penalise the next run
+    "unused":          0.6,  # DJ looked and passed — partial signal
+    None:              1.0,  # no signal — current behaviour
 }
 
 for age, entry in enumerate(reversed(recent)):
     base = base_similarity(canvas_shape, entry)
     multiplier = FEEDBACK_MULTIPLIER[entry.feedback]
-    decayed = base * (_DECAY**age) * multiplier
+    decayed = base * (_DECAY ** age) * multiplier
 ```
 
 `rejected → 0.0` means the system genuinely forgets rejected runs for novelty purposes. That is the desired behaviour — a rejected concept should not gatekeep future generation.
@@ -141,7 +140,8 @@ Tracks that appear in many `played` concepts are by definition battle-tested in 
 
 ```python
 played_appearances = sum(
-    1 for entry in history.runs[-30:] if entry.feedback == "played" and track_id in entry.concept_track_ids
+    1 for entry in history.runs[-30:]
+    if entry.feedback == "played" and track_id in entry.concept_track_ids
 )
 played_boost = min(0.3, played_appearances * 0.05)
 score += played_boost
