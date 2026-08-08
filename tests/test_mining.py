@@ -92,6 +92,22 @@ def _pred(kind, value, ids, namable=True):
     return Predicate(kind=kind, value=value, namable=namable, track_ids=frozenset(ids))
 
 
+_SHARED_15 = tuple(f"x{i}" for i in range(15))
+
+
+def _unsubsumed(kind, value, private_prefix, namable=True):
+    """A predicate over 15 shared members plus 5 private ones.
+
+    Two of these intersect in exactly the 15 shared ids, giving
+    Jaccard(intersection, parent) == 15/20 == 0.75 — well under the 0.9
+    subsumption threshold, and support 15 / lift >= 1.3 at any sane pool size.
+    Negative tests build from this so the pair can only die at the gate under
+    test, never at subsumption.
+    """
+    ids = list(_SHARED_15) + [f"{private_prefix}{i}" for i in range(5)]
+    return _pred(kind, value, ids, namable=namable)
+
+
 class TestScanPairs:
     def test_support_floor_matches_direction_pool(self):
         assert MIN_SUPPORT == directions.MIN_DIRECTION_POOL
@@ -105,25 +121,35 @@ class TestScanPairs:
         assert abs(pair.lift - 3.75) < 1e-9
 
     def test_chance_pair_dies(self):
-        # lift exactly 1.0 < 1.3 → gone (the first draft shipped these)
-        a = _pred("era", "2000-2004", [f"x{i}" for i in range(20)])
-        b = _pred("key_hood", "8A", [f"x{i}" for i in range(20)], namable=False)
-        assert scan_pairs([a, b], pool_size=20) == []
+        # lift exactly 1.0 < 1.3 → gone (the first draft shipped these).
+        # |A| = |B| = 40, |A∩B| = 20, N = 80 → lift 1.0. Support clears 15 and
+        # Jaccard is 0.5, so the lift gate is the only thing that can drop this.
+        shared = [f"x{i}" for i in range(20)]
+        a = _pred("era", "2000-2004", shared + [f"a{i}" for i in range(20)])
+        b = _pred("key_hood", "8A", shared + [f"b{i}" for i in range(20)], namable=False)
+        assert scan_pairs([a, b], pool_size=80) == []
 
     def test_support_floor_fifteen(self):
-        a = _pred("label", "L", [f"x{i}" for i in range(14)] + ["a0"])
-        b = _pred("era", "2020-2024", [f"x{i}" for i in range(14)] + ["b0"])
-        assert scan_pairs([a, b], pool_size=200) == []  # support 14
+        # support 14, one short. Jaccard 14/19 == 0.74 and lift 7.76, so only the
+        # support floor can drop it — lower MIN_SUPPORT to 14 and this fails.
+        shared = [f"x{i}" for i in range(14)]
+        a = _pred("label", "L", shared + [f"a{i}" for i in range(5)])
+        b = _pred("era", "2020-2024", shared + [f"b{i}" for i in range(5)])
+        assert scan_pairs([a, b], pool_size=200) == []
 
     def test_same_kind_pairs_skipped(self):
-        a = _pred("key_hood", "8A", [f"x{i}" for i in range(20)], namable=False)
-        b = _pred("key_hood", "9A", [f"x{i}" for i in range(20)], namable=False)
+        # Both namable and both unsubsumed, so nothing but the cross-kind rule
+        # stands between this pair and the shortlist.
+        a = _unsubsumed("era", "2000-2004", "a")
+        b = _unsubsumed("era", "2005-2009", "b")
         assert scan_pairs([a, b], pool_size=200) == []
 
     def test_both_mechanical_skipped(self):
-        a = _pred("bpm_regime", "174", [f"x{i}" for i in range(20)], namable=False)
-        b = _pred("key_hood", "8A", [f"x{i}" for i in range(20)], namable=False)
-        assert scan_pairs([a, b], pool_size=200) == []  # no namable side
+        # Cross-kind, support 15, lift 7.5, Jaccard 0.75 — every other gate is
+        # satisfied, so deleting the namable gate makes this fail.
+        a = _unsubsumed("bpm_regime", "174", "a", namable=False)
+        b = _unsubsumed("key_hood", "8A", "b", namable=False)
+        assert scan_pairs([a, b], pool_size=200) == []
 
     def test_subsumption_pair_identical_to_parent_dies(self):
         ids = [f"x{i}" for i in range(20)]
@@ -144,9 +170,11 @@ class TestScanPairs:
         assert lifts == sorted(lifts, reverse=True)
 
     def test_deterministic(self):
-        a = _pred("label", "L", [f"x{i}" for i in range(16)])
-        b = _pred("era", "2020-2024", [f"x{i}" for i in range(16)])
-        assert scan_pairs([a, b], 100) == scan_pairs([b, a], 100)
+        a = _unsubsumed("label", "L", "a")
+        b = _unsubsumed("era", "2020-2024", "b")
+        forward, reverse = scan_pairs([a, b], 100), scan_pairs([b, a], 100)
+        assert forward != []  # the fixture survives — this is not [] == []
+        assert forward == reverse
 
     def test_pair_sides_ordered_and_members_sorted(self):
         a = _pred("tag", "liquid", [f"x{i}" for i in range(15)] + [f"a{i}" for i in range(6)])
@@ -157,7 +185,9 @@ class TestScanPairs:
         assert pair.member_ids == tuple(sorted(f"x{i}" for i in range(15)))
         assert isinstance(pair, MinedPair)
 
-    def test_empty_pool_size_returns_empty(self):
-        a = _pred("label", "L", [f"x{i}" for i in range(16)])
-        b = _pred("era", "2020-2024", [f"x{i}" for i in range(16)] + [f"b{i}" for i in range(20)])
+    def test_non_positive_pool_size_returns_empty(self):
+        a = _unsubsumed("label", "L", "a")
+        b = _unsubsumed("era", "2020-2024", "b")
+        assert scan_pairs([a, b], pool_size=200) != []  # survives at a real pool size
         assert scan_pairs([a, b], pool_size=0) == []
+        assert scan_pairs([a, b], pool_size=-1) == []
