@@ -19,6 +19,7 @@ from mixlab.directions import (
     _freshness,
     _log_lift,
     _path_feasible,
+    _score_field,
     enumerate_directions,
     generate_directions,
 )
@@ -557,3 +558,49 @@ class TestIdentityRenormalisation:
         d = _build_label_spotlight(pool, seed=1)
         assert d is not None
         assert abs(d.identity - 0.5) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# _score_field — two-pass scorer: gates in the builder, ranking in the field (Task 3)
+# ---------------------------------------------------------------------------
+
+
+def _cand(dtype: str, ids: list[str], *, identity: float, freshness: float) -> Direction:
+    return Direction(
+        direction_type=dtype,
+        title=dtype,
+        mood="m",
+        track_ids=ids,
+        brief="b",
+        feasibility=0.0,
+        identity=identity,
+        freshness=freshness,
+    )
+
+
+class TestScoreField:
+    def test_spread_where_old_formula_saturated(self):
+        # Three full-size, path-feasible candidates that all scored ~1.0 before
+        a = _cand("fresh_crate", [f"a{i}" for i in range(25)], identity=1.0, freshness=0.97)
+        b = _cand("label_spotlight", [f"b{i}" for i in range(25)], identity=0.3, freshness=0.4)
+        c = _cand("mood_journey", [f"c{i}" for i in range(25)], identity=0.6, freshness=0.5)
+        scores = {d.direction_type: d.feasibility for d in _score_field([a, b, c])}
+        assert max(scores.values()) - min(scores.values()) > 0.15
+
+    def test_dedupe_drops_lower_ranked_clone(self):
+        shared = [f"s{i}" for i in range(20)]
+        hi = _cand("era_dialogue", shared + ["h1", "h2"], identity=0.9, freshness=0.5)
+        lo = _cand("found_1", shared + ["l1", "l2"], identity=0.2, freshness=0.5)
+        out = _score_field([hi, lo])
+        assert [d.direction_type for d in out] == ["era_dialogue"]
+
+    def test_lone_candidate_distinctiveness_is_half(self):
+        a = _cand("artist_thread", [f"a{i}" for i in range(25)], identity=0.4, freshness=0.4)
+        [scored] = _score_field([a])
+        # 0.25*0.4 + 0.45*0.4 + 0.30*0.5 = 0.43
+        assert abs(scored.feasibility - 0.43) < 1e-9
+
+    def test_deterministic_under_input_order(self):
+        a = _cand("x1", [f"a{i}" for i in range(25)], identity=0.5, freshness=0.5)
+        b = _cand("x2", [f"b{i}" for i in range(25)], identity=0.5, freshness=0.4)
+        assert _score_field([a, b]) == _score_field([b, a])

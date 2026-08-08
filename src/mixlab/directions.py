@@ -23,7 +23,7 @@ import math
 import random
 import statistics
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from mixlab.clustering import _centrality_rank, build_mix_canvas, camelot_compatible
 from mixlab.models import MixCanvas, MixConcept, Track
@@ -59,6 +59,13 @@ _ERA_YEAR_COVERAGE = 0.60
 _LABEL_MIN_COUNT = 8
 _ENERGY_COVERAGE = 0.70
 _FRESH_MIN_COUNT = 10
+
+# Field-scorer weights (see _score_field). They sum to 1.0, so feasibility stays in
+# [0, 1] and the three components are directly comparable across pools.
+_W_FRESHNESS = 0.25
+_W_IDENTITY = 0.45
+_W_DISTINCT = 0.30
+_DEDUPE_JACCARD = 0.6
 
 
 @dataclass(frozen=True)
@@ -133,30 +140,30 @@ def _finalise(
     pool: list[Track],
     thread_artist: str = "",
 ) -> Direction | None:
-    """Cap/validate a candidate pool and compute its feasibility score.
+    """Cap and gate a candidate pool, emitting an *unscored* Direction.
 
-    Returns ``None`` when the pool falls below :data:`MIN_DIRECTION_POOL` after de-dup
-    and capping, or when the BPM-sorted ordering is not path-feasible. Feasibility is
-    ``0.4·pool_fill + 0.3·path_ok_ratio + 0.3·signal_strength``.
+    Gates only: returns ``None`` when the pool falls below :data:`MIN_DIRECTION_POOL`
+    after de-dup and capping, or when the BPM-sorted ordering is not path-feasible.
+    Pool size and path feasibility used to be 70% of the score, which saturated —
+    every surviving candidate is full-size and path-feasible by construction, so they
+    carried no information. They are pass/fail here and ``feasibility`` is left at 0.0
+    for :func:`_score_field`, which owns ranking over the whole candidate field.
     """
     chosen_capped = _dedupe(chosen)[:MAX_DIRECTION_POOL]
     if len(chosen_capped) < MIN_DIRECTION_POOL:
         return None
-    ok, ratio = _path_feasible(chosen_capped)
+    ok, _ratio = _path_feasible(chosen_capped)
     if not ok:
         return None
-    pool_fill = min(len(chosen_capped) / MAX_DIRECTION_POOL, 1.0)
-    signal_clamped = min(max(signal, 0.0), 1.0)
-    feasibility = 0.4 * pool_fill + 0.3 * ratio + 0.3 * signal_clamped
     return Direction(
         direction_type=direction_type,
         title=title,
         mood=mood,
         track_ids=[t.track_id for t in chosen_capped],
         brief=brief,
-        feasibility=round(feasibility, 4),
+        feasibility=0.0,
         thread_artist=thread_artist,
-        identity=signal_clamped,
+        identity=min(max(signal, 0.0), 1.0),
         freshness=round(_freshness(chosen_capped, pool), 4),
     )
 
@@ -183,6 +190,50 @@ def _freshness(chosen: list[Track], pool: list[Track]) -> float:
 def _log_lift(ratio: float) -> float:
     """Common identity scale for concentration ratios: 1x→0, 2x→1/3, 8x+→1."""
     return min(math.log2(max(ratio, 1.0)) / 3.0, 1.0)
+
+
+def _jaccard(a: list[str], b: list[str]) -> float:
+    """Track-id overlap of two candidate pools: |A∩B| / |A∪B|."""
+    sa, sb = set(a), set(b)
+    union = len(sa | sb)
+    return len(sa & sb) / union if union else 0.0
+
+
+def _rank_key(direction: Direction) -> tuple[float, str, str, tuple[str, ...]]:
+    """Pass-1 ordering: best distinctiveness-free score first, then total tie-breaks."""
+    score = _W_FRESHNESS * direction.freshness + _W_IDENTITY * direction.identity
+    return (
+        -score / (_W_FRESHNESS + _W_IDENTITY),
+        direction.direction_type,
+        direction.title,
+        tuple(sorted(direction.track_ids)),
+    )
+
+
+def _score_field(candidates: list[Direction]) -> list[Direction]:
+    """Two-pass, acyclic scoring of a pool's combined candidate field.
+
+    Pass 1 ranks on the distinctiveness-free score and dedupes clones (Jaccard
+    > :data:`_DEDUPE_JACCARD`) in rank order. Pass 2 measures distinctiveness against
+    the surviving field only — the rows the operator actually sees — and computes the
+    final feasibility. Two passes rather than one because distinctiveness depends on
+    which candidates survive, and survival depends on rank: scoring them together
+    would be circular. Deterministic: total sort keys, order-independent output.
+    """
+    kept: list[Direction] = []
+    for cand in sorted(candidates, key=_rank_key):
+        if all(_jaccard(cand.track_ids, k.track_ids) <= _DEDUPE_JACCARD for k in kept):
+            kept.append(cand)
+
+    out: list[Direction] = []
+    for cand in kept:
+        others = [k for k in kept if k is not cand]
+        # A lone survivor has nothing to be distinct from: neutral 0.5 rather than a
+        # free 1.0, so a one-direction pool cannot out-score a contested field.
+        distinct = 1.0 - max(_jaccard(cand.track_ids, k.track_ids) for k in others) if others else 0.5
+        feasibility = _W_FRESHNESS * cand.freshness + _W_IDENTITY * cand.identity + _W_DISTINCT * distinct
+        out.append(replace(cand, feasibility=round(feasibility, 4)))
+    return sorted(out, key=lambda d: (-d.feasibility, d.direction_type))
 
 
 # ---------------------------------------------------------------------------
@@ -686,17 +737,17 @@ def _named_candidates(pool: list[Track], *, seed: int, collection: list[Track] |
     return candidates
 
 
-def enumerate_directions(pool: list[Track], *, seed: int) -> list[Direction]:
+def enumerate_directions(pool: list[Track], *, seed: int, collection: list[Track] | None = None) -> list[Direction]:
     """Every surviving Direction candidate over ``pool``, exhaustively.
 
     The library-map path (#40): unlike :func:`generate_directions` there is no
     seed-derived rotation, no ``max_directions`` cap, no materialisation into
     MixCanvas, and no run-log printing — the caller wants the full candidate
-    field with feasibility scores, deterministically ordered.
+    field with feasibility scores, deterministically ordered. ``collection`` is the
+    whole scoped library, used by builders that measure a pool's concentration
+    against the library baseline (label_spotlight).
     """
-    candidates = _named_candidates(pool, seed=seed)
-    candidates.sort(key=lambda d: (-d.feasibility, d.direction_type))
-    return candidates
+    return _score_field(_named_candidates(pool, seed=seed, collection=collection))
 
 
 def generate_directions(
@@ -708,7 +759,8 @@ def generate_directions(
 ) -> list[MixCanvas]:
     """Enumerate, score, seed-rotate, and materialise concept directions over ``pool``.
 
-    Each builder proposes a :class:`Direction` only when the material supports it.
+    Each builder proposes a :class:`Direction` only when the material supports it;
+    :func:`_score_field` then dedupes clones and scores the surviving field.
     Survivors are sorted by ``(-feasibility, direction_type)``, then rotated by a
     seed-derived offset so different seeds/days surface different directions while the
     strongest ones appear often. Up to ``max_directions`` are materialised as
@@ -720,15 +772,17 @@ def generate_directions(
     records which directions fired without threading feasibility back through the caller.
     Deterministic: same pool + same seed → identical output.
     """
-    candidates = _named_candidates(pool, seed=seed)
+    proposals = _named_candidates(pool, seed=seed)
     # One diagnostic line so non-firing builders are visible in the run log —
     # genre_traverse silently returning None took three production runs to notice.
-    proposed = ", ".join(sorted(d.direction_type for d in candidates)) if candidates else "none"
-    print(f"Directions proposed: {proposed} ({len(candidates)}/{len(_BUILDERS)} builders)")
+    # Measured pre-scoring: _score_field can also drop a clone, and that is not the
+    # same failure as a builder never proposing anything.
+    proposed = ", ".join(sorted(d.direction_type for d in proposals)) if proposals else "none"
+    print(f"Directions proposed: {proposed} ({len(proposals)}/{len(_BUILDERS)} builders)")
+    candidates = _score_field(proposals)
     if not candidates:
         return []
 
-    candidates.sort(key=lambda d: (-d.feasibility, d.direction_type))
     rng = random.Random(seed)
     offset = rng.randrange(len(candidates))
     ordered = [candidates[(offset + i) % len(candidates)] for i in range(len(candidates))]
