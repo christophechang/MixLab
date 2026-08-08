@@ -23,6 +23,7 @@ from mixlab.directions import (
     _log_lift,
     _path_feasible,
     _score_field,
+    _score_final,
     _shape_field,
     enumerate_directions,
     generate_directions,
@@ -641,6 +642,32 @@ class TestScoreField:
         out = _score_field([hi, lo])
         assert [d.direction_type for d in out] == ["era_dialogue"]
 
+    def test_intermediate_overlap_scales_distinctiveness_proportionally(self) -> None:
+        """Distinctiveness is a continuum, not clone-or-disjoint.
+
+        A and B share 11 of a 20-track union → Jaccard exactly 0.55, under the 0.6
+        dedupe threshold, so both reach pass 2; C is disjoint from both. With every
+        row on identity 0.4 / freshness 0.4 the shared base is
+        ``0.25*0.4 + 0.45*0.4 = 0.28``, leaving only the distinctiveness term to
+        separate them: ``0.30*(1-0.55)`` for the overlapping pair against
+        ``0.30*1.0`` for the disjoint row.
+        """
+        shared = [f"s{i}" for i in range(11)]
+        a = _cand("era_dialogue", shared + [f"a{i}" for i in range(5)], identity=0.4, freshness=0.4)
+        b = _cand("label_spotlight", shared + [f"b{i}" for i in range(4)], identity=0.4, freshness=0.4)
+        c = _cand("artist_thread", [f"c{i}" for i in range(15)], identity=0.4, freshness=0.4)
+        assert _jaccard(a.track_ids, b.track_ids) == 0.55
+
+        scored = _score_final([a, b, c])
+        assert {d.direction_type: d.feasibility for d in scored} == {
+            "artist_thread": 0.58,  # 0.28 + 0.30 * 1.00
+            "era_dialogue": 0.415,  # 0.28 + 0.30 * 0.45
+            "label_spotlight": 0.415,
+        }
+        # 0.55 is below the dedupe threshold, so the full pipeline keeps all three
+        # and reaches the same scores rather than dropping the overlapping pair.
+        assert _score_field([a, b, c]) == scored
+
     def test_lone_candidate_distinctiveness_is_half(self) -> None:
         a = _cand("artist_thread", [f"a{i}" for i in range(25)], identity=0.4, freshness=0.4)
         [scored] = _score_field([a])
@@ -770,6 +797,31 @@ class TestMinedShaping:
             ("found_2", "Found: Metalheadz"),
         ]
         assert all(d.track_ids[0].startswith(("a", "c")) for d in out)  # the lo clone is gone
+
+    def test_distinctiveness_ignores_rows_the_cap_removed(self) -> None:
+        """Pass 2 runs on the POST-cap field, so a capped-away row cannot reorder
+        the rows that ship.
+
+        ``t3`` overlaps ``t0`` at Jaccard exactly 0.6 — at the dedupe threshold, so it
+        survives pass 1 — and is then dropped by the 3-per-pool cap. Measured
+        pre-cap, ``t0``'s distinctiveness would be 1-0.6 = 0.4 and its feasibility
+        0.125 + 0.405 + 0.12 = 0.65, which sinks the best mined row below both
+        ``t1`` (0.785) and ``t2`` (0.74) and hands ``found_1`` — the only mined row
+        ``generate_directions`` ships — to the wrong pair. Post-cap the three
+        survivors are mutually disjoint, so each scores distinctiveness 1.0.
+        """
+        t0 = _found("Found: t0", [f"x{i}" for i in range(20)], identity=0.9)
+        t1 = _found("Found: t1", [f"m{i}" for i in range(20)], identity=0.8)
+        t2 = _found("Found: t2", [f"n{i}" for i in range(20)], identity=0.7)
+        t3 = _found("Found: t3", [f"x{i}" for i in range(15)] + [f"y{i}" for i in range(5)], identity=0.6)
+        assert _jaccard(t0.track_ids, t3.track_ids) == 0.6  # 15 shared of a 25-track union
+
+        out = _shape_field([t0, t1, t2, t3])
+        assert [(d.direction_type, d.title, d.feasibility) for d in out] == [
+            ("found_1", "Found: t0", 0.83),
+            ("found_2", "Found: t1", 0.785),
+            ("found_3", "Found: t2", 0.74),
+        ]
 
     def test_named_rows_keep_their_type_and_are_uncapped(self) -> None:
         named = [_cand(f"named_{i}", [f"n{i}-{j}" for j in range(25)], identity=0.5, freshness=0.5) for i in range(5)]

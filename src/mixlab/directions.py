@@ -158,7 +158,7 @@ def _finalise(
     Pool size and path feasibility used to be 70% of the score, which saturated —
     every surviving candidate is full-size and path-feasible by construction, so they
     carried no information. They are pass/fail here and ``feasibility`` is left at 0.0
-    for :func:`_score_field`, which owns ranking over the whole candidate field.
+    for :func:`_shape_field`, which owns ranking over the whole candidate field.
     """
     chosen_capped = _dedupe(chosen)[:MAX_DIRECTION_POOL]
     if len(chosen_capped) < MIN_DIRECTION_POOL:
@@ -242,30 +242,67 @@ def _rank_key(direction: Direction) -> tuple[float, str, str, tuple[str, ...], s
     )
 
 
-def _score_field(candidates: list[Direction]) -> list[Direction]:
-    """Two-pass, acyclic scoring of a pool's combined candidate field.
+def _final_key(direction: Direction) -> tuple[float, str, str, tuple[str, ...], str, str, str, float, float]:
+    """Pass-2 ordering: best feasibility first, then :func:`_rank_key`'s total tie-break.
 
-    Pass 1 ranks on the distinctiveness-free score and dedupes clones (Jaccard
-    > :data:`_DEDUPE_JACCARD`) in rank order. Pass 2 measures distinctiveness against
-    the surviving field only — the rows the operator actually sees — and computes the
-    final feasibility. Two passes rather than one because distinctiveness depends on
-    which candidates survive, and survival depends on rank: scoring them together
-    would be circular. Deterministic: total sort keys, order-independent output.
+    ``(-feasibility, direction_type)`` alone is NOT a total order over this field:
+    mined rows all carry ``direction_type == "found"`` until :func:`_shape_field`
+    renumbers them, so two equally-scored mined rows would be separated only by
+    sort stability. Reusing the rank key's trailing components makes the order
+    total and the output order-independent for real.
+    """
+    return (-direction.feasibility, *_rank_key(direction)[1:])
+
+
+def _rank_and_dedupe(candidates: list[Direction]) -> list[Direction]:
+    """Pass 1 of the two-pass scorer: rank on the distinctiveness-free score, drop clones.
+
+    Walks :func:`_rank_key` order (``(0.25·freshness + 0.45·identity) / 0.70``) and
+    keeps a candidate only when it overlaps every already-kept candidate at Jaccard
+    <= :data:`_DEDUPE_JACCARD`. Returns the survivors **in rank order**, still
+    unscored (``feasibility`` 0.0) — callers may drop further rows (see
+    :func:`_shape_field`'s mined cap) before pass 2 measures distinctiveness.
     """
     kept: list[Direction] = []
     for cand in sorted(candidates, key=_rank_key):
         if all(_jaccard(cand.track_ids, k.track_ids) <= _DEDUPE_JACCARD for k in kept):
             kept.append(cand)
+    return kept
 
+
+def _score_final(field: list[Direction]) -> list[Direction]:
+    """Pass 2 of the two-pass scorer: distinctiveness and feasibility over ``field``.
+
+    Distinctiveness is measured against **exactly the rows passed in** and nothing
+    else, so the caller decides what the field is. :func:`_shape_field` passes the
+    post-dedupe *post-cap* field — the rows the operator actually sees — which is
+    what the design calls for: measuring against rows that get dropped afterwards
+    would let a capped-away row reorder the ones that ship.
+
+    Two passes rather than one because distinctiveness depends on which candidates
+    survive and survival depends on rank; scoring them together would be circular.
+    Deterministic: total sort key (:func:`_final_key`), order-independent output.
+    """
     out: list[Direction] = []
-    for cand in kept:
-        others = [k for k in kept if k is not cand]
+    for cand in field:
+        others = [k for k in field if k is not cand]
         # A lone survivor has nothing to be distinct from: neutral 0.5 rather than a
         # free 1.0, so a one-direction pool cannot out-score a contested field.
         distinct = 1.0 - max(_jaccard(cand.track_ids, k.track_ids) for k in others) if others else 0.5
         feasibility = _W_FRESHNESS * cand.freshness + _W_IDENTITY * cand.identity + _W_DISTINCT * distinct
         out.append(replace(cand, feasibility=round(feasibility, 4)))
-    return sorted(out, key=lambda d: (-d.feasibility, d.direction_type))
+    return sorted(out, key=_final_key)
+
+
+def _score_field(candidates: list[Direction]) -> list[Direction]:
+    """Both passes over ``candidates`` with no cap in between: dedupe, then score.
+
+    The uncapped composition — distinctiveness is measured against every candidate
+    that survived the clone dedupe. That is the right field only when the caller
+    ships all of them; the production path caps mined rows first and therefore calls
+    :func:`_rank_and_dedupe` and :func:`_score_final` itself (see :func:`_shape_field`).
+    """
+    return _score_final(_rank_and_dedupe(candidates))
 
 
 # ---------------------------------------------------------------------------
@@ -782,34 +819,40 @@ def _is_mined(direction: Direction) -> bool:
 
 
 def _shape_field(candidates: list[Direction]) -> list[Direction]:
-    """Score the combined named+mined field, then shape the mined rows.
+    """The production pipeline: rank & dedupe, cap the mined rows, then score them.
 
-    Post-score because all three rules need the final ranking: the mined cap
-    (:data:`_MAX_MINED_PER_POOL`) keeps the strongest few, title uniqueness keeps
-    the higher-ranked of two pairs that named themselves the same thing (a tag can
-    pair with both a tempo pocket and a key neighbourhood), and the surviving rows
-    are renamed ``found`` -> ``found_1``/``found_2``/... in that rank order so
-    downstream consumers get stable, distinguishable direction types.
+    Order matters and is the whole point of splitting the scorer in two:
 
-    Named rows pass through untouched — they are a fixed vocabulary of seven and
-    cap themselves.
-
-    Note that a mined row dropped here still influenced the scoring: it was part of
-    the field :func:`_score_field` measured distinctiveness against. That is
-    deliberate — the cap is an output budget, not a claim that the row was never a
-    candidate, and a survivor's distinctiveness should reflect everything the pool
-    actually supports.
+    1. :func:`_rank_and_dedupe` — pass 1, clones removed in rank order.
+    2. **Shape the mined rows** by walking that rank order: keep at most
+       :data:`_MAX_MINED_PER_POOL`, and at most one row per title (two pairs can
+       name themselves the same thing — a tag pairs with both a tempo pocket and a
+       key neighbourhood — so the higher-ranked wins). Named rows pass through
+       untouched: they are a fixed vocabulary of seven and cap themselves.
+    3. :func:`_score_final` — pass 2 over **exactly the surviving field**, so
+       distinctiveness reflects the rows that ship. Measuring it before the cap
+       would let a row that never ships reorder (or dedupe-drop) the ones that do.
+    4. Renumber ``found`` -> ``found_1``/``found_2``/... in *final* rank order, so
+       downstream consumers get stable, distinguishable direction types and
+       ``found_1`` really is the best-scoring mined row.
     """
-    out: list[Direction] = []
+    survivors: list[Direction] = []
     seen_titles: set[str] = set()
     mined_kept = 0
-    for cand in _score_field(candidates):  # already (-feasibility, direction_type) sorted
+    for cand in _rank_and_dedupe(candidates):  # pass-1 rank order
         if cand.direction_type == _MINED_TYPE:
             if mined_kept >= _MAX_MINED_PER_POOL or cand.title in seen_titles:
                 continue
             mined_kept += 1
             seen_titles.add(cand.title)
-            cand = replace(cand, direction_type=f"{_MINED_TYPE}_{mined_kept}")
+        survivors.append(cand)
+
+    out: list[Direction] = []
+    mined_rank = 0
+    for cand in _score_final(survivors):  # final (-feasibility, ...) order
+        if cand.direction_type == _MINED_TYPE:
+            mined_rank += 1
+            cand = replace(cand, direction_type=f"{_MINED_TYPE}_{mined_rank}")
         out.append(cand)
     return out
 
