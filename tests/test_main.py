@@ -1492,3 +1492,44 @@ def test_annotate_direction_types_no_matching_canvas_stays_empty() -> None:
     _annotate_direction_types([concept], [canvas])
 
     assert concept.direction_type == ""
+
+
+# ---------------------------------------------------------------------------
+# main() — --direction-spec flag parsing
+# ---------------------------------------------------------------------------
+
+
+def test_main_direction_spec_forwarded_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = '{"direction_type": "artist_thread", "title": "Artist thread: Dusky", "brief": "b", "track_ids": ["1"]}'
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--direction-spec", spec])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["direction_spec"] == spec
+
+
+def test_main_direction_spec_defaults_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["direction_spec"] is None
+
+
+def test_main_direction_spec_ignored_in_playlist_mode_with_note(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--playlist", "Monday", "--direction-spec", "{}"])
+    playlist_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run_playlist_mode", playlist_mock):
+        main()
+    err = capsys.readouterr().err
+    assert "--direction-spec ignored in playlist mode" in err
+    assert playlist_mock.await_args is not None

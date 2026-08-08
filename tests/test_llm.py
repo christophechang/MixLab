@@ -6090,3 +6090,109 @@ def test_mechanics_title_warning_flags_bpm_number_and_equipment() -> None:
 def test_mechanics_title_warning_flags_camelot_codes_silent_when_clean() -> None:
     assert llm._mechanics_title_warning([_concept("8A Sunrise")]) is not None
     assert llm._mechanics_title_warning([_concept("Warm Static"), _concept("Last Bus Home")]) is None
+
+
+# ---------------------------------------------------------------------------
+# Pinned direction (--direction-spec) — prompt surface
+# ---------------------------------------------------------------------------
+
+
+def _pinned_canvas(track_ids: list[str]) -> MixCanvas:
+    roles = CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[])
+    canvas = _canvas_with_role_candidates(track_ids, roles)
+    canvas.brief = "This set threads Dusky through the mix as its spine."
+    canvas.direction_type = "artist_thread"
+    canvas.thread_artist = "Dusky"
+    canvas.pinned = True
+    return canvas
+
+
+def test_format_canvas_section_marks_pinned_canvas() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="Drum & Bass"),
+        "2": Track(track_id="2", artist="B", title="T2", bpm=86.0, camelot_key="8A", genre="Drum & Bass"),
+    }
+    section = _format_canvas_section(_pinned_canvas(["1", "2"]), tracks_by_id)
+
+    assert section.startswith("[PINNED DIRECTION")
+    # The marker sits above the DIRECTION BRIEF so the mandate rule can point at it.
+    assert section.index("[PINNED DIRECTION") < section.index("DIRECTION BRIEF")
+
+
+def test_format_canvas_section_unpinned_canvas_has_no_marker() -> None:
+    from mixlab.llm import _format_canvas_section
+
+    tracks_by_id = {
+        "1": Track(track_id="1", artist="A", title="T1", bpm=172.0, camelot_key="8A", genre="Drum & Bass"),
+    }
+    roles = CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[])
+    section = _format_canvas_section(_canvas_with_role_candidates(["1"], roles), tracks_by_id)
+
+    assert "PINNED DIRECTION" not in section
+
+
+def test_stage2_pinned_rule_overrides_canvas_skip_allowance() -> None:
+    from mixlab.llm import _STAGE2_PINNED_RULE
+
+    assert "MUST" in _STAGE2_PINNED_RULE
+    assert "does not apply" in _STAGE2_PINNED_RULE
+
+
+@respx.mock
+async def test_stage2_curate_pinned_canvas_appends_pinned_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    captured: list[dict[str, object]] = []
+
+    def capture(request: object) -> Response:
+        body = json.loads(request.content)  # type: ignore[attr-defined]
+        captured.append(body)
+        return Response(200, json={"content": [{"text": "[]"}], "stop_reason": "end_turn"})
+
+    respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
+
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=124.0, camelot_key="6A", genre="House")
+        for i in range(1, 3)
+    }
+    canvas = _pinned_canvas(["1", "2"])
+
+    await stage2_curate_and_report([canvas.source_concept], tracks_by_id, canvases=[canvas])
+
+    assert captured, "no Anthropic call captured"
+    system = str(captured[0]["system"])
+    assert "PINNED DIRECTION (for this run)" in system
+
+
+@respx.mock
+async def test_stage2_curate_unpinned_canvases_omit_pinned_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    captured: list[dict[str, object]] = []
+
+    def capture(request: object) -> Response:
+        body = json.loads(request.content)  # type: ignore[attr-defined]
+        captured.append(body)
+        return Response(200, json={"content": [{"text": "[]"}], "stop_reason": "end_turn"})
+
+    respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
+
+    tracks_by_id = {
+        "1": Track(track_id="1", artist="A", title="T", bpm=124.0, camelot_key="6A", genre="House"),
+    }
+    roles = CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[])
+    canvas = _canvas_with_role_candidates(["1"], roles)
+
+    await stage2_curate_and_report([canvas.source_concept], tracks_by_id, canvases=[canvas])
+
+    assert captured, "no Anthropic call captured"
+    system = str(captured[0]["system"])
+    assert "PINNED DIRECTION (for this run)" not in system

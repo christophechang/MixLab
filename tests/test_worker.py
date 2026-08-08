@@ -946,3 +946,14 @@ def test_process_one_error_line_carries_timestamp(tmp_path: Path, capsys: pytest
     err = capsys.readouterr().err
     assert "unexpected error in process_one" in err
     assert _TS_PREFIX_RE.match(err), f"no timestamp prefix on error line: {err!r}"
+
+
+def test_build_argv_direction_spec_maps_to_cli_flag() -> None:
+    spec = '{"direction_type": "artist_thread", "track_ids": ["1"]}'
+    argv = build_argv({"genre": "house", "mode": "unplayed", "directionSpec": spec})
+    assert argv == ["--genre", "house", "--mode", "unplayed", "--direction-spec", spec]
+
+
+def test_build_argv_direction_spec_must_be_string() -> None:
+    with pytest.raises(WorkerFlagError, match="directionSpec"):
+        build_argv({"directionSpec": {"direction_type": "x"}})

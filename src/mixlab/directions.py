@@ -24,6 +24,7 @@ output. No I/O beyond the one-line-per-direction stdout note emitted by
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import statistics
@@ -971,3 +972,86 @@ def generate_directions(
         result.append(canvas)
         print(f"Direction: {direction.direction_type} — {direction.title} (feasibility {direction.feasibility:.2f})")
     return result
+
+
+# ---------------------------------------------------------------------------
+# Pinned direction spec (--direction-spec) — mixlab-web "Run this direction"
+# ---------------------------------------------------------------------------
+
+
+class DirectionSpecError(ValueError):
+    """Raised when a ``--direction-spec`` payload cannot be materialised."""
+
+
+_SPEC_REQUIRED_STRINGS = ("direction_type", "title", "brief")
+_THREAD_TITLE_PREFIX = "Artist thread: "
+
+
+def pinned_canvas_from_spec(spec_json: str, tracks_by_id: dict[str, Track]) -> MixCanvas:
+    """Materialise a library-map direction entry as a pinned :class:`MixCanvas`.
+
+    ``spec_json`` is the map payload's direction entry (see
+    :func:`mixlab.library_map._direction_entry`) serialised by mixlab-web's
+    "Run this direction" — machine-generated, so validation is strict and every
+    failure raises :class:`DirectionSpecError` with an operator-actionable message.
+    Unknown keys are ignored (the entry also carries ``feasibility``, and future
+    map versions may add more).
+
+    The tracks are pinned by id: ids that no longer resolve against the current
+    collection (drift since the map was generated) are dropped, and fewer than
+    :data:`MIN_DIRECTION_POOL` survivors is an error rather than a silent shrink —
+    the whole point of a pinned direction is that the clicked tracks are the set.
+    Survivors are capped at :data:`MAX_DIRECTION_POOL` in spec order, mirroring
+    ``_finalise``. No feasibility gate is applied: the operator chose this
+    direction explicitly, so path-feasibility scoring has no veto.
+    """
+    try:
+        raw = json.loads(spec_json)
+    except json.JSONDecodeError as exc:
+        raise DirectionSpecError(f"--direction-spec is not valid JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise DirectionSpecError("--direction-spec must be a JSON object (a map direction entry)")
+
+    for key in _SPEC_REQUIRED_STRINGS:
+        value = raw.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise DirectionSpecError(f"--direction-spec field {key!r} must be a non-empty string")
+    mood = raw.get("mood", "")
+    if not isinstance(mood, str):
+        raise DirectionSpecError("--direction-spec field 'mood' must be a string")
+    thread_artist = raw.get("thread_artist", "")
+    if not isinstance(thread_artist, str):
+        raise DirectionSpecError("--direction-spec field 'thread_artist' must be a string")
+
+    track_ids = raw.get("track_ids")
+    if (
+        not isinstance(track_ids, list)
+        or not track_ids
+        or not all(isinstance(tid, str) for tid in track_ids)
+    ):
+        raise DirectionSpecError("--direction-spec field 'track_ids' must be a non-empty list of strings")
+
+    resolved = [tid for tid in dict.fromkeys(track_ids) if tid in tracks_by_id]
+    if len(resolved) < MIN_DIRECTION_POOL:
+        raise DirectionSpecError(
+            f"--direction-spec: only {len(resolved)} of {len(track_ids)} pinned tracks resolve against "
+            f"the current collection (minimum {MIN_DIRECTION_POOL}) — the library analysis is stale; "
+            "re-run the engine analysis and pick the direction again"
+        )
+    resolved = resolved[:MAX_DIRECTION_POOL]
+
+    direction_type = raw["direction_type"].strip()
+    title = raw["title"].strip()
+    # Stale map payloads predate thread_artist in the wire entry (v1.14.x); the
+    # artist-thread repeat-suppression validator still needs the spine's name, and
+    # for artist_thread the title carries it verbatim.
+    if not thread_artist and direction_type == "artist_thread" and title.startswith(_THREAD_TITLE_PREFIX):
+        thread_artist = title[len(_THREAD_TITLE_PREFIX) :]
+
+    concept = MixConcept(title=title, mood=mood, track_ids=resolved)
+    canvas = build_mix_canvas(concept, tracks_by_id)
+    canvas.brief = raw["brief"].strip()
+    canvas.direction_type = direction_type
+    canvas.thread_artist = thread_artist
+    canvas.pinned = True
+    return canvas

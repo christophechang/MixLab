@@ -100,6 +100,9 @@ _FLAG_SPECS: tuple[_FlagSpec, ...] = (
     _FlagSpec("risk", "--risk", "enum", frozenset({"low", "medium", "high"})),
     _FlagSpec("directions", "--directions", "enum", frozenset({"mixed", "off", "only"})),
     _FlagSpec("intent", "--intent", "str"),
+    # JSON-serialised map direction entry ("Run this direction", mixlab-web). Opaque
+    # string here — parsing/validation is the pipeline's job (directions.pinned_canvas_from_spec).
+    _FlagSpec("directionSpec", "--direction-spec", "str"),
     _FlagSpec("mixLength", "--mix-length", "int"),
     _FlagSpec("stage1Seed", "--stage1-seed", "int"),
     _FlagSpec("resequence", "--resequence", "bool"),

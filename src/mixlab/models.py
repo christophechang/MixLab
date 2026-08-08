@@ -263,6 +263,11 @@ class MixCanvas:
     brief: str = ""
     direction_type: str = ""
     thread_artist: str = ""
+    # Pinned direction (--direction-spec): the operator explicitly chose this canvas
+    # from the library map, so Stage 2 is mandated to produce a concept from it (the
+    # skip-a-canvas allowance in the canvas rules does not apply). False everywhere
+    # else — enumerated directions and classic canvases are never pinned.
+    pinned: bool = False
 
 
 SeedTier = Literal["anchor", "supporting", "optional"]
