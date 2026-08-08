@@ -224,6 +224,45 @@ def _conj_pool():
     return pool
 
 
+def _mech_conj_pool():
+    """tag "liquid" x bpm_regime "130": exercises mine_pool's single-namable
+    branch (title has no mechanical value or "×", mood pairs a display noun
+    with the namable kind, brief cites the mechanical value only in prose).
+
+    Groups (N=50 total):
+      tb (20): tags=["Liquid"], bpm=130.0 -- the planted overlap (support).
+      to (5):  tags=["Liquid"], bpm=100.0 -- tag-only, off the 130 peak.
+      bo (5):  no tags,          bpm=130.0 -- bpm-only, in the 130 peak.
+      f  (20): no tags, bpm = 140, 150, ..., 330 (one track per value, spaced
+        10 BPM apart so no other bin's +-3 BPM smoothing window in
+        directions._tempo_regimes can accumulate 5+ mass and form a
+        competing peak).
+
+    tag "liquid" total = tb+to = 25; bpm_regime "130" total = tb+bo = 25.
+    (`to`'s 5 tracks at 100 BPM are tight enough to clear _tempo_regimes'
+    internal 5-track peak floor and form their own regime, but
+    extract_predicates' outer per-kind gate is >=8, so that 5-track "100"
+    predicate never actually gets emitted -- no competing pair.)
+
+    support (tb) = 20; lift = 20*50 / (25*25) = 1.6 >= MIN_LIFT (1.3).
+    Jaccard(members=20, tag_total=25) = Jaccard(members=20, bpm_total=25)
+    = 0.8, under the 0.9 subsumption threshold, so the pair survives intact.
+    key_hood never appears: every track (including filler) keeps the `_t`
+    default camelot_key "8A", so key_hood "8A" would cover 100% of the pool
+    and gets dropped by the 70% coverage cap, same trick as `_conj_pool`.
+    """
+    pool = []
+    for i in range(20):
+        pool.append(_t(f"tb{i}", tags=["Liquid"], bpm=130.0, date_added=f"2022-0{1 + i % 6}-10"))
+    for i in range(5):
+        pool.append(_t(f"to{i}", tags=["Liquid"], bpm=100.0, date_added=f"2021-0{1 + i % 6}-10"))
+    for i in range(5):
+        pool.append(_t(f"bo{i}", bpm=130.0, date_added=f"2021-0{1 + i % 6}-10"))
+    for i in range(20):
+        pool.append(_t(f"f{i}", bpm=140.0 + 10 * i, date_added=f"2020-0{1 + i % 6}-10"))
+    return pool
+
+
 class TestMinePool:
     def test_finds_the_planted_conjunction(self):
         found = mine_pool(_conj_pool())
@@ -272,3 +311,22 @@ class TestMinePool:
     def test_empty_and_sparse_pools_mine_nothing(self):
         assert mine_pool([]) == []
         assert mine_pool([_t(f"s{i}") for i in range(10)]) == []
+
+    def test_single_namable_title_has_no_mechanical_value_or_multiplication_sign(self):
+        found = mine_pool(_mech_conj_pool())
+        assert found, "expected the planted tag x bpm_regime conjunction to fire"
+        top = found[0]
+        assert top.title == "Found: liquid"
+        assert "×" not in top.title
+        for banned in ("BPM", "8A", "130"):
+            assert banned not in top.title
+            assert banned not in top.mood
+
+    def test_single_namable_mood_uses_display_noun_and_is_ascii(self):
+        found = mine_pool(_mech_conj_pool())
+        assert found[0].mood == "tempo x tag"
+        assert found[0].mood.isascii()
+
+    def test_single_namable_brief_cites_mechanical_value_with_bpm_suffix(self):
+        found = mine_pool(_mech_conj_pool())
+        assert "clusters in one tempo pocket (around 130 BPM)" in found[0].brief
