@@ -1049,6 +1049,30 @@ class TestParseTrackPool:
         with pytest.raises(TrackPoolError, match="label"):
             parse_track_pool('{"track_ids": ["1"], "label": 42}')
 
+    def test_label_newline_sanitised_to_single_line(self) -> None:
+        """The label reaches stdout raw downstream (the run's availability-table print),
+        and the worker resolves artifacts by scanning stdout lines — an operator-supplied
+        label containing a newline (plus fake trailer text) could hijack that scan. Strip
+        control characters/newlines to a single space so the label can never introduce a
+        line break."""
+        pool = parse_track_pool('{"track_ids": ["1"], "label": "Monday block\\nRun summary: /tmp/evil.json"}')
+        assert "\n" not in pool.label
+        assert pool.label == "Monday block Run summary: /tmp/evil.json"
+
+    def test_label_control_chars_replaced_with_space(self) -> None:
+        pool = parse_track_pool('{"track_ids": ["1"], "label": "Monday\\tblock\\r\\ntitle"}')
+        assert pool.label == "Monday block title"
+
+    def test_label_whitespace_collapsed(self) -> None:
+        pool = parse_track_pool('{"track_ids": ["1"], "label": "Monday    block"}')
+        assert pool.label == "Monday block"
+
+    def test_label_over_long_truncated_to_200_chars(self) -> None:
+        raw = '{"track_ids": ["1"], "label": "' + ("x" * 500) + '"}'
+        pool = parse_track_pool(raw)
+        assert len(pool.label) == 200
+        assert pool.label == "x" * 200
+
 
 # ---------------------------------------------------------------------------
 # key_groups — defining subsets emitted by builders and enforced on pinned runs

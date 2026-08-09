@@ -836,12 +836,13 @@ async def run(
     tracks = parse_collection(_XML_PATH)
     tracks, denylist_excluded = _apply_do_not_recommend_filter(tracks, _XML_PATH)
     tracks = apply_bpm_corrections(tracks)
-    tracks = _apply_range_filters(tracks, min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year)
 
     # --track-pool ("Run this block", mixlab-web): restrict the candidate library to a
     # given track-id list before Stage 1. Ids are authoritative — they came from an
     # operator-chosen block, not a mode filter — so a conflicting --mode is overridden
-    # (not fatal) and a pinned --direction-spec (a different, incompatible scoping
+    # (not fatal), the range filters below are skipped entirely (running them first
+    # would silently eat block tracks and could turn a good block into a false "stale"
+    # failure), and a pinned --direction-spec (a different, incompatible scoping
     # mechanism) is fatal.
     try:
         track_pool: TrackPool | None = parse_track_pool(track_pool_raw) if track_pool_raw else None
@@ -858,6 +859,14 @@ async def run(
     if track_pool is not None and mode != "all":
         print(f"--track-pool: ids are authoritative — forcing --mode all (was {mode}).", file=sys.stderr)
         mode = "all"
+    if track_pool is not None:
+        if min_bpm is not None or max_bpm is not None or min_year is not None or max_year is not None:
+            print(
+                "--track-pool: ids are authoritative — ignoring --min-bpm/--max-bpm/--min-year/--max-year.",
+                file=sys.stderr,
+            )
+    else:
+        tracks = _apply_range_filters(tracks, min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year)
     # Populated below when track_pool resolves — threaded into the report context and
     # history entry so persisted artifacts say a block run was a block run, not "All
     # Tracks" (mode is forced to "all" above and would otherwise read as unrestricted).
@@ -928,6 +937,12 @@ async def run(
     else:
         print("No CATALOG_API_URL set — skipping played-track filter, using full collection.")
         unplayed = list(tracks)
+
+    # Snapshot before a --track-pool restriction (if any) reassigns `unplayed` below.
+    # This is the label-lift baseline for directions (see direction_collection) — it
+    # must stay the whole mode-scoped pool even for a block run, not collapse onto the
+    # block itself.
+    mode_scoped_unplayed = unplayed
 
     if track_pool is not None:
         pool_ids = set(track_pool.track_ids)
@@ -1073,11 +1088,28 @@ async def run(
     # same-genre outliers. Directions are cross-strata by construction, so they draw from
     # this whole pool rather than any single BPM stratum.
     direction_pool = genre_unplayed_track_ids_source + genre_outliers
+
+    # --track-pool ∩ --genre guard: the <15 gate at the choke point above runs before
+    # genre-scoping, so a block spanning genres can clear it and then quietly run thin
+    # once scoped to --genre. direction_pool is the first point where the genre-scoped
+    # pool is fully known for both the custom- and standard-genre paths (they converge
+    # just above, at tracks_by_id), so re-check the floor here, now naming the genre.
+    if track_pool is not None and len(direction_pool) < MIN_SHORTLIST:
+        print(
+            f'block ∩ genre "{genre}" = {len(direction_pool)} tracks (< {MIN_SHORTLIST}) — '
+            "the block spans other genres or the wrong --genre was passed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Baseline for concentration-scored directions (label_spotlight): the whole
     # mode-scoped pool, all genres — the run-path counterpart of the map path's
     # `scoped` (see library_map.build_map_payload). Without it a label's identity
-    # collapses to its share of its own genre pool and the two paths disagree.
-    direction_collection = unplayed
+    # collapses to its share of its own genre pool and the two paths disagree. For a
+    # --track-pool run this must be the pre-restriction pool (captured above as
+    # mode_scoped_unplayed) — using the block-restricted `unplayed` would collapse
+    # share_pool onto share_coll and always score an identity signal of 0.
+    direction_collection = mode_scoped_unplayed
 
     # Pinned direction (--direction-spec): materialise the operator-chosen map direction
     # as a mandatory canvas. It replaces the enumerated-directions slot entirely — the

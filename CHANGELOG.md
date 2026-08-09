@@ -5,12 +5,20 @@
 - **New `--track-pool` flag restricts a genre run to an operator-chosen block of
   tracks.** Takes a JSON id list (plus an optional label) from mixlab-web's "Run this
   block" — machine-generated, so ids are authoritative: a conflicting `--mode` is
-  overridden to `all` rather than rejected, and the restriction lands before Stage 1
-  so downstream clustering, directions, and the report all see only the resolved
-  block. Unknown ids are dropped silently; fewer than 15 resolved (the Stage 1
-  partition floor) is fatal — the block is stale against the current collection and
-  needs re-creating. Combining with `--direction-spec` (a different, incompatible
-  scoping mechanism) is also fatal. Ignored (warn-and-drop) in playlist mode.
+  overridden to `all` rather than rejected, `--min-bpm`/`--max-bpm`/`--min-year`/
+  `--max-year` are ignored outright (a stderr note names which were passed) rather than
+  running before id resolution and silently eating block tracks, and the restriction
+  lands before Stage 1 so downstream clustering, directions, and the report all see
+  only the resolved block. Unknown ids are dropped silently; fewer than 15 resolved
+  (the Stage 1 partition floor) is fatal — the block is stale against the current
+  collection and needs re-creating. A second floor catches a block that spans genres:
+  if the block intersected with `--genre` still has fewer than 15 tracks, the run
+  fails fast naming the genre and count rather than shipping a thin shortlist. The
+  label-lift baseline for directions stays the whole pre-restriction, mode-scoped pool
+  (all genres) even for a block run, so a block confined to one genre doesn't collapse
+  a label's identity signal to zero. Combining with `--direction-spec` (a different,
+  incompatible scoping mechanism) is also fatal. Ignored (warn-and-drop) in playlist
+  mode.
 
 ## v1.17.0 — 2026-08-08
 

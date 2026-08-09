@@ -763,6 +763,117 @@ async def test_run_track_pool_invalid_json_exits_fatal(
     assert "--track-pool is not valid JSON" in err
 
 
+async def test_run_track_pool_skips_range_filters_resolves_against_unfiltered_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Range filters run on the whole collection before id resolution — applying them to
+    a block run would silently eat block tracks. Ids are authoritative (same principle as
+    the mode-force above): a block run skips range filtering entirely, so ids resolve
+    against the unfiltered collection even when a range flag would have excluded them."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_house_collection_xml(20))  # every track is bpm=124.00
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.chdir(tmp_path)
+
+    pool_ids = [str(i) for i in range(1, 17)]  # 16 of 20
+    track_pool_raw = json.dumps({"track_ids": pool_ids, "label": "Monday block"})
+
+    # min_bpm above every track's actual BPM — if the range filter ran first it would
+    # eat the whole collection and the block would resolve to 0.
+    await run(genre=None, export_dir=None, mode="all", track_pool_raw=track_pool_raw, min_bpm=200.0)
+
+    out = capsys.readouterr().out
+    assert '--track-pool "Monday block": 16 of 16 ids resolved.' in out
+    assert "BPM filter" not in out  # _apply_range_filters never ran
+
+
+async def test_run_track_pool_prints_note_when_range_flag_passed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_house_collection_xml(20))
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.chdir(tmp_path)
+
+    pool_ids = [str(i) for i in range(1, 17)]
+    track_pool_raw = json.dumps({"track_ids": pool_ids, "label": "Monday block"})
+
+    await run(genre=None, export_dir=None, mode="all", track_pool_raw=track_pool_raw, min_bpm=120.0)
+
+    err = capsys.readouterr().err
+    assert "--track-pool: ids are authoritative — ignoring --min-bpm/--max-bpm/--min-year/--max-year." in err
+
+
+async def test_run_track_pool_no_range_flag_no_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The note is only useful when it describes something the operator actually did —
+    no range flag was passed, so nothing was ignored, so no note."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_house_collection_xml(20))
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.chdir(tmp_path)
+
+    pool_ids = [str(i) for i in range(1, 17)]
+    track_pool_raw = json.dumps({"track_ids": pool_ids, "label": "Monday block"})
+
+    await run(genre=None, export_dir=None, mode="all", track_pool_raw=track_pool_raw)
+
+    err = capsys.readouterr().err
+    assert "ids are authoritative — ignoring" not in err
+
+
+# ---------------------------------------------------------------------------
+# run() — --track-pool ∩ --genre guard (block spanning genres runs thin)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_track_pool_block_spanning_genres_exits_when_genre_intersection_thin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The <15 gate at the --track-pool choke point runs pre-genre-scoping: a block
+    spanning genres can clear it (20 total resolved) and then quietly run thin once
+    scoped to --genre (10 house tracks). This guard catches that after the genre
+    intersection is known, naming the real cause instead of shipping a thin shortlist."""
+    xml_path = tmp_path / "rekordbox.xml"
+    # 10 house tracks (ids 1-10) + 10 techno tracks (ids 101-110) — same shape as the
+    # existing direction-baseline test above (test_run_genre_mode_scores_directions_...).
+    lines = _house_collection_xml(10).split("\n")
+    techno_rows = "\n".join(
+        f'    <TRACK TrackID="{100 + i}" Name="T{i}" Artist="A{i}" AverageBpm="140.00" '
+        f'Tonality="8A" Genre="Techno" TotalTime="300" Rating="0"/>'
+        for i in range(1, 11)
+    )
+    closing = lines.index("  </COLLECTION>")
+    xml_path.write_text("\n".join(lines[:closing] + [techno_rows] + lines[closing:]))
+
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.chdir(tmp_path)
+
+    pool_ids = [str(i) for i in range(1, 11)] + [str(100 + i) for i in range(1, 11)]  # 20 total
+    track_pool_raw = json.dumps({"track_ids": pool_ids, "label": "Cross-genre block"})
+
+    with pytest.raises(SystemExit) as exc_info:
+        await run(genre="house", export_dir=None, track_pool_raw=track_pool_raw)
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert 'block ∩ genre "house" = 10 tracks (< 15)' in err
+    assert "the block spans other genres or the wrong --genre was passed" in err
+
+
 # ---------------------------------------------------------------------------
 # main() — --track-pool flag parsing
 # ---------------------------------------------------------------------------
@@ -1405,6 +1516,57 @@ async def test_run_genre_mode_scores_directions_against_the_scoped_collection(
     direction_pool = directions_mock.call_args.args[0]
     assert {t.genre for t in collection} == {"House", "Techno"}  # whole scope, not just the pool
     assert len(collection) > len(direction_pool)
+
+
+async def test_run_track_pool_direction_baseline_uses_pre_restriction_mode_scoped_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """direction_collection is the label-lift baseline (share_pool vs share_coll). For a
+    --track-pool run, `unplayed` is reassigned to the block-restricted list, so using it
+    as the baseline collapses share_pool ≈ share_coll onto itself — an identity signal
+    that always scores 0. The baseline must stay the whole pre-restriction mode-scoped
+    pool (all genres), same as a non-block run — this reproduces the direction-baseline
+    test above, but with a block active that restricts to house-only ids."""
+    xml_path = tmp_path / "rekordbox.xml"
+    # 18 house tracks (all inside the block) plus 4 techno tracks that are in the
+    # collection, out of the block, and out of --genre house's scope.
+    lines = _house_collection_xml(18).split("\n")
+    techno_rows = "\n".join(
+        f'    <TRACK TrackID="{100 + i}" Name="T{i}" Artist="A{i}" AverageBpm="140.00" '
+        f'Tonality="8A" Genre="Techno" TotalTime="300" Rating="0"/>'
+        for i in range(4)
+    )
+    closing = lines.index("  </COLLECTION>")
+    xml_path.write_text("\n".join(lines[:closing] + [techno_rows] + lines[closing:]))
+
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setenv("MIXLAB_REPORT_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", tmp_path / "history.json")
+    monkeypatch.chdir(tmp_path)
+
+    house_ids = [str(i) for i in range(1, 19)]  # the block is house-only — no techno ids
+    track_pool_raw = json.dumps({"track_ids": house_ids, "label": "House block"})
+
+    concepts = [MixConcept(title="Deep Cuts", mood="warm", track_ids=["1", "2", "3", "4"])]
+    stage2 = AsyncMock(return_value=(concepts, "concept prose\n\n---\n\nmain-brain note"))
+    directions_mock = Mock(return_value=[])
+
+    with (
+        patch("mixlab.__main__.generate_directions", directions_mock),
+        patch("mixlab.__main__.stage2_curate_and_report", stage2),
+        patch("mixlab.__main__.validate_stage2_output", return_value=[]),
+        patch("mixlab.__main__.send_report", AsyncMock()),
+    ):
+        await run(genre="house", export_dir=None, directions="mixed", track_pool_raw=track_pool_raw)
+
+    assert directions_mock.call_args is not None
+    collection = directions_mock.call_args.kwargs["collection"]
+    # The block itself contains no Techno ids — if the baseline were the post-restriction
+    # `unplayed`, this would be {"House"} only. It must still be the whole mode-scoped
+    # pool from before the restriction.
+    assert {t.genre for t in collection} == {"House", "Techno"}
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import re
 import statistics
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -1132,6 +1133,10 @@ def pinned_canvas_from_spec(spec_json: str, tracks_by_id: dict[str, Track]) -> M
 # Track pool (--track-pool) — mixlab-web "Run this block"
 # ---------------------------------------------------------------------------
 
+_TRACK_POOL_LABEL_MAX_LEN = 200
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+_WHITESPACE_RE = re.compile(r"\s+")
+
 
 class TrackPoolError(ValueError):
     """Raised when a ``--track-pool`` payload cannot be parsed."""
@@ -1167,5 +1172,20 @@ def parse_track_pool(raw: str) -> TrackPool:
     label = data.get("label", "")
     if not isinstance(label, str):
         raise TrackPoolError("--track-pool field 'label' must be a string")
+    label = _sanitise_track_pool_label(label)
 
     return TrackPool(track_ids=tuple(track_ids), label=label)
+
+
+def _sanitise_track_pool_label(label: str) -> str:
+    """Neutralise an operator-supplied block label before it reaches stdout raw.
+
+    The label is printed verbatim (the availability-table line, report context, history
+    entry) and a worker resolves run artifacts by scanning stdout lines — a label
+    containing e.g. ``"\\nRun summary: <path>"`` could hijack that scan. Strip control
+    characters (including newlines) to a single space, collapse runs of whitespace, and
+    cap the length so one payload can't blow up a printed line either.
+    """
+    label = _CONTROL_CHARS_RE.sub(" ", label)
+    label = _WHITESPACE_RE.sub(" ", label).strip()
+    return label[:_TRACK_POOL_LABEL_MAX_LEN]
