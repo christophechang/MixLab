@@ -606,6 +606,205 @@ async def test_run_mode_all_handles_catalog_fetch_failure_gracefully(
 
 
 # ---------------------------------------------------------------------------
+# run() --track-pool restriction ("Run this block", mixlab-web)
+# ---------------------------------------------------------------------------
+
+# These tests use _house_collection_xml (defined further below, under the standalone
+# HTML report tests) for a 20-track collection (TrackID "1".."20") — big enough to
+# clear MIN_SHORTLIST after restriction. genre=None makes run() exit after the
+# availability table (step 4), same short-circuit used by the --mode all dispatch
+# tests above, so the restriction and its fatal checks (which all sit before step 4)
+# are exercised without Stage 1/2.
+
+
+async def test_run_track_pool_forces_mode_all_with_stderr_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--track-pool ids are authoritative — a conflicting --mode is overridden, not fatal."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_house_collection_xml(20))
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.chdir(tmp_path)
+
+    pool_ids = [str(i) for i in range(1, 17)]  # 16 of 20 — clears MIN_SHORTLIST
+    track_pool_raw = json.dumps({"track_ids": pool_ids, "label": "Monday block"})
+
+    await run(genre=None, export_dir=None, mode="unplayed", track_pool_raw=track_pool_raw)
+
+    err = capsys.readouterr().err
+    assert "--track-pool: ids are authoritative — forcing --mode all (was unplayed)" in err
+
+
+async def test_run_track_pool_restricts_unplayed_before_availability_table(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The resolved pool replaces `unplayed` before _print_availability (step 3) runs."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_house_collection_xml(20))
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.chdir(tmp_path)
+
+    pool_ids = [str(i) for i in range(1, 17)]  # 16 of 20
+    track_pool_raw = json.dumps({"track_ids": pool_ids, "label": "Monday block"})
+
+    availability_mock = Mock(return_value=({}, 0, {}))
+    with patch("mixlab.__main__._print_availability", availability_mock):
+        await run(genre=None, export_dir=None, mode="all", track_pool_raw=track_pool_raw)
+
+    assert availability_mock.call_args is not None
+    passed_unplayed = availability_mock.call_args.args[1]
+    assert {t.track_id for t in passed_unplayed} == set(pool_ids)
+    assert availability_mock.call_args.kwargs["pool_label"] == 'block "Monday block"'
+
+    out = capsys.readouterr().out
+    assert '--track-pool "Monday block": 16 of 16 ids resolved.' in out
+
+
+async def test_run_track_pool_unknown_ids_silently_ignored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ids that don't resolve against the collection are dropped, not errored — only the
+    resolution count (printed once) reflects them."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_house_collection_xml(20))
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.chdir(tmp_path)
+
+    known_ids = [str(i) for i in range(1, 17)]  # 16 known
+    unknown_ids = ["unknown-a", "unknown-b"]  # 2 unknown
+    track_pool_raw = json.dumps({"track_ids": known_ids + unknown_ids, "label": "Monday block"})
+
+    await run(genre=None, export_dir=None, mode="all", track_pool_raw=track_pool_raw)
+
+    out = capsys.readouterr().out
+    assert '--track-pool "Monday block": 16 of 18 ids resolved.' in out
+    # Printed exactly once.
+    assert out.count("ids resolved.") == 1
+
+
+async def test_run_track_pool_below_min_shortlist_exits_with_stale_block_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fewer than MIN_SHORTLIST resolved ids is fatal — the block is stale, not just thin."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_house_collection_xml(20))
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.chdir(tmp_path)
+
+    pool_ids = [str(i) for i in range(1, 11)]  # 10 of 20 — below MIN_SHORTLIST (15)
+    track_pool_raw = json.dumps({"track_ids": pool_ids, "label": "Thin block"})
+
+    with pytest.raises(SystemExit) as exc_info:
+        await run(genre=None, export_dir=None, mode="all", track_pool_raw=track_pool_raw)
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "track pool resolves to 10 tracks (< 15)" in err
+    assert "the block is stale against this collection" in err
+
+
+async def test_run_track_pool_and_direction_spec_together_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--track-pool and --direction-spec are two different scoping mechanisms — combining
+    them is a fatal operator error, not a silent precedence rule."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_house_collection_xml(20))
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.chdir(tmp_path)
+
+    track_pool_raw = json.dumps({"track_ids": [str(i) for i in range(1, 17)]})
+
+    with pytest.raises(SystemExit) as exc_info:
+        await run(
+            genre=None,
+            export_dir=None,
+            mode="all",
+            direction_spec='{"direction_type": "artist_thread"}',
+            track_pool_raw=track_pool_raw,
+        )
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "--track-pool and --direction-spec cannot be combined" in err
+
+
+async def test_run_track_pool_invalid_json_exits_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_house_collection_xml(20))
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        await run(genre=None, export_dir=None, mode="all", track_pool_raw="{not json")
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "--track-pool is not valid JSON" in err
+
+
+# ---------------------------------------------------------------------------
+# main() — --track-pool flag parsing
+# ---------------------------------------------------------------------------
+
+
+def test_main_track_pool_forwarded_in_genre_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool_json = '{"track_ids": ["1", "2"], "label": "Monday block"}'
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--track-pool", pool_json])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["track_pool_raw"] == pool_json
+
+
+def test_main_track_pool_defaults_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house"])
+    run_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock):
+        main()
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["track_pool_raw"] is None
+
+
+def test_main_track_pool_ignored_in_playlist_mode_with_note(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--playlist", "Monday", "--track-pool", '{"track_ids": ["1"]}'])
+    playlist_mock = AsyncMock(return_value=None)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run_playlist_mode", playlist_mock):
+        main()
+    err = capsys.readouterr().err
+    assert "--track-pool ignored in playlist mode" in err
+    assert playlist_mock.await_args is not None
+
+
+# ---------------------------------------------------------------------------
 # _warn_intent
 # ---------------------------------------------------------------------------
 
