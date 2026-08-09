@@ -103,6 +103,9 @@ _FLAG_SPECS: tuple[_FlagSpec, ...] = (
     # JSON-serialised map direction entry ("Run this direction", mixlab-web). Opaque
     # string here — parsing/validation is the pipeline's job (directions.pinned_canvas_from_spec).
     _FlagSpec("directionSpec", "--direction-spec", "str"),
+    # JSON-serialised block restriction ("Run this block", mixlab-web). Opaque string —
+    # parsing/validation is the pipeline's job (parse_track_pool).
+    _FlagSpec("trackPool", "--track-pool", "str"),
     _FlagSpec("mixLength", "--mix-length", "int"),
     _FlagSpec("stage1Seed", "--stage1-seed", "int"),
     _FlagSpec("resequence", "--resequence", "bool"),

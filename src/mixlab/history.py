@@ -110,6 +110,11 @@ class HistoryEntry:
     # mood/role_pattern above remain populated from concepts[0] for backward compat
     # with every consumer written before this field existed.
     concepts: list[ConceptRecord] = field(default_factory=list)
+    # --track-pool ("Run this block", mixlab-web): None for runs not scoped to a
+    # block. Old history.json entries predate the field; load_history's field
+    # filtering + these defaults make them parse unchanged.
+    block_label: str | None = None
+    block_resolved_count: int | None = None
 
     @classmethod
     def from_run(
@@ -118,6 +123,8 @@ class HistoryEntry:
         concepts: list[MixConcept],
         genre: str,
         mode: str,
+        block_label: str | None = None,
+        block_resolved_count: int | None = None,
     ) -> HistoryEntry:
         core_ids: list[str] = []
         opener_ids: list[str] = []
@@ -223,6 +230,8 @@ class HistoryEntry:
             bpm_band=bpm_band,
             role_pattern=role_pattern,
             concepts=concept_records,
+            block_label=block_label,
+            block_resolved_count=block_resolved_count,
         )
 
 

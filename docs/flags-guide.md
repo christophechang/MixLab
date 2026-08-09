@@ -119,6 +119,30 @@ the machine flag behind mixlab-web's "Run this direction"; it supersedes
 is ignored in playlist mode. A spec whose tracks no longer resolve against the
 current collection fails the run rather than silently running without them.
 
+### Running an operator-chosen block
+
+```bash
+./mixlab --genre house --track-pool '{"track_ids": ["1523", "1847", "2009"], "label": "Monday block"}'
+```
+
+`--track-pool '<json>'` restricts the candidate library to an operator-chosen block
+of tracks — this is the machine flag behind mixlab-web's "Run this block". The JSON
+shape is `{track_ids: [...], label: "..."}`; `label` is optional and defaults to
+"unlabelled block" in the printed availability line.
+
+The ids are authoritative: they came from a deliberate selection, not a mode or
+range filter, so a conflicting `--mode` is overridden to `all` (not rejected), and
+`--min-bpm`/`--max-bpm`/`--min-year`/`--max-year` are ignored outright with a stderr
+note — running them first would silently drop block tracks before the block ever
+gets a chance to resolve. Two floors guard against a thin run: fewer than 15
+resolved ids (the Stage 1 partition floor) fails fast as a stale block that needs
+re-creating from the current library, and — because a block can span genres —
+fewer than 15 tracks once intersected with `--genre` also fails fast, naming the
+genre and count instead of quietly shipping a thin shortlist. `--track-pool` and
+`--direction-spec` are two different, incompatible scoping mechanisms and cannot be
+combined — the run is rejected rather than one silently winning. Ignored
+(warn-and-drop) in playlist mode.
+
 ### Narrowing the pool
 
 ```bash
@@ -228,6 +252,7 @@ options are sitting there as playlists.
 | `--mix-length MIN` | both | Scale track count to a set length |
 | `--locked` | playlist | No library additions — trim/reorder only |
 | `--directions mixed\|off\|only` | genre | Blend/exclude/force creative direction concepts |
+| `--track-pool '<json>'` | genre | Restrict the pool to an operator-chosen block of ids ("Run this block") |
 | `--risk low\|medium\|high` | genre | Safety ↔ novelty knob for scoring, prompts, and validators |
 | `--deep` | genre | Opt-in self-critique pass (2× Stage 2 cost) |
 | `--no-revise` | genre | Skip the bounded self-repair pass |

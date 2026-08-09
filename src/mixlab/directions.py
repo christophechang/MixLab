@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import re
 import statistics
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -1126,3 +1127,65 @@ def pinned_canvas_from_spec(spec_json: str, tracks_by_id: dict[str, Track]) -> M
     # requirement above what is present would be unsatisfiable by construction.
     canvas.key_groups = _clamp_key_groups(key_groups, set(resolved))
     return canvas
+
+
+# ---------------------------------------------------------------------------
+# Track pool (--track-pool) — mixlab-web "Run this block"
+# ---------------------------------------------------------------------------
+
+_TRACK_POOL_LABEL_MAX_LEN = 200
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+class TrackPoolError(ValueError):
+    """Raised when a ``--track-pool`` payload cannot be parsed."""
+
+
+@dataclass(frozen=True)
+class TrackPool:
+    """A parsed ``--track-pool`` payload: an id list plus an optional display label."""
+
+    track_ids: tuple[str, ...]
+    label: str  # "" when absent
+
+
+def parse_track_pool(raw: str) -> TrackPool:
+    """Parse the ``--track-pool`` JSON: ``{"track_ids": [...], "label": "..."}``.
+
+    ``raw`` is mixlab-web's "Run this block" payload — machine-generated, so
+    validation is strict. Resolving the ids against the current collection (and
+    the minimum-pool floor) is the caller's job, same division of labour as
+    ``pinned_canvas_from_spec`` — this function only validates shape.
+    """
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise TrackPoolError(f"--track-pool is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise TrackPoolError("--track-pool must be a JSON object ({track_ids: [...], label: ...})")
+
+    track_ids = data.get("track_ids")
+    if not isinstance(track_ids, list) or not track_ids or not all(isinstance(tid, str) for tid in track_ids):
+        raise TrackPoolError("--track-pool field 'track_ids' must be a non-empty list of strings")
+
+    label = data.get("label", "")
+    if not isinstance(label, str):
+        raise TrackPoolError("--track-pool field 'label' must be a string")
+    label = _sanitise_track_pool_label(label)
+
+    return TrackPool(track_ids=tuple(track_ids), label=label)
+
+
+def _sanitise_track_pool_label(label: str) -> str:
+    """Neutralise an operator-supplied block label before it reaches stdout raw.
+
+    The label is printed verbatim (the availability-table line, report context, history
+    entry) and a worker resolves run artifacts by scanning stdout lines — a label
+    containing e.g. ``"\\nRun summary: <path>"`` could hijack that scan. Strip control
+    characters (including newlines) to a single space, collapse runs of whitespace, and
+    cap the length so one payload can't blow up a printed line either.
+    """
+    label = _CONTROL_CHARS_RE.sub(" ", label)
+    label = _WHITESPACE_RE.sub(" ", label).strip()
+    return label[:_TRACK_POOL_LABEL_MAX_LEN]
