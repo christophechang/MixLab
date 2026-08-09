@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.18.0 — 2026-08-09
+
 - **New `--track-pool` flag restricts a genre run to an operator-chosen block of
   tracks.** Takes a JSON id list (plus an optional label) from mixlab-web's "Run this
   block" — machine-generated, so ids are authoritative: a conflicting `--mode` is
