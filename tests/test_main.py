@@ -870,6 +870,47 @@ def test_format_report_context_genre_mode_shows_mix_length() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _format_report_context — --track-pool block label (mode is forced "all" for a
+# block run, so "All Tracks" alone would misleadingly read as unrestricted)
+# ---------------------------------------------------------------------------
+
+
+def test_format_report_context_block_run_states_label_and_count_not_all_tracks() -> None:
+    result = _format_report_context(
+        genre="house",
+        playlist_name=None,
+        mode="all",
+        export_dir=None,
+        block_label="Monday block",
+        block_track_count=37,
+    )
+    assert result == 'Report context: House (block "Monday block" (37 tracks))'
+    assert "All Tracks" not in result
+
+
+def test_format_report_context_block_run_without_count_omits_count_suffix() -> None:
+    result = _format_report_context(
+        genre="house",
+        playlist_name=None,
+        mode="all",
+        export_dir=None,
+        block_label="Monday block",
+    )
+    assert result == 'Report context: House (block "Monday block")'
+
+
+def test_format_report_context_no_block_keeps_mode_label() -> None:
+    """Non-block runs are unaffected — the new params default to no-op."""
+    result = _format_report_context(
+        genre="house",
+        playlist_name=None,
+        mode="all",
+        export_dir=None,
+    )
+    assert result == "Report context: House (All Tracks)"
+
+
+# ---------------------------------------------------------------------------
 # main() — --mix-length accepted in genre mode (issue #49)
 # ---------------------------------------------------------------------------
 
@@ -1410,6 +1451,55 @@ async def test_run_genre_mode_writes_summary_json_next_to_html_report(
     assert summary["concepts"][0]["conceptId"]  # stamped non-empty by run() (#89)
     assert summary["flags"]["genre"] == "house"
     assert summary["flags"]["directions"] == "off"
+
+
+async def test_run_genre_mode_track_pool_threads_into_persisted_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A --track-pool run must not go blind in persisted artifacts: summary.json's
+    flags carry the raw trackPool JSON (matching the wire key), history.json's entry
+    carries the block label + resolved count, and the report context states the block
+    instead of the generic mode label (mode is forced "all" for a block run, so "All
+    Tracks" alone would misleadingly read as unrestricted)."""
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(_house_collection_xml(18))
+    report_dir = tmp_path / "reports"
+    history_path = tmp_path / "history.json"
+
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setenv("MIXLAB_REPORT_DIR", str(report_dir))
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", history_path)
+    monkeypatch.chdir(tmp_path)
+
+    pool_ids = [str(i) for i in range(1, 17)]  # 16 of 18
+    track_pool_raw = json.dumps({"track_ids": pool_ids, "label": "Monday block"})
+
+    concepts = [MixConcept(title="Deep Cuts", mood="warm", track_ids=["1", "2", "3", "4"])]
+    stage2 = AsyncMock(return_value=(concepts, "concept prose\n\n---\n\nmain-brain note"))
+    send_report_mock = AsyncMock()
+
+    with (
+        patch("mixlab.__main__.stage2_curate_and_report", stage2),
+        patch("mixlab.__main__.validate_stage2_output", return_value=[]),
+        patch("mixlab.__main__.send_report", send_report_mock),
+    ):
+        await run(genre="house", export_dir=None, directions="off", track_pool_raw=track_pool_raw)
+
+    # summary.json flags
+    written_json = next(report_dir.glob("*.json"))
+    summary = json.loads(written_json.read_text())
+    assert summary["flags"]["trackPool"] == track_pool_raw
+
+    # history.json entry
+    history = json.loads(history_path.read_text())
+    assert history["runs"][-1]["block_label"] == "Monday block"
+    assert history["runs"][-1]["block_resolved_count"] == 16
+
+    # report context (Discord delivery + printed to stdout)
+    assert send_report_mock.await_args is not None
+    assert 'block "Monday block" (16 tracks)' in send_report_mock.await_args.kwargs["report_context"]
 
 
 # ---------------------------------------------------------------------------

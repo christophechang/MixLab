@@ -142,6 +142,8 @@ def _format_report_context(
     intent: str | None = None,
     mix_length: int | None = None,
     locked: bool = False,
+    block_label: str | None = None,
+    block_track_count: int | None = None,
 ) -> str:
     base_label: str
     details: list[str] = []
@@ -160,8 +162,15 @@ def _format_report_context(
     else:
         base_label = "MixLab run"
 
-    mode_label = {"all": "All Tracks", "unplayed": "unplayed tracks", "played": "played tracks"}[mode]
-    details.append(mode_label)
+    # A --track-pool run forces mode "all" (ids are authoritative — see run()), so
+    # "All Tracks" alone would misleadingly read as unrestricted. State the block
+    # instead of the generic mode label.
+    if block_label is not None:
+        count_suffix = f" ({block_track_count} tracks)" if block_track_count is not None else ""
+        details.append(f'block "{block_label}"{count_suffix}')
+    else:
+        mode_label = {"all": "All Tracks", "unplayed": "unplayed tracks", "played": "played tracks"}[mode]
+        details.append(mode_label)
     if mix_length is not None:
         details.append(f"{mix_length}min set")
     if locked:
@@ -849,6 +858,11 @@ async def run(
     if track_pool is not None and mode != "all":
         print(f"--track-pool: ids are authoritative — forcing --mode all (was {mode}).", file=sys.stderr)
         mode = "all"
+    # Populated below when track_pool resolves — threaded into the report context and
+    # history entry so persisted artifacts say a block run was a block run, not "All
+    # Tracks" (mode is forced to "all" above and would otherwise read as unrestricted).
+    block_label: str | None = None
+    block_resolved_count: int | None = None
 
     # 2. Fetch played tracks and filter pool based on mode.
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
@@ -929,6 +943,8 @@ async def run(
             sys.exit(1)
         unplayed = resolved
         pool_label = f'block "{label}"'
+        block_label = label
+        block_resolved_count = len(resolved)
 
     # 3. Always print the availability table (deterministic, no LLM cost).
     counts, outlier_count, outlier_genres = _print_availability(
@@ -1221,6 +1237,8 @@ async def run(
             all_concepts,
             genre=genre or "_default",
             mode={"all": "all-tracks", "played": "played", "unplayed": "standard"}[mode],
+            block_label=block_label,
+            block_resolved_count=block_resolved_count,
         )
         append_run(history, entry, _HISTORY_PATH)
     except Exception as exc:
@@ -1235,6 +1253,8 @@ async def run(
         export_dir=export_dir,
         intent=intent,
         mix_length=mix_length,
+        block_label=block_label,
+        block_track_count=block_resolved_count,
     )
     report += f"\n⏱ Generated in {elapsed_str}"
 
@@ -1297,6 +1317,9 @@ async def run(
         "resequence": resequence,
         "deep": deep,
         "stage1Seed": stage1_seed,
+        # Raw JSON string, matching mixlab-web's wire key — the engine-side summary
+        # should agree with the manifest the web/API side reads flags from.
+        "trackPool": track_pool_raw,
     }
     # run_notes v1 (documented interpretation): the report's trailing sections — the
     # same text html_report renders under "Run notes" — reconstructed via the same
