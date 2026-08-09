@@ -12,6 +12,7 @@ from mixlab.directions import (
     MIN_DIRECTION_POOL,
     Direction,
     DirectionSpecError,
+    TrackPoolError,
     _build_artist_thread,
     _build_energy_shape_first,
     _build_era_dialogue,
@@ -28,6 +29,7 @@ from mixlab.directions import (
     _shape_field,
     enumerate_directions,
     generate_directions,
+    parse_track_pool,
     pinned_canvas_from_spec,
 )
 from mixlab.models import Track
@@ -1001,6 +1003,75 @@ class TestPinnedCanvasFromSpec:
         pool = _spec_pool()
         canvas = pinned_canvas_from_spec(_spec_json(pool, mood=""), _tbi(pool))
         assert canvas.source_concept.mood == ""
+
+
+# ---------------------------------------------------------------------------
+# parse_track_pool — the --track-pool payload parser
+# ---------------------------------------------------------------------------
+
+
+class TestParseTrackPool:
+    def test_happy_path_ids_and_label(self) -> None:
+        pool = parse_track_pool('{"track_ids": ["1", "2", "3"], "label": "Monday warmup"}')
+        assert pool.track_ids == ("1", "2", "3")
+        assert pool.label == "Monday warmup"
+
+    def test_ids_only_label_defaults_to_empty(self) -> None:
+        pool = parse_track_pool('{"track_ids": ["1", "2"]}')
+        assert pool.track_ids == ("1", "2")
+        assert pool.label == ""
+
+    def test_invalid_json_raises(self) -> None:
+        with pytest.raises(TrackPoolError, match="not valid JSON"):
+            parse_track_pool("{nope")
+
+    def test_json_array_raises(self) -> None:
+        with pytest.raises(TrackPoolError, match="JSON object"):
+            parse_track_pool("[1, 2, 3]")
+
+    def test_missing_track_ids_raises(self) -> None:
+        with pytest.raises(TrackPoolError, match="track_ids"):
+            parse_track_pool('{"label": "no ids"}')
+
+    def test_empty_track_ids_raises(self) -> None:
+        with pytest.raises(TrackPoolError, match="track_ids"):
+            parse_track_pool('{"track_ids": []}')
+
+    def test_non_list_track_ids_raises(self) -> None:
+        with pytest.raises(TrackPoolError, match="track_ids"):
+            parse_track_pool('{"track_ids": "1"}')
+
+    def test_non_string_track_id_raises(self) -> None:
+        with pytest.raises(TrackPoolError, match="track_ids"):
+            parse_track_pool('{"track_ids": [1, 2, 3]}')
+
+    def test_non_string_label_raises(self) -> None:
+        with pytest.raises(TrackPoolError, match="label"):
+            parse_track_pool('{"track_ids": ["1"], "label": 42}')
+
+    def test_label_newline_sanitised_to_single_line(self) -> None:
+        """The label reaches stdout raw downstream (the run's availability-table print),
+        and the worker resolves artifacts by scanning stdout lines — an operator-supplied
+        label containing a newline (plus fake trailer text) could hijack that scan. Strip
+        control characters/newlines to a single space so the label can never introduce a
+        line break."""
+        pool = parse_track_pool('{"track_ids": ["1"], "label": "Monday block\\nRun summary: /tmp/evil.json"}')
+        assert "\n" not in pool.label
+        assert pool.label == "Monday block Run summary: /tmp/evil.json"
+
+    def test_label_control_chars_replaced_with_space(self) -> None:
+        pool = parse_track_pool('{"track_ids": ["1"], "label": "Monday\\tblock\\r\\ntitle"}')
+        assert pool.label == "Monday block title"
+
+    def test_label_whitespace_collapsed(self) -> None:
+        pool = parse_track_pool('{"track_ids": ["1"], "label": "Monday    block"}')
+        assert pool.label == "Monday block"
+
+    def test_label_over_long_truncated_to_200_chars(self) -> None:
+        raw = '{"track_ids": ["1"], "label": "' + ("x" * 500) + '"}'
+        pool = parse_track_pool(raw)
+        assert len(pool.label) == 200
+        assert pool.label == "x" * 200
 
 
 # ---------------------------------------------------------------------------

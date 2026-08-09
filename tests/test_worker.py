@@ -957,3 +957,19 @@ def test_build_argv_direction_spec_maps_to_cli_flag() -> None:
 def test_build_argv_direction_spec_must_be_string() -> None:
     with pytest.raises(WorkerFlagError, match="directionSpec"):
         build_argv({"directionSpec": {"direction_type": "x"}})
+
+
+def test_build_argv_track_pool_maps_to_cli_flag() -> None:
+    pool_spec = '{"track_ids":["1"]}'
+    argv = build_argv({"trackPool": pool_spec})
+    assert argv == ["--track-pool", pool_spec]
+
+
+def test_build_argv_track_pool_empty_string_rejected() -> None:
+    with pytest.raises(WorkerFlagError, match="trackPool"):
+        build_argv({"trackPool": ""})
+
+
+def test_build_argv_track_pool_must_be_string() -> None:
+    with pytest.raises(WorkerFlagError, match="trackPool"):
+        build_argv({"trackPool": {"track_ids": ["1"]}})

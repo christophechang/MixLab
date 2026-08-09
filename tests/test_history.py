@@ -311,6 +311,81 @@ def test_from_run_mints_uuid_when_concept_id_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
+# --track-pool block label ("Run this block", mixlab-web)
+# ---------------------------------------------------------------------------
+
+
+def test_from_run_defaults_block_fields_to_none_for_non_block_runs() -> None:
+    concept = MixConcept(title="Midnight", mood="dark", track_ids=["T001", "T002"])
+    canvas = _canvas(["T001", "T002"])
+    entry = HistoryEntry.from_run([canvas], [concept], genre="house", mode="standard")
+    assert entry.block_label is None
+    assert entry.block_resolved_count is None
+
+
+def test_from_run_populates_block_label_and_resolved_count() -> None:
+    concept = MixConcept(title="Midnight", mood="dark", track_ids=["T001", "T002"])
+    canvas = _canvas(["T001", "T002"])
+    entry = HistoryEntry.from_run(
+        [canvas],
+        [concept],
+        genre="house",
+        mode="all-tracks",
+        block_label="Monday block",
+        block_resolved_count=16,
+    )
+    assert entry.block_label == "Monday block"
+    assert entry.block_resolved_count == 16
+
+
+def test_append_run_round_trip_preserves_block_fields(tmp_path: Path) -> None:
+    p = tmp_path / "history.json"
+    concept = MixConcept(title="Midnight", mood="dark", track_ids=["T001", "T002"])
+    canvas = _canvas(["T001", "T002"])
+    entry = HistoryEntry.from_run(
+        [canvas],
+        [concept],
+        genre="house",
+        mode="all-tracks",
+        block_label="Monday block",
+        block_resolved_count=16,
+    )
+    append_run(ConceptHistory(), entry, p)
+    reloaded = load_history(p)
+    assert reloaded.runs[0].block_label == "Monday block"
+    assert reloaded.runs[0].block_resolved_count == 16
+
+
+def test_load_history_old_entries_without_block_fields_default_to_none(tmp_path: Path) -> None:
+    """Pre-#track-pool history files lack block_label/block_resolved_count — must load
+    with defaults, same backward-compat pattern as every prior schema addition."""
+    p = tmp_path / "history.json"
+    old_entry = {
+        "run_id": "r1",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "mode": "standard",
+        "genre": "house",
+        "selected_canvas_ids": ["c1"],
+        "dominant_bpm_clusters": [124.0],
+        "dominant_camelot_keys": ["8A"],
+        "core_track_ids": ["T001", "T002"],
+        "anchor_track_ids": ["T001"],
+        "opener_candidates": ["T001"],
+        "closer_candidates": ["T002"],
+        "concept_title": "Old",
+        "concept_track_ids": ["T001", "T002"],
+        "energy_path": "",
+        "mood": "dark",
+        "rating": None,
+    }
+    p.write_text(json.dumps({"runs": [old_entry]}))
+    history = load_history(p)
+    assert len(history.runs) == 1
+    assert history.runs[0].block_label is None
+    assert history.runs[0].block_resolved_count is None
+
+
+# ---------------------------------------------------------------------------
 # v0.10 schema additions — canvas score breakdown, risk notes, bpm band,
 # role pattern, energy_path fix (#6)
 # ---------------------------------------------------------------------------

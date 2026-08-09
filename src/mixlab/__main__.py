@@ -20,6 +20,7 @@ from mixlab.client import fetch_mix_names, fetch_played_tracks
 from mixlab.clustering import (
     ABSOLUTE_MIN,
     MAX_SHORTLIST,
+    MIN_SHORTLIST,
     build_custom_genre_pool,
     build_mix_canvas,
     count_available_by_genre,
@@ -33,7 +34,14 @@ from mixlab.clustering import (
     sort_by_camelot,
 )
 from mixlab.config import CUSTOM_GENRES, GENRE_MAP, IGNORED_GENRES
-from mixlab.directions import DirectionSpecError, generate_directions, pinned_canvas_from_spec
+from mixlab.directions import (
+    DirectionSpecError,
+    TrackPool,
+    TrackPoolError,
+    generate_directions,
+    parse_track_pool,
+    pinned_canvas_from_spec,
+)
 from mixlab.discord_client import send_report
 from mixlab.history import (
     ConceptHistory,
@@ -134,6 +142,8 @@ def _format_report_context(
     intent: str | None = None,
     mix_length: int | None = None,
     locked: bool = False,
+    block_label: str | None = None,
+    block_track_count: int | None = None,
 ) -> str:
     base_label: str
     details: list[str] = []
@@ -152,8 +162,15 @@ def _format_report_context(
     else:
         base_label = "MixLab run"
 
-    mode_label = {"all": "All Tracks", "unplayed": "unplayed tracks", "played": "played tracks"}[mode]
-    details.append(mode_label)
+    # A --track-pool run forces mode "all" (ids are authoritative — see run()), so
+    # "All Tracks" alone would misleadingly read as unrestricted. State the block
+    # instead of the generic mode label.
+    if block_label is not None:
+        count_suffix = f" ({block_track_count} tracks)" if block_track_count is not None else ""
+        details.append(f'block "{block_label}"{count_suffix}')
+    else:
+        mode_label = {"all": "All Tracks", "unplayed": "unplayed tracks", "played": "played tracks"}[mode]
+        details.append(mode_label)
     if mix_length is not None:
         details.append(f"{mix_length}min set")
     if locked:
@@ -813,12 +830,48 @@ async def run(
     no_revise: bool = False,
     risk: RiskTolerance = "medium",
     resequence: bool = False,
+    track_pool_raw: str | None = None,
 ) -> None:
     # 1. Parse collection.
     tracks = parse_collection(_XML_PATH)
     tracks, denylist_excluded = _apply_do_not_recommend_filter(tracks, _XML_PATH)
     tracks = apply_bpm_corrections(tracks)
-    tracks = _apply_range_filters(tracks, min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year)
+
+    # --track-pool ("Run this block", mixlab-web): restrict the candidate library to a
+    # given track-id list before Stage 1. Ids are authoritative — they came from an
+    # operator-chosen block, not a mode filter — so a conflicting --mode is overridden
+    # (not fatal), the range filters below are skipped entirely (running them first
+    # would silently eat block tracks and could turn a good block into a false "stale"
+    # failure), and a pinned --direction-spec (a different, incompatible scoping
+    # mechanism) is fatal.
+    try:
+        track_pool: TrackPool | None = parse_track_pool(track_pool_raw) if track_pool_raw else None
+    except TrackPoolError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+    if track_pool is not None and direction_spec:
+        print(
+            "ERROR: --track-pool and --direction-spec cannot be combined — a pinned direction "
+            "already scopes the run to its own tracks.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if track_pool is not None and mode != "all":
+        print(f"--track-pool: ids are authoritative — forcing --mode all (was {mode}).", file=sys.stderr)
+        mode = "all"
+    if track_pool is not None:
+        if min_bpm is not None or max_bpm is not None or min_year is not None or max_year is not None:
+            print(
+                "--track-pool: ids are authoritative — ignoring --min-bpm/--max-bpm/--min-year/--max-year.",
+                file=sys.stderr,
+            )
+    else:
+        tracks = _apply_range_filters(tracks, min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year)
+    # Populated below when track_pool resolves — threaded into the report context and
+    # history entry so persisted artifacts say a block run was a block run, not "All
+    # Tracks" (mode is forced to "all" above and would otherwise read as unrestricted).
+    block_label: str | None = None
+    block_resolved_count: int | None = None
 
     # 2. Fetch played tracks and filter pool based on mode.
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
@@ -884,6 +937,29 @@ async def run(
     else:
         print("No CATALOG_API_URL set — skipping played-track filter, using full collection.")
         unplayed = list(tracks)
+
+    # Snapshot before a --track-pool restriction (if any) reassigns `unplayed` below.
+    # This is the label-lift baseline for directions (see direction_collection) — it
+    # must stay the whole mode-scoped pool even for a block run, not collapse onto the
+    # block itself.
+    mode_scoped_unplayed = unplayed
+
+    if track_pool is not None:
+        pool_ids = set(track_pool.track_ids)
+        resolved = [t for t in unplayed if t.track_id in pool_ids]
+        label = track_pool.label or "unlabelled block"
+        print(f'--track-pool "{label}": {len(resolved)} of {len(pool_ids)} ids resolved.', flush=True)
+        if len(resolved) < MIN_SHORTLIST:  # Stage 1 partition floor (mixlab.clustering.MIN_SHORTLIST)
+            print(
+                f"ERROR: track pool resolves to {len(resolved)} tracks (< {MIN_SHORTLIST}) — "
+                "the block is stale against this collection. Re-create it from the current library.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        unplayed = resolved
+        pool_label = f'block "{label}"'
+        block_label = label
+        block_resolved_count = len(resolved)
 
     # 3. Always print the availability table (deterministic, no LLM cost).
     counts, outlier_count, outlier_genres = _print_availability(
@@ -1012,11 +1088,28 @@ async def run(
     # same-genre outliers. Directions are cross-strata by construction, so they draw from
     # this whole pool rather than any single BPM stratum.
     direction_pool = genre_unplayed_track_ids_source + genre_outliers
+
+    # --track-pool ∩ --genre guard: the <15 gate at the choke point above runs before
+    # genre-scoping, so a block spanning genres can clear it and then quietly run thin
+    # once scoped to --genre. direction_pool is the first point where the genre-scoped
+    # pool is fully known for both the custom- and standard-genre paths (they converge
+    # just above, at tracks_by_id), so re-check the floor here, now naming the genre.
+    if track_pool is not None and len(direction_pool) < MIN_SHORTLIST:
+        print(
+            f'block ∩ genre "{genre}" = {len(direction_pool)} tracks (< {MIN_SHORTLIST}) — '
+            "the block spans other genres or the wrong --genre was passed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Baseline for concentration-scored directions (label_spotlight): the whole
     # mode-scoped pool, all genres — the run-path counterpart of the map path's
     # `scoped` (see library_map.build_map_payload). Without it a label's identity
-    # collapses to its share of its own genre pool and the two paths disagree.
-    direction_collection = unplayed
+    # collapses to its share of its own genre pool and the two paths disagree. For a
+    # --track-pool run this must be the pre-restriction pool (captured above as
+    # mode_scoped_unplayed) — using the block-restricted `unplayed` would collapse
+    # share_pool onto share_coll and always score an identity signal of 0.
+    direction_collection = mode_scoped_unplayed
 
     # Pinned direction (--direction-spec): materialise the operator-chosen map direction
     # as a mandatory canvas. It replaces the enumerated-directions slot entirely — the
@@ -1176,6 +1269,8 @@ async def run(
             all_concepts,
             genre=genre or "_default",
             mode={"all": "all-tracks", "played": "played", "unplayed": "standard"}[mode],
+            block_label=block_label,
+            block_resolved_count=block_resolved_count,
         )
         append_run(history, entry, _HISTORY_PATH)
     except Exception as exc:
@@ -1190,6 +1285,8 @@ async def run(
         export_dir=export_dir,
         intent=intent,
         mix_length=mix_length,
+        block_label=block_label,
+        block_track_count=block_resolved_count,
     )
     report += f"\n⏱ Generated in {elapsed_str}"
 
@@ -1252,6 +1349,9 @@ async def run(
         "resequence": resequence,
         "deep": deep,
         "stage1Seed": stage1_seed,
+        # Raw JSON string, matching mixlab-web's wire key — the engine-side summary
+        # should agree with the manifest the web/API side reads flags from.
+        "trackPool": track_pool_raw,
     }
     # run_notes v1 (documented interpretation): the report's trailing sections — the
     # same text html_report renders under "Run notes" — reconstructed via the same
@@ -1625,6 +1725,20 @@ examples:
         ),
     )
     parser.add_argument(
+        "--track-pool",
+        type=str,
+        default=None,
+        dest="track_pool",
+        help=(
+            "JSON-serialised track-id block to restrict this run's candidate library to "
+            '(\'{"track_ids": [...], "label": "..."}\', machine-generated by mixlab-web\'s "Run this '
+            'block"). Ids are authoritative: forces --mode all (a conflicting --mode is overridden, '
+            "not an error) and fewer than 15 resolved ids is fatal (the block is stale against this "
+            "collection). Genre mode only; ignored in playlist mode; cannot combine with "
+            "--direction-spec."
+        ),
+    )
+    parser.add_argument(
         "--risk",
         choices=["low", "medium", "high"],
         default="medium",
@@ -1755,6 +1869,11 @@ examples:
                 "--direction-spec ignored in playlist mode — pinned directions apply to genre runs only.",
                 file=sys.stderr,
             )
+        if args.track_pool:
+            print(
+                "--track-pool ignored in playlist mode — block restriction applies to genre runs only.",
+                file=sys.stderr,
+            )
         if args.risk != "medium":
             print(
                 "--risk ignored in playlist mode — playlist mode derives risk tolerance from the "
@@ -1804,6 +1923,7 @@ examples:
             no_revise=args.no_revise,
             risk=cast("RiskTolerance", args.risk),
             resequence=args.resequence,
+            track_pool_raw=args.track_pool,
         )
     )
 
