@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Stage 2 selection no longer runs out of room at 32768 tokens, and a truncated
+  response is now recoverable evidence rather than a dead end.** Run
+  `r_20260815_2064` (5 canvases, house/unplayed) hit the cap mid-JSON: the unclosed
+  array parsed to zero concepts and the run exited 1, leaving nothing behind that
+  could say whether the model had been verbose or the output was legitimately that
+  large. The ceiling was ours, not the model's — `claude-sonnet-4-6` tops out at
+  128K output — so the selection pass now asks for 64000 (verified accepted
+  non-streaming). Independently, any Anthropic response that stops on `max_tokens`
+  now has its raw text written to `.mixlab/diagnostics/` and the file named in the
+  existing stderr warning, so the next occurrence can be read directly instead of
+  inferred from a log tail. The dump directory is overridable with
+  `MIXLAB_DIAGNOSTICS_DIR`, and a dump that cannot be written degrades to a warning
+  rather than failing a run that would otherwise complete.
+
 ## v1.18.0 — 2026-08-09
 
 - **New `--track-pool` flag restricts a genre run to an operator-chosen block of

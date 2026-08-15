@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Literal, cast, get_args
 
 import httpx
@@ -168,9 +169,14 @@ async def test_call_anthropic_http_raises_immediately_on_non_retryable_status() 
 
 
 @respx.mock
-async def test_call_anthropic_http_warns_on_truncated_response(capsys: pytest.CaptureFixture[str]) -> None:
+async def test_call_anthropic_http_warns_on_truncated_response(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     from mixlab.llm import _call_anthropic_http
 
+    monkeypatch.setenv("MIXLAB_DIAGNOSTICS_DIR", str(tmp_path))
     respx.post(_ANTHROPIC_URL).mock(
         return_value=Response(200, json={"content": [{"text": "partial"}], "stop_reason": "max_tokens"})
     )
@@ -180,6 +186,82 @@ async def test_call_anthropic_http_warns_on_truncated_response(capsys: pytest.Ca
     assert text == "partial"
     captured = capsys.readouterr()
     assert "WARNING: Anthropic response truncated at max_tokens=256" in captured.err
+
+
+@respx.mock
+async def test_call_anthropic_http_truncated_response_dumps_raw_text(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    monkeypatch.setenv("MIXLAB_DIAGNOSTICS_DIR", str(tmp_path))
+    respx.post(_ANTHROPIC_URL).mock(
+        return_value=Response(200, json={"content": [{"text": '[{"title": "cut off'}], "stop_reason": "max_tokens"})
+    )
+
+    await _call_anthropic_http("key", "claude-sonnet-4-6", "system", "prompt", max_tokens=256)
+
+    dumps = list(tmp_path.glob("truncated-claude-sonnet-4-6-*.txt"))
+    assert len(dumps) == 1
+    body = dumps[0].read_text(encoding="utf-8")
+    assert "max_tokens=256" in body
+    assert '[{"title": "cut off' in body
+    assert str(dumps[0]) in capsys.readouterr().err
+
+
+@respx.mock
+async def test_call_anthropic_http_complete_response_writes_no_dump(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    monkeypatch.setenv("MIXLAB_DIAGNOSTICS_DIR", str(tmp_path))
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response("complete")))
+
+    text = await _call_anthropic_http("key", "model", "system", "prompt")
+
+    assert text == "complete"
+    assert list(tmp_path.iterdir()) == []
+
+
+@respx.mock
+async def test_call_anthropic_http_returns_text_when_dump_write_fails(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A dump that cannot be written must not take down an otherwise usable response."""
+    from mixlab.llm import _call_anthropic_http
+
+    blocked = tmp_path / "not-a-dir"
+    blocked.write_text("occupied", encoding="utf-8")
+    monkeypatch.setenv("MIXLAB_DIAGNOSTICS_DIR", str(blocked))
+    respx.post(_ANTHROPIC_URL).mock(
+        return_value=Response(200, json={"content": [{"text": "partial"}], "stop_reason": "max_tokens"})
+    )
+
+    text = await _call_anthropic_http("key", "model", "system", "prompt", max_tokens=256)
+
+    assert text == "partial"
+    captured = capsys.readouterr()
+    assert "could not write truncation dump" in captured.err
+    assert "WARNING: Anthropic response truncated at max_tokens=256" in captured.err
+
+
+@respx.mock
+async def test_call_stage2_raw_requests_the_full_selection_budget() -> None:
+    """The selection pass is the one call that ran out of room — it gets the raised ceiling."""
+    from mixlab.llm import _call_stage2_raw
+
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response("[]")))
+
+    await _call_stage2_raw("prompt", "system", "key")
+
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["max_tokens"] == llm._STAGE2_SELECTION_MAX_TOKENS
+    assert payload["max_tokens"] == 64000
 
 
 def test_stage2_model_env_override_returns_env_value(monkeypatch: pytest.MonkeyPatch) -> None:
