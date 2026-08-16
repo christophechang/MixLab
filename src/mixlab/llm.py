@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime
 import json
 import math
 import os
@@ -32,6 +33,7 @@ import statistics
 import sys
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Literal, cast, get_args
 
 import httpx
@@ -405,6 +407,43 @@ async def _call_openai_compat(
 _ANTHROPIC_MAX_ATTEMPTS = 3
 _ANTHROPIC_BACKOFFS_SECS = (1.0, 2.0)
 
+# Stage 2 selection output cap. Run r_20260815_2064 (5 canvases, house/unplayed) hit the
+# previous 32768 ceiling mid-JSON: the truncated array yielded zero parseable concepts and
+# the run exited 1. The model tops out at 128K output, so the ceiling was ours, not its.
+_STAGE2_SELECTION_MAX_TOKENS = 64000
+
+_DIAGNOSTICS_DIR_ENV = "MIXLAB_DIAGNOSTICS_DIR"
+_DEFAULT_DIAGNOSTICS_DIR = Path(".mixlab/diagnostics")
+
+
+def _diagnostics_dir() -> Path:
+    """Where truncation dumps land. Relative to cwd, which the worker sets to the repo root."""
+    raw = os.environ.get(_DIAGNOSTICS_DIR_ENV, "")
+    return Path(raw) if raw else _DEFAULT_DIAGNOSTICS_DIR
+
+
+def _dump_truncated_response(model: str, max_tokens: int, text: str) -> Path | None:
+    """Persist a max_tokens-truncated response so the next failure is diagnosable.
+
+    A truncated Stage 2 selection is only visible as "0 concept(s) returned" in the log
+    tail, which says nothing about *why* the model ran long. Writing the raw text is the
+    only way to tell verbosity from genuine size. Best-effort: a dump failure must never
+    take down a run that would otherwise complete.
+    """
+    try:
+        directory = _diagnostics_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S%f")
+        path = directory / f"truncated-{model.replace('/', '_')}-{stamp}.txt"
+        path.write_text(
+            f"model={model}\nmax_tokens={max_tokens}\nchars={len(text)}\n\n{text}",
+            encoding="utf-8",
+        )
+        return path
+    except OSError as exc:
+        print(f"WARNING: could not write truncation dump ({exc}).", file=sys.stderr)
+        return None
+
 
 def _stage2_model() -> str:
     """Anthropic model id for Stage 2 (selection, report, critique) — overridable for eval/rollback."""
@@ -477,12 +516,16 @@ async def _call_anthropic_http(
 
             resp.raise_for_status()  # non-retryable 4xx raises immediately
             data = resp.json()
+            text = str(data["content"][0]["text"])
             if data.get("stop_reason") == "max_tokens":
+                dump_path = _dump_truncated_response(model, max_tokens, text)
+                saved = f" Raw response saved to {dump_path}." if dump_path is not None else ""
                 print(
-                    f"WARNING: Anthropic response truncated at max_tokens={max_tokens} — output may be incomplete.",
+                    f"WARNING: Anthropic response truncated at max_tokens={max_tokens} — "
+                    f"output may be incomplete.{saved}",
                     file=sys.stderr,
                 )
-            return str(data["content"][0]["text"])
+            return text
 
     raise RuntimeError("Anthropic request failed — retry loop exited without a response.")
 
@@ -2439,7 +2482,7 @@ async def _call_stage2_raw(
     prompt: str,
     stage2_system: str,
     stage2_key: str,
-    max_tokens: int = 32768,
+    max_tokens: int = _STAGE2_SELECTION_MAX_TOKENS,
 ) -> str:
     """Make the Stage 2 selection HTTP call via Anthropic."""
     try:
@@ -3608,7 +3651,7 @@ async def stage2_curate_and_report(
     if used_mix_names:
         stage2_system = stage2_system + _forbidden_names_block(used_mix_names)
 
-    raw = await _call_stage2_raw(prompt, stage2_system, stage2_key, max_tokens=32768)
+    raw = await _call_stage2_raw(prompt, stage2_system, stage2_key)
 
     if os.environ.get("MIXLAB_DEBUG_STAGE2"):
         print(f"[DEBUG] Stage 2 raw response (first 2000 chars):\n{raw[:2000]}", file=sys.stderr)
@@ -3698,7 +3741,7 @@ async def stage2_curate_and_report(
                 f"Dropped seeds: {dropped_labels}.\n"
                 "Retry with one concept only. Include as many dropped seeds as possible.\n\n"
             ) + prompt
-            raw = await _call_stage2_raw(retry_prompt, stage2_system, stage2_key, max_tokens=32768)
+            raw = await _call_stage2_raw(retry_prompt, stage2_system, stage2_key)
             curated, _ = _parse_curated_concepts(raw, offered_ids)
             if curated:
                 concept = curated[0]
