@@ -187,6 +187,13 @@ def _merge_histories(remote_text: str, local_text: str) -> ConceptHistory:
     last read it (another sync cycle or run), so remote entries win by identity and
     local entries are added only when their ``run_id`` isn't already present
     remotely.
+
+    A run *deleted* remotely mid-run is indistinguishable here from one this worker
+    generated while the remote moved on: both are local-only, so this merge would
+    re-add it, resurrecting a history entry that belongs to no manifest. The API is
+    what prevents that — it refuses a run delete while any run holds a live claim,
+    so a purge can never land inside one worker's sync_down → sync_up window. Keep
+    the two in step: relaxing that guard needs deletion tombstones here first.
     """
     remote_history = _parse_history_text(remote_text)
     local_history = _parse_history_text(local_text)

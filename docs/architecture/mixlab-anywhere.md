@@ -189,6 +189,15 @@ Crash safety: if the worker dies mid-run, the claim lease (§4 #10) expires and 
 run is requeued; `complete` idempotency makes a double-push harmless. The worker
 never holds state that isn't reconstructible from the API.
 
+**Deletes wait for the worker.** Step 2 adopts the remote history document and step 5
+pushes the local copy back, merging on a PUT conflict by re-adding every `run_id`
+present locally but not remotely. A run deleted (and purged from history) during that
+window is local-only by the time step 5 runs, so the merge would resurrect its entry —
+attached to no manifest and no index row, invisible in the archive but still steering
+novelty scoring. The API therefore rejects `DELETE /runs/{id}` with `409` while any run
+holds a live claim; a queued-but-unclaimed run has adopted nothing yet and does not
+block, nor does a run whose lease has gone stale.
+
 ## 7. SPA (`mixlab-web`, private, Cloudflare Pages)
 
 Pages: **Trigger** (upload XML with client-side gzip + "reuse latest"; flag form
