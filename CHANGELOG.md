@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.18.1 — 2026-08-16
+
 - **Stage 2 selection no longer runs out of room at 32768 tokens, and a truncated
   response is now recoverable evidence rather than a dead end.** Run
   `r_20260815_2064` (5 canvases, house/unplayed) hit the cap mid-JSON: the unclosed
