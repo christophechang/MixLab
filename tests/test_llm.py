@@ -6408,3 +6408,206 @@ async def test_stage2_curate_unpinned_prompt_keeps_classic_instruction(
     user_prompt = str(captured[0]["messages"])
     assert "Produce between 3 and 6 distinct concepts total" in user_prompt
     assert "study of the pinned direction" not in user_prompt
+
+
+# ---------------------------------------------------------------------------
+# Clone-concept drop — two identical sets must never both ship
+# ---------------------------------------------------------------------------
+
+
+def test_drop_clone_concepts_identical_track_sets_keeps_first_with_note() -> None:
+    ids = [str(i) for i in range(10)]
+    first = MixConcept(title="Fault Lines", mood="dark", track_ids=list(ids))
+    clone = MixConcept(title="Second Pressing", mood="dark", track_ids=list(ids))
+
+    kept, notes = llm._drop_clone_concepts([first, clone])
+
+    assert [c.title for c in kept] == ["Fault Lines"]
+    assert len(notes) == 1
+    assert "Second Pressing" in notes[0] and "Fault Lines" in notes[0]
+    assert "10/10 tracks shared" in notes[0]
+
+
+def test_drop_clone_concepts_same_tracks_reordered_is_still_a_clone() -> None:
+    """A different walk through the same crate is the same set to the DJ."""
+    ids = [str(i) for i in range(10)]
+    first = MixConcept(title="Fault Lines", mood="dark", track_ids=list(ids))
+    reordered = MixConcept(title="Reverse Cut", mood="warm", track_ids=list(reversed(ids)))
+
+    kept, notes = llm._drop_clone_concepts([first, reordered])
+
+    assert [c.title for c in kept] == ["Fault Lines"]
+    assert len(notes) == 1
+
+
+def test_drop_clone_concepts_partial_overlap_survives() -> None:
+    """80% overlap is a distinctiveness warning, not grounds for a drop."""
+    first = MixConcept(title="Fault Lines", mood="dark", track_ids=[str(i) for i in range(10)])
+    overlapping = MixConcept(title="Future Riddims", mood="warm", track_ids=[str(i) for i in range(2, 12)])
+
+    kept, notes = llm._drop_clone_concepts([first, overlapping])
+
+    assert [c.title for c in kept] == ["Fault Lines", "Future Riddims"]
+    assert notes == []
+
+
+def test_drop_clone_concepts_empty_track_lists_are_not_clones() -> None:
+    """An empty selection is its own hard finding — it must not swallow another concept."""
+    first = MixConcept(title="Fault Lines", mood="dark", track_ids=[])
+    second = MixConcept(title="Future Riddims", mood="warm", track_ids=[])
+
+    kept, notes = llm._drop_clone_concepts([first, second])
+
+    assert len(kept) == 2
+    assert notes == []
+
+
+def test_drop_clone_concepts_no_duplicates_is_a_passthrough() -> None:
+    concepts = [
+        MixConcept(title="Fault Lines", mood="dark", track_ids=["1", "2", "3"]),
+        MixConcept(title="Future Riddims", mood="warm", track_ids=["4", "5", "6"]),
+    ]
+
+    kept, notes = llm._drop_clone_concepts(concepts)
+
+    assert kept == concepts
+    assert notes == []
+
+
+@respx.mock
+async def test_stage2_curate_genre_mode_drops_clone_concept_and_notes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end: two identical concepts come back, one ships, the report says why."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    track_ids = [str(i) for i in range(1, 6)]
+    payload = [
+        {
+            "title": title,
+            "name_reason": "r",
+            "mood": mood,
+            "track_ids": track_ids,
+            "transitions": [],
+            "arc_type": "wave",
+            "report": f"CONCEPT: {title}",
+        }
+        for title, mood in (("Fault Lines", "dark"), ("Second Pressing", "warm"))
+    ]
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(json.dumps(payload))))
+
+    tracks_by_id = {
+        tid: Track(track_id=tid, artist=f"A{tid}", title=f"T{tid}", bpm=124.0, camelot_key="6A", genre="House")
+        for tid in track_ids
+    }
+    shortlist = MixConcept(title="pool", mood="m", track_ids=track_ids)
+
+    concepts, report = await stage2_curate_and_report([shortlist], tracks_by_id)
+
+    assert [c.title for c in concepts] == ["Fault Lines"]
+    assert "**Dropped**: 'Second Pressing'" in report
+
+
+@respx.mock
+async def test_stage2_curate_playlist_mode_keeps_overlapping_variants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Playlist mode returns deliberate variants of one completion — overlap is the design."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    track_ids = [str(i) for i in range(1, 6)]
+    payload = [
+        {
+            "title": title,
+            "name_reason": "r",
+            "mood": mood,
+            "track_ids": track_ids,
+            "transitions": [],
+            "arc_type": "wave",
+            "report": f"CONCEPT: {title}",
+        }
+        for title, mood in (("Practical", "practical"), ("Adventurous", "adventurous"))
+    ]
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(json.dumps(payload))))
+
+    tracks_by_id = {
+        tid: Track(track_id=tid, artist=f"A{tid}", title=f"T{tid}", bpm=124.0, camelot_key="6A", genre="House")
+        for tid in track_ids
+    }
+    shortlist = MixConcept(title="pool", mood="m", track_ids=track_ids)
+
+    _concepts, report = await stage2_curate_and_report(
+        [shortlist],
+        tracks_by_id,
+        playlist_name="Test Playlist",
+        seed_ids=frozenset(track_ids),
+        seed_track_ids=track_ids,
+    )
+
+    assert "**Dropped**" not in report
+
+
+# ---------------------------------------------------------------------------
+# Mix-title register (operator feedback 2026-08-17)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("title", "reason"),
+    [
+        ("I Told You Twice", "first-person aside"),
+        ("My Last Bus Home", "first-person aside"),
+        ("Something About The", "ends mid-phrase"),
+        ("Down To", "ends mid-phrase"),
+        ("Held Under,", "trailing punctuation"),
+        ("Not Yet...", "trailing punctuation"),
+    ],
+)
+def test_register_warning_flags_out_of_register_titles(title: str, reason: str) -> None:
+    warning = llm._register_warning(_concept(title))
+    assert warning is not None
+    assert reason in warning
+    assert title in warning
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["Fault Lines", "Future Riddims", "Bell Curve Pressure", "Rig Weather", "Hold On", "Save Me"],
+)
+def test_register_warning_passes_real_catalogue_shapes(title: str) -> None:
+    """The shapes the catalogue actually releases in must never be flagged."""
+    assert llm._register_warning(_concept(title)) is None
+
+
+def test_register_warning_never_triggers_self_revision() -> None:
+    """The register guard is advisory — it must not read as a hard finding."""
+    warning = llm._register_warning(_concept("I Told You Twice"))
+    assert warning is not None
+    assert not any(marker in warning for marker in llm._HARD_FINDING_MARKERS)
+
+
+def test_naming_lenses_bank_stays_in_mix_title_register() -> None:
+    """No lens may ask for the shapes that stopped reading as mix names."""
+    joined = " ".join(llm._NAMING_LENSES).lower()
+    for banned in ("mid-sentence", "unfinished", "mishear", "initials", "first person", "no explanation"):
+        assert banned not in joined, f"lens bank still steers toward {banned!r}"
+
+
+def test_naming_lenses_block_states_the_register_rule() -> None:
+    block = llm._naming_lenses_block(7)
+    assert "mix-title register" in block
+    assert "sentence fragment" in block
+
+
+def test_stage2_system_prompt_names_the_release_register() -> None:
+    assert "the name of a released mix" in llm._STAGE2_SYSTEM
+    # The catalogue's own shapes are the target, so they must also be burned as examples.
+    assert "Fault Lines" in llm._STAGE2_SYSTEM
+    assert "Future Riddims" in llm._STAGE2_SYSTEM
+
+
+def test_stage2_rename_prompt_carries_the_register_rule() -> None:
+    """A re-rolled replacement title must land in the same register as the original."""
+    assert "the name of a released mix" in llm._STAGE2_RENAME_SYSTEM

@@ -62,7 +62,7 @@ The worker polls the API for queued jobs; nothing ever connects inbound. The API
 ```
 uploads/index.json                    # [{uploadId, uploadedAt, sizeBytes, label}], newest first, keep 5
 uploads/{uploadId}.xml.gz             # gzipped rekordbox.xml
-runs/index.json                       # [{runId, createdAt, status, genre, flagsSummary, conceptCount}], newest first
+runs/index.json                       # [{runId, createdAt, status, genre, flagsSummary, conceptCount, shortlistedCount, playedCount}], newest first
 runs/{runId}/run.json                 # manifest — the mutable state document (see §5.1)
 runs/{runId}/report.html              # artifact (immutable once written)
 runs/{runId}/export.xml               # artifact
@@ -76,6 +76,18 @@ Index documents follow the repo's existing pattern: read-modify-write with **ETa
 semantics apply. Artifact blobs are written once and never mutated; `run.json` is the
 only per-run mutable document.
 
+`shortlistedCount` and `playedCount` are a **derived projection** of that run's manifest
+concepts — concepts with `shortlisted: true`, and concepts whose feedback verdict is
+`played` or `played_modified`. They are refreshed inside the index's ETag retry loop on
+every shortlist and feedback write, and each retry attempt re-derives them from a
+freshly-read manifest, so two writers racing on the index converge rather than one
+clobbering the other's numbers. Manifest and index are separate blobs with separate
+ETags, so the pair is eventually consistent and never atomic: a crash between the
+manifest write and the index write leaves the counts stale until
+`POST /api/mixlab/runs/reindex` (endpoint 17) repairs them. Entries written before these
+fields existed omit them and read as `0`. Consumers treat the counts as a freshness hint,
+not a source of truth — the manifest is the truth.
+
 ## 4. API surface (`/api/mixlab/*`, all `[BearerSecret("MixLab:ApiSecret")]`)
 
 | # | Endpoint | Purpose |
@@ -85,7 +97,7 @@ only per-run mutable document.
 | 3 | `GET /api/mixlab/uploads/{id}` | Stream the gzipped XML (worker download) |
 | 4 | `POST /api/mixlab/runs` | Enqueue a run: `{flags: {...}, uploadId: "<id>"\|"latest"}` → `202 {runId}` (`status=queued`) |
 | 5 | `GET /api/mixlab/runs?take=&skip=` | Archive list (from index) |
-| 6 | `GET /api/mixlab/runs/{id}` | Run manifest |
+| 6 | `GET /api/mixlab/runs/{id}` | Run manifest. Feedback verdicts serialise with their documented wire spelling (`played_modified`) — an earlier camelCase leak (`playedModified`) is fixed |
 | 7 | `GET /api/mixlab/runs/{id}/report` | `text/html` artifact |
 | 8 | `GET /api/mixlab/runs/{id}/export` | `application/xml` artifact |
 | 9 | `GET /api/mixlab/runs/{id}/summary` | `application/json` artifact |
@@ -95,6 +107,8 @@ only per-run mutable document.
 | 13 | `GET /api/mixlab/history` / `PUT /api/mixlab/history` | Concept-history sync (ETag on GET, `If-Match` on PUT) |
 | 14 | `POST /api/mixlab/runs/{id}/concepts/{conceptId}/feedback` | `{verdict?, rating?, notes?, publishedMixSlug?}` → merged into `run.json` concept AND appended to `feedback/pending.json` |
 | 15 | `GET /api/mixlab/feedback/pending` / `POST /api/mixlab/feedback/ack` | Worker pulls unsynced feedback; acks by event id after merging into history |
+| 16 | `PUT /api/mixlab/runs/{id}/concepts/{conceptId}/shortlist` | `{shortlisted: true\|false}` → sets the concept's `shortlisted` flag in `run.json` and refreshes that run's index counts. → `204`; `404` for an unknown run or concept; `400` when `shortlisted` is missing or not a boolean. Idempotent. Web/API only: **no** `feedback/pending.json` event is written, so shortlisting never reaches engine history |
+| 17 | `POST /api/mixlab/runs/reindex` | Recomputes `shortlistedCount`/`playedCount` on every index entry from the run manifests, leaving all other fields (and any entry whose manifest is missing) untouched. → `200 {runs: n}`, `n` = manifests read. Idempotent backfill and repair; run once per environment after the deploy that introduces the counts |
 
 Controller stays thin per AGENTS.md: one `MixLabController` delegating to use cases in
 `Core.BusinessProcesses` (`EnqueueMixLabRunUseCase`, `ClaimMixLabRunUseCase`, …) with
@@ -130,7 +144,7 @@ routes, following the existing CORS wiring pattern.
   "claimedAt": null, "workerId": null,
   "completedAt": null, "error": null,
   "concepts": [
-    { "conceptId": "…", "title": "107 Degrees",
+    { "conceptId": "…", "title": "107 Degrees", "shortlisted": false,
       "feedback": { "verdict": "played", "rating": 4, "notes": "…",
                      "publishedMixSlug": "…", "recordedAt": "…" } }
   ]
@@ -140,6 +154,13 @@ routes, following the existing CORS wiring pattern.
 `concepts` is populated at completion from `summary.json` (id + title only; feedback
 fields filled in later by endpoint 14). `publishedMixSlug` references the existing
 catalogue's mix slug — the join that later powers "concepts that shipped".
+
+`shortlisted` is the operator's "in session" marker — this is a cut they intend to make —
+set only by endpoint 16 and defaulting to `false`; it is absent on manifests written before
+the field existed and reads as `false`. It sits deliberately outside the feedback loop:
+nothing about it is queued to `feedback/pending.json`, so the engine never sees it and it
+never influences novelty scoring or feedback multipliers. The worker reads manifests
+field-by-field and ignores keys it does not know, so no engine change was needed for it.
 
 ### 5.2 `summary.json` (structured run artifact — emitted by the engine)
 

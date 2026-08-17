@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+## v1.18.2 — 2026-08-17
+
+- **A run can no longer deliver the same set twice.** Two concepts came back from
+  Stage 2 with the same tracks and different names, and every layer that could have
+  caught it was advisory: the prompt asks the model to collapse concepts that would
+  feel like one set, and validation warns at >50% track overlap, but nothing dropped
+  anything. Stage 2 output is now deduplicated deterministically — a concept whose
+  track set overlaps an already-kept one at 90% or above is dropped before the
+  re-roll, critique, and report passes, so the duplicate costs no further tokens and
+  the report says which concept went and what it duplicated. Overlap is measured on
+  the track *set*: the same crate walked in a different order is the same set to the
+  DJ. Genre mode only — playlist mode's variants are deliberate readings of one
+  completion with a single winner picked downstream.
+- **Mixed-mode canvas selection no longer hands Stage 2 the same crate twice.** The
+  root cause of the duplicate above: classic canvases and concept directions are
+  chosen by separate machinery, each deduplicating only within its own family, so a
+  direction built over the same stratum as a picked classic canvas arrived as a
+  second canvas made of the same records — and Stage 2 wrote both up. A cross-family
+  overlap guard now drops a canvas whose offered pool (core, bridge, and wildcard
+  together) overlaps a kept one at the same 0.6 Jaccard the direction field already
+  holds itself to, naming each drop in the run log. Mixed mode over-selects classic
+  canvases so a drop does not shrink the field; pinned runs select two contrast
+  candidates so a contrast canvas that is really the pinned direction again can be
+  rejected.
+- **Concept names are pulled back into mix-title register.** The naming lenses
+  introduced with Name Studio varied technique without constraining shape, and
+  lenses like "a fragment of overheard smoking-area conversation — first person,
+  mid-sentence" and "a DJ's phone notes at 4am: cryptic, personal, no explanation"
+  were doing exactly what they asked: producing titles that read as asides and
+  in-jokes rather than as names of mixes. The blanket ban on the two-word noun
+  phrase compounded it — that shape is precisely what the catalogue releases under
+  ("Fault Lines", "Future Riddims"). The Stage 2 prompt now states the register as a
+  hard constraint ahead of any question of technique, the lens bank is rebuilt so
+  every technique lands on a self-contained noun phrase, the re-roll pass carries the
+  same rule so a replacement title cannot drift out of register, and a deterministic
+  warn-only guard flags titles that read as a first-person aside, stop mid-phrase, or
+  trail off in punctuation. Tired mood-adjective-plus-abstract-noun is still the
+  failure to avoid; the two-word noun phrase itself is now the target.
+
 ## v1.18.1 — 2026-08-16
 
 - **Stage 2 selection no longer runs out of room at 32768 tokens, and a truncated
