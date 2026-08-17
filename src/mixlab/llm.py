@@ -851,33 +851,51 @@ _STAGE2_RISK_FRAGMENT_LOW = """\
 # character varies day to day instead of converging on one house style. Three are
 # sampled by the run seed (same date-derived seed as Stage 1, overridable via
 # --stage1-seed) and injected into the Stage 2 selection prompt.
-_NAMING_LENSES: tuple[str, ...] = (
-    "lift a 2-4 word fragment from a lyric or track title in the pool and cut it mid-phrase so it reads unfinished",
-    "name a specific place at a specific hour — pick the place from the music's scene geography, not a postcard",
-    "fuse two artist or title words from the pool into one invented portmanteau word",
-    "deliberately mishear a lyric or title from the pool and write down the wrong version",
-    "use scene slang or studio jargon from the pool's dominant production era",
-    "name a physical object from the dancefloor, the queue, or the walk home — never the DJ equipment",
-    "use weather or temperature as a verb, not an adjective",
-    "a fragment of overheard smoking-area conversation — first person, mid-sentence",
-    "a night-transit reference — last train, night bus route, taxi rank — matched to the set's energy",
-    "something from a DJ's phone notes at 4am: cryptic, personal, no explanation",
-    "the cadence of a white-label etching or dubplate scrawl — terse, initials, studio shorthand",
-)
+#
+# Every lens must land in *mix-title register* — the register the Changsta catalogue
+# actually releases in ("Fault Lines", "Future Riddims"): a self-contained noun phrase
+# that could be printed on a sleeve. The original bank varied technique without
+# constraining register, so lenses like "a fragment of overheard smoking-area
+# conversation — first person, mid-sentence" and "a DJ's phone notes at 4am: cryptic,
+# personal, no explanation" were doing exactly what they asked and producing titles
+# that read as fragments and in-jokes rather than as names of mixes (operator feedback
+# 2026-08-17). Technique still varies run to run; the shape of the output no longer does.
 
-
-# Lenses that instruct drawing words from the pool's own titles/artists. At most one
-# may be sampled per run — two or more would force the model to violate the
+# The three lenses that build a title out of the pool's own text. At most one may be
+# sampled per run — two or more would force the model to violate the
 # one-anchor-lift-per-response cap to follow its lens instructions (live finding:
-# a run produced four anchor-lifted names).
-_POOL_DRAWING_LENSES: frozenset[str] = frozenset(
-    # " the pool " (spaces) matches the three lift-from-pool lenses while excluding
-    # the era-slang lens's "the pool's dominant production era".
-    lens
-    for lens in _NAMING_LENSES
-    if " the pool " in lens
+# a run produced four anchor-lifted names). Named individually rather than matched by
+# substring: the previous " the pool " predicate could not tell a lens that draws on the
+# pool's *titles* from one that only references the pool's *era*.
+_LENS_POOL_COMPOUND = (
+    "fuse two words taken from artist, title, or label text in the pool into one compound that reads as a coined noun"
 )
-assert len(_POOL_DRAWING_LENSES) == 3, "pool-drawing lens tagging drifted — update the predicate with the bank"
+_LENS_POOL_NOUN = (
+    "take one concrete noun from a track title in the pool and pair it with a word that recasts what it means"
+)
+_LENS_POOL_VOCAB = (
+    "build the title from the scene vocabulary the pool's own titles and labels already speak in — "
+    "their words, your phrase"
+)
+
+_POOL_DRAWING_LENSES: frozenset[str] = frozenset({_LENS_POOL_COMPOUND, _LENS_POOL_NOUN, _LENS_POOL_VOCAB})
+
+_NAMING_LENSES: tuple[str, ...] = (
+    _LENS_POOL_COMPOUND,
+    _LENS_POOL_NOUN,
+    _LENS_POOL_VOCAB,
+    "name a natural or geological process the set's energy shape literally traces",
+    "name a place at an hour — the room, the street, or the journey home — as a noun phrase with no verb in it",
+    "pair an era word with a floor word when the pool splits cleanly across generations",
+    "name a physical object from soundsystem culture — the rig, the dance, the walk home — never booth gear",
+    "use the vocabulary of transmission — pirate radio, broadcast, dedication, dubplate — when the set carries it",
+    "use scene slang or studio jargon from the pool's dominant production era, set down as a plain noun phrase",
+    "make weather, temperature, or pressure the subject of the title rather than decoration on it",
+    "name what the set does to a room, stated as a thing rather than as an action",
+)
+
+assert set(_NAMING_LENSES) >= _POOL_DRAWING_LENSES, "pool-drawing lens missing from the bank"
+assert len(_POOL_DRAWING_LENSES) == 3, "pool-drawing lens tagging drifted — update the set with the bank"
 
 
 def _naming_lenses_block(seed: int) -> str:
@@ -900,11 +918,15 @@ def _naming_lenses_block(seed: int) -> str:
     return (
         "\n\nNAMING LENSES for this run — use each of these techniques for exactly one "
         "concept name in this response; name any remaining concepts with distinct "
-        "techniques of your own. At most ONE name in the whole response may lift words "
-        "from its own track list; every other name must build from material outside "
-        "the pool. Never build a title from DJ mechanics: no BPM numbers, no musical "
-        "keys or Camelot codes, no mixing equipment or moves (faders, EQs, blends, "
-        "cues). Name the feeling, the place, the image — never the craft:\n" + lines
+        "techniques of your own. Whichever lens you apply, the result must land in "
+        "mix-title register: a self-contained noun phrase that could be printed on a "
+        "sleeve. Never a sentence fragment, an unfinished phrase, a first-person "
+        "aside, initials, or shorthand only you would understand. At most ONE name in "
+        "the whole response may lift words from its own track list; every other name "
+        "must build from material outside the pool. Never build a title from DJ "
+        "mechanics: no BPM numbers, no musical keys or Camelot codes, no mixing "
+        "equipment or moves (faders, EQs, blends, cues). Name the feeling, the place, "
+        "the image — never the craft:\n" + lines
     )
 
 
@@ -929,6 +951,9 @@ _STAGE2_RENAME_SYSTEM = """\
 You titled these mix concepts moments ago, but every title listed below is already used by an \
 existing mix or an earlier run. Provide a NEW title for each concept: 2-4 words, keeping the \
 concept's character (its mood and thesis are provided), built with a different naming technique. \
+Each new title must read as the name of a released mix — a self-contained noun phrase in title case \
+that survives being said out loud with no context. Not a sentence fragment, not an unfinished phrase, \
+not a first-person aside, not initials or private shorthand. \
 The new title must not appear in the forbidden list and must not share a distinctive word with \
 any entry in it, nor with the other new titles. Never build a title from DJ mechanics: no BPM \
 numbers, no keys or Camelot codes, no equipment or mixing moves.
@@ -1204,6 +1229,44 @@ _MECHANICS_TITLE_RE = re.compile(
 )
 
 
+# Deterministic mix-title register guard. Warn-only, like the rest of the name-family
+# checks — none of these strings may contain a substring from _HARD_FINDING_MARKERS.
+# Catches the three shapes that make a title stop reading as the name of a mix:
+# a first-person aside, a phrase that stops mid-thought, and dictated punctuation.
+# Prompt pressure alone did not hold the register (operator feedback 2026-08-17).
+# Deliberately narrow: subject and possessive pronouns only. "me", "us", and "our" are
+# left out because they end plenty of titles that read perfectly well on a sleeve
+# ("Save Me") — the aside register comes from the speaker, not from being addressed.
+_FIRST_PERSON_TITLE_RE = re.compile(r"\b(i|i'm|im|i'll|i've|my|we|we're|you're)\b", re.IGNORECASE)
+# Function words a finished noun phrase does not end on. Phrasal-verb particles that
+# routinely close a real title ("Hold On", "Give In") are excluded — a warn-only check
+# earns its place by being quiet on titles that are fine.
+_DANGLING_TAIL_WORDS = frozenset(
+    {
+        "a", "an", "and", "but", "for", "from", "if", "into", "like", "of", "or",
+        "so", "than", "that", "the", "then", "to", "until", "when", "while",
+        "with", "without",
+    }
+)  # fmt: skip
+_TRAILING_PUNCT_RE = re.compile(r"[,;:]\s*$|\.{2,}\s*$|…\s*$")
+
+
+def _register_warning(concept: MixConcept) -> str | None:
+    """Flag a title that reads as something other than the name of a released mix."""
+    title = concept.title.strip()
+    if not title:
+        return None
+    if _FIRST_PERSON_TITLE_RE.search(title):
+        reason = "first-person aside"
+    elif _TRAILING_PUNCT_RE.search(title):
+        reason = "trailing punctuation"
+    elif (words := re.findall(r"[A-Za-z']+", title)) and words[-1].casefold() in _DANGLING_TAIL_WORDS:
+        reason = "ends mid-phrase"
+    else:
+        return None
+    return f"Concept title '{concept.title}' reads as a {reason}, not as a mix name — out of title register"
+
+
 def _mechanics_title_warning(concepts: list[MixConcept]) -> str | None:
     """Warn when a concept title is built from DJ mechanics — BPM numbers, Camelot
     codes, or equipment vocabulary (operator feedback 2026-08-07: name the feeling,
@@ -1262,6 +1325,61 @@ def _flag_name_families(
     if anchor_warning is not None:
         warnings.append(anchor_warning)
     return warnings
+
+
+# Track-set overlap at or above which two concepts are the same set wearing two
+# names. The >50% distinctiveness check below stays advisory — a DJ can reasonably
+# ship two concepts that share half a pool — but at this level the second concept
+# carries no information, so it is dropped rather than warned about. Live finding:
+# a run shipped two concepts with byte-identical track lists; validation flagged the
+# 100% overlap and both were still delivered.
+_CLONE_JACCARD = 0.9
+
+
+def _drop_clone_concepts(concepts: list[MixConcept]) -> tuple[list[MixConcept], list[str]]:
+    """Drop concepts whose track set clones one already kept (>= :data:`_CLONE_JACCARD`).
+
+    Walks the concepts in the order Stage 2 returned them and keeps a concept only
+    when it overlaps every already-kept concept below the clone threshold. First
+    occurrence wins: Stage 2 orders its own output, and preferring a later duplicate
+    would silently reorder the field. Returns ``(kept, notes)`` where ``notes`` are
+    run-note lines naming what was dropped and why — a drop is never silent.
+
+    Deliberately measured on the track *set*, not the play order: two concepts with
+    the same tracks in a different sequence are the same crate with a different
+    walk through it, which is exactly the duplicate the DJ sees.
+    """
+    kept: list[MixConcept] = []
+    notes: list[str] = []
+    for concept in concepts:
+        clone_of = next(
+            (k for k in kept if _jaccard_ids(concept.track_ids, k.track_ids) >= _CLONE_JACCARD),
+            None,
+        )
+        if clone_of is None:
+            kept.append(concept)
+            continue
+        overlap = len(set(concept.track_ids) & set(clone_of.track_ids))
+        notes.append(
+            f"**Dropped**: '{concept.title}' — same set as '{clone_of.title}' "
+            f"({overlap}/{len(set(concept.track_ids))} tracks shared)"
+        )
+    return kept, notes
+
+
+def _jaccard_ids(a: list[str], b: list[str]) -> float:
+    """Track-id overlap of two selections: |A∩B| / |A∪B|. Two empty lists score 0.0.
+
+    Mirrors ``directions._jaccard`` but floors the empty-vs-empty case at 0.0 rather
+    than 1.0: there, two empty pools are a contract violation worth treating as
+    identical; here a concept with no resolvable tracks is already a hard finding and
+    must not drag another empty concept out of the field as a "clone" of it.
+    """
+    sa, sb = set(a), set(b)
+    union = len(sa | sb)
+    if not union:
+        return 0.0
+    return len(sa & sb) / union
 
 
 def _cross_concept_distinctiveness_warnings(concepts: list[MixConcept]) -> list[str]:
@@ -1488,6 +1606,11 @@ def validate_stage2_output(
         if name_warning is not None:
             warnings.append(name_warning)
 
+        # Mix-title register: the title must stand alone as the name of a mix.
+        register_warning = _register_warning(concept)
+        if register_warning is not None:
+            warnings.append(register_warning)
+
     # Cross-concept distinctiveness — runs after per-concept checks so the warning surfaces
     # alongside the per-concept ones, not as a separate report section.
     warnings.extend(_cross_concept_distinctiveness_warnings(concepts))
@@ -1640,14 +1763,21 @@ The "mood" value must be a SHORT phrase — 12 words maximum. It is a character 
 the full thesis belongs in the report, not the mood field.
 
 Give each concept a short, evocative name (2–4 words max) — not the pool name from Stage 1. \
-NAME CRAFT: names come from technique, not vocabulary. Any example name printed anywhere in these \
-instructions is ALREADY TAKEN — never reuse, echo, or recombine its words ("Warm Gravity", "Committed \
-Floor", "Orbital Descent" are all burned, and bad besides: the generic [Adjective][Noun] mood pattern \
-is banned entirely). Hard rules across this whole response: no two names may share a distinctive word; \
+REGISTER — this is the hard constraint, before any question of technique: the title must read as the \
+name of a released mix, the kind of thing printed on a sleeve or sitting at the top of a SoundCloud \
+page. A self-contained noun phrase in title case. It must survive being said out loud, alone, with no \
+context: "Fault Lines", "Future Riddims". It is NOT a sentence fragment, NOT an unfinished phrase, NOT \
+a first-person aside or overheard line, NOT initials or private shorthand, NOT a caption on a moment. \
+If the title needs the report next to it to make sense as a name, it is the wrong title. \
+NAME CRAFT: within that register, names come from technique, not vocabulary. Any example name printed \
+anywhere in these instructions is ALREADY TAKEN — never reuse, echo, or recombine its words ("Warm \
+Gravity", "Committed Floor", "Orbital Descent", "Fault Lines" and "Future Riddims" are all burned). \
+Reaching for a tired mood adjective bolted to an abstract noun ("Warm Gravity") is the failure to avoid \
+— not the two-word noun phrase itself, which is the target shape. Hard rules across this whole response: \
+no two names may share a distinctive word; \
 use the "[Word] & [Word]" shape at most once; at most ONE name may be lifted from a track title, artist, \
 or label in its own track list — and it must be twisted, not quoted verbatim. Use a different naming \
-technique for every concept in the response. A good name sounds like something you'd text a friend at \
-2am about last night, not a poetry-collection title. \
+technique for every concept in the response. \
 The name should make someone curious, not nod in recognition. \
 Add a "name_reason" field: one short sentence (max 15 words) explaining WHY this specific title was \
 chosen — what literal or metaphorical quality in the track list earns the name. This must reference \
@@ -3589,8 +3719,7 @@ async def stage2_curate_and_report(
                     f"Curate this run as a study of the pinned direction. From the following {n} candidate "
                     f"canvases, produce 3 or 4 distinct concepts total: two or three contrasting readings of "
                     f"the [PINNED DIRECTION] canvas, plus at most one concept from another canvas as contrast. "
-                    f"Each concept must draw only from tracks within a single canvas.\n\n"
-                    + "\n\n".join(sections)
+                    f"Each concept must draw only from tracks within a single canvas.\n\n" + "\n\n".join(sections)
                 )
             else:
                 prompt = (
@@ -3662,6 +3791,18 @@ async def stage2_curate_and_report(
         file=sys.stderr,
     )
     report = ""
+
+    # Clone drop: the prompt asks Stage 2 to collapse concepts that would feel like the
+    # same set, and validation warns when two share >50% of their tracks, but neither
+    # stops a near-identical pair from shipping. Runs before the re-roll, critique, and
+    # report passes so a duplicate costs no further tokens and never reaches the DJ.
+    # Genre mode only — playlist mode returns deliberate variants of one completion and
+    # picks a single winner downstream, so overlap there is the design, not a defect.
+    clone_notes: list[str] = []
+    if playlist_name is None and curated:
+        curated, clone_notes = _drop_clone_concepts(curated)
+        for note in clone_notes:
+            print(f"Stage 2 clone drop: {note}", file=sys.stderr)
 
     # Title re-roll (#75): prompt pressure alone cannot stop exact title repeats —
     # live runs kept reproducing forbidden titles verbatim for the same canvases.
@@ -3829,6 +3970,9 @@ async def stage2_curate_and_report(
 
     if warnings:
         report += "\n\n---\n\nSHORTFALL WARNINGS\n" + "\n".join(warnings)
+
+    if clone_notes:
+        report += "\n\n---\n\n" + "\n".join(clone_notes)
 
     if rename_notes:
         report += "\n\n---\n\n" + "\n".join(rename_notes)

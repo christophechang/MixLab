@@ -22,6 +22,7 @@ from mixlab.clustering import (
     build_mix_canvas,
     camelot_distance,
     count_outlier_genres,
+    drop_overlapping_canvases,
     filter_by_bpm_range,
     group_by_genre,
     partition_bpm_pools,
@@ -35,7 +36,14 @@ from mixlab.clustering import (
 )
 from mixlab.config import CustomGenre
 from mixlab.history import ConceptHistory
-from mixlab.models import MixConcept, Track
+from mixlab.models import (
+    CanvasRoleCandidates,
+    CanvasScore,
+    ContrastAssets,
+    MixCanvas,
+    MixConcept,
+    Track,
+)
 
 _GENRE_MAP = {
     "drum_and_bass": ["Drum & Bass", "DnB"],
@@ -2605,3 +2613,95 @@ def test_select_canvases_debug_risk_in_output(capsys: pytest.CaptureFixture[str]
     select_canvases(canvases, ConceptHistory(), n=2, risk="high", debug=True)  # type: ignore[arg-type]
     captured = capsys.readouterr()
     assert "risk=high" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# drop_overlapping_canvases — cross-family redundancy guard
+# ---------------------------------------------------------------------------
+
+
+def _pool_canvas(title: str, core_ids: list[str], bridge_ids: list[str] | None = None) -> MixCanvas:
+    """A minimal canvas identified by its title and the track ids it offers Stage 2."""
+    return MixCanvas(
+        canvas_id=title,
+        genre="Drum & Bass",
+        bpm_range=(168.0, 176.0),
+        dominant_bpm=172.0,
+        dominant_camelot="4A",
+        core_track_ids=core_ids,
+        bridge_track_ids=bridge_ids or [],
+        wildcard_track_ids=[],
+        roles=CanvasRoleCandidates(opener=[], groove_locker=[], builder=[], pivot=[], peak=[], closer=[]),
+        contrast=ContrastAssets(
+            vocal_moments=[],
+            texture_changes=[],
+            darker_turns=[],
+            brighter_lifts=[],
+            lower_pressure_resets=[],
+        ),
+        risk_notes=[],
+        score=CanvasScore(),
+        source_concept=MixConcept(title=title, mood="dark", track_ids=core_ids),
+    )
+
+
+def test_drop_overlapping_canvases_distinct_pools_all_survive() -> None:
+    kept = [_pool_canvas("direction", [f"D{i}" for i in range(10)])]
+    candidates = [_pool_canvas("classic", [f"C{i}" for i in range(10)])]
+
+    survivors, notes = drop_overlapping_canvases(kept, candidates)
+
+    assert [c.canvas_id for c in survivors] == ["classic"]
+    assert notes == []
+
+
+def test_drop_overlapping_canvases_identical_pool_dropped_with_note() -> None:
+    ids = [f"T{i}" for i in range(10)]
+    kept = [_pool_canvas("direction", ids)]
+    candidates = [_pool_canvas("classic", list(ids))]
+
+    survivors, notes = drop_overlapping_canvases(kept, candidates)
+
+    assert survivors == []
+    assert len(notes) == 1
+    assert "classic" in notes[0] and "direction" in notes[0]
+    assert "10/10 tracks" in notes[0]
+
+
+def test_drop_overlapping_canvases_overlap_below_threshold_survives() -> None:
+    """Half a shared pool is normal canvas overlap, not a duplicate."""
+    kept = [_pool_canvas("direction", [f"T{i}" for i in range(10)])]
+    candidates = [_pool_canvas("classic", [f"T{i}" for i in range(5)] + [f"X{i}" for i in range(5)])]
+
+    survivors, notes = drop_overlapping_canvases(kept, candidates)
+
+    assert [c.canvas_id for c in survivors] == ["classic"]
+    assert notes == []
+
+
+def test_drop_overlapping_canvases_compares_candidates_against_each_other() -> None:
+    """Two mutually redundant candidates cannot both survive an empty kept list."""
+    ids = [f"T{i}" for i in range(10)]
+    survivors, notes = drop_overlapping_canvases([], [_pool_canvas("first", ids), _pool_canvas("second", list(ids))])
+
+    assert [c.canvas_id for c in survivors] == ["first"]
+    assert len(notes) == 1
+
+
+def test_drop_overlapping_canvases_counts_bridge_and_wildcard_pools() -> None:
+    """Overlap is measured over everything a canvas offers, not just its core."""
+    kept = [_pool_canvas("direction", [f"T{i}" for i in range(5)], bridge_ids=[f"T{i}" for i in range(5, 10)])]
+    candidates = [_pool_canvas("classic", [f"T{i}" for i in range(5, 10)], bridge_ids=[f"T{i}" for i in range(5)])]
+
+    survivors, notes = drop_overlapping_canvases(kept, candidates)
+
+    assert survivors == []
+    assert len(notes) == 1
+
+
+def test_drop_overlapping_canvases_never_mutates_kept() -> None:
+    ids = [f"T{i}" for i in range(10)]
+    kept = [_pool_canvas("direction", ids)]
+    drop_overlapping_canvases(kept, [_pool_canvas("classic", list(ids))])
+
+    assert [c.canvas_id for c in kept] == ["direction"]

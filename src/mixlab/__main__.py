@@ -25,6 +25,7 @@ from mixlab.clustering import (
     build_mix_canvas,
     count_available_by_genre,
     count_outlier_genres,
+    drop_overlapping_canvases,
     partition_bpm_pools,
     partition_outliers,
     partition_pool,
@@ -812,6 +813,25 @@ def _run_map_cli(mode: str, seed: int, out: Path | None) -> int:
     return 0
 
 
+def _distinct_from(
+    candidates: list[MixCanvas],
+    kept: list[MixCanvas],
+    *,
+    limit: int,
+) -> list[MixCanvas]:
+    """First ``limit`` candidates whose pools are distinct from ``kept`` and each other.
+
+    Thin run-layer wrapper over :func:`drop_overlapping_canvases` that also logs each
+    drop. Classic canvases and concept directions are selected by separate machinery
+    that dedupes only within its own family, so without this a direction and a BPM
+    stratum built from the same records both reach Stage 2 and both get written up.
+    """
+    survivors, notes = drop_overlapping_canvases(kept, candidates)
+    for note in notes:
+        print(note, file=sys.stderr)
+    return survivors[:limit]
+
+
 async def run(
     genre: str | None,
     export_dir: Path | None,
@@ -1134,8 +1154,11 @@ async def run(
     if pinned_canvas is not None:
         # A pinned run is a study of the chosen direction (quality over quantity —
         # operator call, 2026-08-08): Stage 2 produces contrasting readings of the
-        # pinned canvas, so only one classic canvas rides along as contrast.
-        classic_selected = select_canvases(all_canvases, history, n=1, mode=mode, risk=risk, debug=debug)
+        # pinned canvas, so only one classic canvas rides along as contrast. Two are
+        # selected so the overlap guard can reject a contrast canvas that is really
+        # the pinned direction again; a run with no distinct contrast ships without one.
+        classic_selected = select_canvases(all_canvases, history, n=2, mode=mode, risk=risk, debug=debug)
+        classic_selected = _distinct_from(classic_selected, [pinned_canvas], limit=1)
         selected_canvases = classic_selected + [pinned_canvas]
     elif directions == "off":
         selected_canvases = select_canvases(all_canvases, history, mode=mode, risk=risk, debug=debug)
@@ -1162,7 +1185,14 @@ async def run(
             collection=direction_collection,
         )
         classic_n = max(3, 6 - len(direction_canvases))
-        classic_selected = select_canvases(all_canvases, history, n=classic_n, mode=mode, risk=risk, debug=debug)
+        # Over-select by the number of directions so the overlap guard can reject a
+        # classic canvas that duplicates a direction without shrinking the field below
+        # classic_n. select_canvases has no exclusion parameter but returns its picks
+        # in preference order, so taking the first classic_n survivors is its own choice.
+        classic_pool = select_canvases(
+            all_canvases, history, n=classic_n + len(direction_canvases), mode=mode, risk=risk, debug=debug
+        )
+        classic_selected = _distinct_from(classic_pool, direction_canvases, limit=classic_n)
         selected_canvases = classic_selected + direction_canvases
     if not selected_canvases:
         print("No canvases could be built — collection may be out of sync.", file=sys.stderr)
