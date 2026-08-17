@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.18.2 — 2026-08-17
+
 - **A run can no longer deliver the same set twice.** Two concepts came back from
   Stage 2 with the same tracks and different names, and every layer that could have
   caught it was advisory: the prompt asks the model to collapse concepts that would
