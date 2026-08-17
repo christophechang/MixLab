@@ -1132,6 +1132,61 @@ def select_canvases(
     return picked
 
 
+# Pool overlap at or above which two canvases offer Stage 2 the same material and
+# would invite two readings of one crate. Matches ``directions._DEDUPE_JACCARD`` —
+# the threshold the direction field already dedupes itself at — so mixed mode holds
+# classic-vs-direction pairs to the same standard directions hold each other to.
+CANVAS_OVERLAP_JACCARD: float = 0.6
+
+
+def _canvas_pool_ids(canvas: MixCanvas) -> frozenset[str]:
+    """Every track id a canvas offers Stage 2: core, bridge, and wildcard together."""
+    return frozenset(canvas.core_track_ids) | frozenset(canvas.bridge_track_ids) | frozenset(canvas.wildcard_track_ids)
+
+
+def drop_overlapping_canvases(
+    kept: list[MixCanvas],
+    candidates: list[MixCanvas],
+    *,
+    threshold: float = CANVAS_OVERLAP_JACCARD,
+) -> tuple[list[MixCanvas], list[str]]:
+    """Return the ``candidates`` whose pools clear ``threshold`` against ``kept`` and each other.
+
+    Mixed mode composes its field from two independently-selected families — classic
+    canvases from :func:`select_canvases` and concept directions from
+    ``generate_directions`` — each of which dedupes only within itself. A direction
+    built over the same stratum as a picked classic canvas therefore reaches Stage 2
+    as a second canvas made of the same records, and Stage 2 dutifully writes two
+    concepts from it. This is the cross-family check neither family can make alone.
+
+    ``kept`` is authoritative and returned untouched; candidates are walked in order
+    and each survivor joins the comparison set, so two mutually-redundant candidates
+    cannot both survive. Returns ``(survivors, notes)`` — one note per drop, naming
+    both canvases and the overlap, so a dropped direction is visible in the run log.
+    """
+    comparison = [(c, _canvas_pool_ids(c)) for c in kept]
+    survivors: list[MixCanvas] = []
+    notes: list[str] = []
+    for candidate in candidates:
+        ids = _canvas_pool_ids(candidate)
+        redundant_with: MixCanvas | None = None
+        for other, other_ids in comparison:
+            union = len(ids | other_ids)
+            if union and len(ids & other_ids) / union >= threshold:
+                redundant_with = other
+                break
+        if redundant_with is None:
+            survivors.append(candidate)
+            comparison.append((candidate, ids))
+            continue
+        overlap = len(ids & _canvas_pool_ids(redundant_with))
+        notes.append(
+            f"Dropped canvas '{candidate.source_concept.title}' — pool overlaps "
+            f"'{redundant_with.source_concept.title}' by {overlap}/{len(ids)} tracks"
+        )
+    return survivors, notes
+
+
 # ---------------------------------------------------------------------------
 # Deterministic Stage 1 — partition_pool()
 # ---------------------------------------------------------------------------
