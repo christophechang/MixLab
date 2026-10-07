@@ -28,6 +28,7 @@ CUSTOM_GENRES: dict[str, CustomGenre] = {
             "uk_garage",
             "uk_bass",
             "breakbeat",
+            "hardcore",
             "hip_hop",
             "jungle",
             "drum_and_bass",
@@ -42,8 +43,10 @@ GENRE_MAP: dict[str, list[str]] = {
     "house": ["House", "Deep House", "Deep house", "Tech House", "Classic House", "Afro House", "Minimal / Deep Tech"],
     "uk_garage": ["UK Garage", "UKG", "2-Step", "Uk Garage", "UK Garage / Bassline"],
     "uk_bass": ["UK Bass", "Uk Bass"],
-    "jungle": ["Jungle", "Ragga Jungle", "Rave"],
-    "breakbeat": ["Breakbeat", "Breaks", "Nu Skool Breaks", "Hardcore"],
+    "jungle": ["Jungle", "Ragga Jungle"],
+    "breakbeat": ["Breakbeat", "Breaks", "Nu Skool Breaks"],
+    # Its own pool, not part of breakbeat: a breakbeat run must not pull in hardcore.
+    "hardcore": ["Hardcore", "Rave", "Hardcore, Jungle & Early House"],
     "electronica": ["Electronica", "Electronic", "Downtempo", "Electronica / Downtempo", "Trip Hop"],
     "hip_hop": [
         "Hip Hop",
