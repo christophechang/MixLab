@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.18.4 — 2026-10-07
+
 - **Hardcore is its own genre, no longer part of breakbeat.** `--genre breakbeat`
   pulled in every track tagged `Hardcore`, about one in seven of the breakbeat pool,
   so breakbeat mixes came back with hardcore in them. The new `hardcore` genre holds
