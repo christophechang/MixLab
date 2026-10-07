@@ -2955,13 +2955,33 @@ def _qualifies_for_revision(concept: MixConcept, warnings: list[str]) -> bool:
     """Revision trigger (#55): >=2 hard findings, a weak critique, or a needs_attention
     critique carrying a suggested substitution. A single pinned-direction key-tracks
     finding also qualifies — the operator explicitly pinned those tracks, so one
-    missing pillar is already a broken promise, not a marginal defect."""
+    missing pillar is already a broken promise, not a marginal defect. So does a single
+    unbridged regime crossing — no DJ can ride that hop, so one is already unplayable."""
     hard = _hard_findings_for_concept(concept, warnings)
     if len(hard) >= 2:
         return True
     if any("direction key tracks missing" in w for w in hard):
         return True
+    if any("unbridged regime crossing" in w for w in hard):
+        return True
     return _critique_triggers_revision(concept)
+
+
+def _revision_finding_count(findings: list[str]) -> int:
+    """Count hard findings so one defect counts once: a ``BPM jump`` on a pair that
+    also has an ``unbridged regime crossing`` finding is the same unplayable hop and is
+    skipped. Without this, re-annotating the crossing as risky (which suppresses only
+    the BPM jump) would read as an improvement."""
+    crossings = [f for f in findings if "unbridged regime crossing" in f]
+    count = 0
+    for f in findings:
+        if "BPM jump" in f:
+            m = re.search(r"BPM jump [\d.]+ between (.*)$", f)
+            # Trailing " — " delimits the pair so title "W" can't match "Wonder".
+            if m is not None and any(f" between {m.group(1)} — " in c for c in crossings):
+                continue
+        count += 1
+    return count
 
 
 def _revision_findings(concept: MixConcept, warnings: list[str]) -> list[str]:
@@ -3087,7 +3107,8 @@ async def revise_concepts(
 
     for _idx, concept, _canvas, _findings, hard in plans:
         print(
-            f"Revision: {concept.title} — {len(hard)} hard finding(s), requesting minimal repair...",
+            f"Revision: {concept.title} — {_revision_finding_count(hard)} hard finding(s), "
+            "requesting minimal repair...",
             file=sys.stderr,
         )
 
@@ -3122,8 +3143,18 @@ async def revise_concepts(
             genre=genre,
             risk=risk,
         )
-        n_before = len(hard)
-        n_after = len(_hard_findings_for_concept(revised, revised_warnings))
+        revised_hard = _hard_findings_for_concept(revised, revised_warnings)
+        # A repair must never add an unplayable hop, even while fixing other findings.
+        crossings_before = sum(1 for w in hard if "unbridged regime crossing" in w)
+        crossings_after = sum(1 for w in revised_hard if "unbridged regime crossing" in w)
+        if crossings_after > crossings_before:
+            print(
+                f"Revision: {original.title} — revision added a regime crossing — keeping original",
+                file=sys.stderr,
+            )
+            continue
+        n_before = _revision_finding_count(hard)
+        n_after = _revision_finding_count(revised_hard)
         if n_after >= n_before:
             print(f"Revision: {original.title} — revision did not improve — keeping original", file=sys.stderr)
             continue
@@ -3131,7 +3162,7 @@ async def revise_concepts(
         # ACCEPT: swap in the revised tracklist and note it in the report.
         revised_concepts[idx] = revised
         before_kinds = _finding_kinds(hard)
-        after_kinds = _finding_kinds(_hard_findings_for_concept(revised, revised_warnings))
+        after_kinds = _finding_kinds(revised_hard)
         resolved_kinds = sorted(before_kinds - after_kinds) or sorted(before_kinds)
 
         # Regenerate this concept's prose section so it describes the revised order.
