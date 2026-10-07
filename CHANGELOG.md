@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v1.18.4 — 2026-10-07
+
+- **Hardcore is its own genre, no longer part of breakbeat.** `--genre breakbeat`
+  pulled in every track tagged `Hardcore`, about one in seven of the breakbeat pool,
+  so breakbeat mixes came back with hardcore in them. The new `hardcore` genre holds
+  the `Hardcore`, `Rave` (moved out of `jungle`) and `Hardcore, Jungle & Early House`
+  tags. Breakbeat, jungle and the `140` and `170` pools no longer include them;
+  `traverse` still covers every standard genre, hardcore included.
+
 ## v1.18.3 — 2026-10-07
 
 - **An unplayable tempo hop now gets repaired, not just reported.** A breakbeat run

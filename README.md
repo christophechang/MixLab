@@ -481,10 +481,11 @@ Pass the label (left column) to `--genre`. The right column shows the Rekordbox 
 |---|---|
 | `house` | House, Deep House, Tech House, Classic House, Afro House, Minimal / Deep Tech |
 | `drum_and_bass` | Drum & Bass, DnB, Liquid DnB, Jungle/Drum'n'bass |
-| `breakbeat` | Breakbeat, Breaks, Nu Skool Breaks, Hardcore |
+| `breakbeat` | Breakbeat, Breaks, Nu Skool Breaks |
+| `hardcore` | Hardcore, Rave, `Hardcore, Jungle & Early House` |
 | `electronica` | Electronica, Electronic, Downtempo, Trip Hop |
 | `hip_hop` | Hip Hop, Funk, Hip Hop/Rap, Soul/Funk/Jazz |
-| `jungle` | Jungle, Ragga Jungle, Rave |
+| `jungle` | Jungle, Ragga Jungle |
 | `uk_bass` | UK Bass |
 | `progressive` | Progressive |
 | `disco` | Disco |
