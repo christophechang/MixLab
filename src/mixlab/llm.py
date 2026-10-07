@@ -1678,9 +1678,11 @@ arrangement data is unavailable, use knowledge of the artist's production style 
 and flag any transition where mix execution is likely to be tight or forced. Name the risk in Assumptions.
 - When choosing between a track that sustains momentum and a track that is more interesting on paper, \
 prefer momentum. Novelty that breaks the groove is a mistake regardless of how well it reads.
-- Allow bold moves — larger key jumps, tempo pivots — when they serve the narrative. For any Camelot jump \
-of 3+ positions, name the specific mechanism that makes it survivable — BPM lock, rhythmic momentum, a \
-slow intro that buys the room time to adjust, or an emotional peak that earns the disruption. The \
+- Allow bold moves — larger key jumps, tempo pivots — when they serve the narrative. A tempo pivot of \
+more than 12 BPM must be a ratio bridge (halftime/double/3:4/4:3); an `is_risky` annotation does not \
+excuse an unbridged one. For any Camelot jump of 3+ positions, name the specific mechanism that makes \
+it survivable — BPM lock, rhythmic momentum, a slow intro that buys the room time to adjust, or an \
+emotional peak that earns the disruption. The \
 placement of harmonic risk matters as much as the risk itself — a large key jump works best when the \
 floor is already committed and moving, mid-to-late set at or approaching peak energy.
 - Do NOT optimise only for BPM and key. Optimise for flow, tension, release, memorability, and emotional \
@@ -2901,12 +2903,16 @@ _HARD_FINDING_KIND_LABELS: tuple[tuple[str, str], ...] = (
 )
 
 _STAGE2_REVISION_SYSTEM = """\
-You curated this concept moments ago. It has specific, named findings — BPM jumps, key jumps, an \
-arc that does not match the sequence, played/denylisted/missing tracks, or risky transitions with no \
-justification. Perform a MINIMAL repair. Do NOT regenerate the concept.
+You curated this concept moments ago. It has specific, named findings — BPM jumps, key jumps, \
+tempo-regime crossings with no ratio bridge, an arc that does not match the sequence, \
+played/denylisted/missing tracks, or risky transitions with no justification. Perform a MINIMAL \
+repair. Do NOT regenerate the concept.
 
 Rules:
 - Resolve the named findings by swapping, reordering, or dropping tracks — nothing more.
+- Adjacent tracks more than 12 BPM apart must form a halftime, double, 3:4 or 4:3 ratio within ±6%. \
+Fix a crossing by reordering, swapping or dropping tracks; re-annotating the transition as risky does \
+not fix it.
 - Draw any replacement tracks only from the candidate pool shown below.
 - Preserve the title, the thesis (name_reason), and the overall character/mood. Do not rewrite them.
 - Keep the concept coherent: the opener still opens, the closer still closes, the arc still reads.
