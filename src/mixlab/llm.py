@@ -1507,23 +1507,27 @@ def validate_stage2_output(
                         f"{group.label} — missing: {names or 'unresolvable ids'}"
                     )
 
-        # Tempo-regime crossings must ride pitch-locked ratio bridges. For genre_traverse
-        # concepts (#82) an unbridged crossing is a HARD structural error (marker in
-        # _HARD_FINDING_MARKERS triggers self-revision) and is never suppressed by
-        # justified_risk. Non-traverse concepts get a warn-only variant inside the jump
-        # loop below, where the justified_risk/threshold context avoids duplicate noise.
+        # Tempo-regime crossings must ride pitch-locked ratio bridges. For every concept
+        # an unbridged crossing (> 12 BPM, no halftime/double/3:4/4:3 ratio) is a HARD
+        # structural error (marker in _HARD_FINDING_MARKERS triggers self-revision) and is
+        # never suppressed by justified_risk — an is_risky annotation can't make a hop
+        # rideable. genre_traverse concepts (#82) keep their traverse-specific suffix.
+        # Unknown tempo (0 BPM) on either side is not a crossing.
         is_traverse_concept = thread_canvas is not None and thread_canvas.direction_type == "genre_traverse"
-        if is_traverse_concept:
-            for i in range(len(seq) - 1):
-                a, b = seq[i], seq[i + 1]
-                if abs(a.bpm - b.bpm) > 12.0:
-                    rel, _stretch = tempo_relation(a.bpm, b.bpm)
-                    if rel == "incompatible":
-                        warnings.append(
-                            f"{label} unbridged regime crossing {a.bpm:g}→{b.bpm:g} between "
-                            f"{a.artist} — {a.title} and {b.artist} — {b.title} — "
-                            "traverse hops must be ratio bridges"
-                        )
+        crossing_hint = (
+            "traverse hops must be ratio bridges"
+            if is_traverse_concept
+            else "reorder or swap so the tempo move is a ratio bridge"
+        )
+        for i in range(len(seq) - 1):
+            a, b = seq[i], seq[i + 1]
+            if a.bpm > 0 and b.bpm > 0 and abs(a.bpm - b.bpm) > 12.0:
+                rel, _stretch = tempo_relation(a.bpm, b.bpm)
+                if rel == "incompatible":
+                    warnings.append(
+                        f"{label} unbridged regime crossing {a.bpm:g}→{b.bpm:g} between "
+                        f"{a.artist} — {a.title} and {b.artist} — {b.title} — {crossing_hint}"
+                    )
 
         # Suppress BPM/Camelot jump warnings when the corresponding transition is annotated
         # as a justified risk (is_risky=True with non-empty risk_type). Mirrors the
@@ -1543,17 +1547,6 @@ def validate_stage2_output(
             if bpm_jump > bpm_thr and not justified_risk and not is_ratio_move:
                 warnings.append(
                     f"{label} BPM jump {bpm_jump:.1f} between {a.artist} — {a.title} and {b.artist} — {b.title}"
-                )
-            # Regime-crossing awareness for non-traverse concepts (live finding: other
-            # direction types build traverse-shaped sets over cross-genre pools). Fires
-            # only when the raw BPM-jump warning above did NOT cover the pair — i.e. the
-            # jump was annotated as a justified risk, or sits in the 12→threshold window —
-            # so a crossing never draws two warnings. Warn-only by design: the wording
-            # must not contain any _HARD_FINDING_MARKERS substring.
-            elif not is_traverse_concept and bpm_jump > 12.0 and rel == "incompatible":
-                warnings.append(
-                    f"{label} regime crossing without a ratio bridge {a.bpm:g}→{b.bpm:g} between "
-                    f"{a.artist} — {a.title} and {b.artist} — {b.title} — plan a cut or a reorder"
                 )
             cam_dist = camelot_distance(a.camelot_key, b.camelot_key)
             if cam_dist > cam_thr and not justified_risk:
@@ -1685,9 +1678,11 @@ arrangement data is unavailable, use knowledge of the artist's production style 
 and flag any transition where mix execution is likely to be tight or forced. Name the risk in Assumptions.
 - When choosing between a track that sustains momentum and a track that is more interesting on paper, \
 prefer momentum. Novelty that breaks the groove is a mistake regardless of how well it reads.
-- Allow bold moves — larger key jumps, tempo pivots — when they serve the narrative. For any Camelot jump \
-of 3+ positions, name the specific mechanism that makes it survivable — BPM lock, rhythmic momentum, a \
-slow intro that buys the room time to adjust, or an emotional peak that earns the disruption. The \
+- Allow bold moves — larger key jumps, tempo pivots — when they serve the narrative. A tempo pivot of \
+more than 12 BPM must be a ratio bridge (halftime/double/3:4/4:3); an `is_risky` annotation does not \
+excuse an unbridged one. For any Camelot jump of 3+ positions, name the specific mechanism that makes \
+it survivable — BPM lock, rhythmic momentum, a slow intro that buys the room time to adjust, or an \
+emotional peak that earns the disruption. The \
 placement of harmonic risk matters as much as the risk itself — a large key jump works best when the \
 floor is already committed and moving, mid-to-late set at or approaching peak energy.
 - Do NOT optimise only for BPM and key. Optimise for flow, tension, release, memorability, and emotional \
@@ -2908,12 +2903,16 @@ _HARD_FINDING_KIND_LABELS: tuple[tuple[str, str], ...] = (
 )
 
 _STAGE2_REVISION_SYSTEM = """\
-You curated this concept moments ago. It has specific, named findings — BPM jumps, key jumps, an \
-arc that does not match the sequence, played/denylisted/missing tracks, or risky transitions with no \
-justification. Perform a MINIMAL repair. Do NOT regenerate the concept.
+You curated this concept moments ago. It has specific, named findings — BPM jumps, key jumps, \
+tempo-regime crossings with no ratio bridge, an arc that does not match the sequence, \
+played/denylisted/missing tracks, or risky transitions with no justification. Perform a MINIMAL \
+repair. Do NOT regenerate the concept.
 
 Rules:
 - Resolve the named findings by swapping, reordering, or dropping tracks — nothing more.
+- Adjacent tracks more than 12 BPM apart must form a halftime, double, 3:4 or 4:3 ratio within ±6%. \
+Fix a crossing by reordering, swapping or dropping tracks; re-annotating the transition as risky does \
+not fix it.
 - Draw any replacement tracks only from the candidate pool shown below.
 - Preserve the title, the thesis (name_reason), and the overall character/mood. Do not rewrite them.
 - Keep the concept coherent: the opener still opens, the closer still closes, the arc still reads.
@@ -2962,13 +2961,33 @@ def _qualifies_for_revision(concept: MixConcept, warnings: list[str]) -> bool:
     """Revision trigger (#55): >=2 hard findings, a weak critique, or a needs_attention
     critique carrying a suggested substitution. A single pinned-direction key-tracks
     finding also qualifies — the operator explicitly pinned those tracks, so one
-    missing pillar is already a broken promise, not a marginal defect."""
+    missing pillar is already a broken promise, not a marginal defect. So does a single
+    unbridged regime crossing — no DJ can ride that hop, so one is already unplayable."""
     hard = _hard_findings_for_concept(concept, warnings)
     if len(hard) >= 2:
         return True
     if any("direction key tracks missing" in w for w in hard):
         return True
+    if any("unbridged regime crossing" in w for w in hard):
+        return True
     return _critique_triggers_revision(concept)
+
+
+def _revision_finding_count(findings: list[str]) -> int:
+    """Count hard findings so one defect counts once: a ``BPM jump`` on a pair that
+    also has an ``unbridged regime crossing`` finding is the same unplayable hop and is
+    skipped. Without this, re-annotating the crossing as risky (which suppresses only
+    the BPM jump) would read as an improvement."""
+    crossings = [f for f in findings if "unbridged regime crossing" in f]
+    count = 0
+    for f in findings:
+        if "BPM jump" in f:
+            m = re.search(r"BPM jump [\d.]+ between (.*)$", f)
+            # Trailing " — " delimits the pair so title "W" can't match "Wonder".
+            if m is not None and any(f" between {m.group(1)} — " in c for c in crossings):
+                continue
+        count += 1
+    return count
 
 
 def _revision_findings(concept: MixConcept, warnings: list[str]) -> list[str]:
@@ -3094,7 +3113,8 @@ async def revise_concepts(
 
     for _idx, concept, _canvas, _findings, hard in plans:
         print(
-            f"Revision: {concept.title} — {len(hard)} hard finding(s), requesting minimal repair...",
+            f"Revision: {concept.title} — {_revision_finding_count(hard)} hard finding(s), "
+            "requesting minimal repair...",
             file=sys.stderr,
         )
 
@@ -3129,8 +3149,18 @@ async def revise_concepts(
             genre=genre,
             risk=risk,
         )
-        n_before = len(hard)
-        n_after = len(_hard_findings_for_concept(revised, revised_warnings))
+        revised_hard = _hard_findings_for_concept(revised, revised_warnings)
+        # A repair must never add an unplayable hop, even while fixing other findings.
+        crossings_before = sum(1 for w in hard if "unbridged regime crossing" in w)
+        crossings_after = sum(1 for w in revised_hard if "unbridged regime crossing" in w)
+        if crossings_after > crossings_before:
+            print(
+                f"Revision: {original.title} — revision added a regime crossing — keeping original",
+                file=sys.stderr,
+            )
+            continue
+        n_before = _revision_finding_count(hard)
+        n_after = _revision_finding_count(revised_hard)
         if n_after >= n_before:
             print(f"Revision: {original.title} — revision did not improve — keeping original", file=sys.stderr)
             continue
@@ -3138,7 +3168,7 @@ async def revise_concepts(
         # ACCEPT: swap in the revised tracklist and note it in the report.
         revised_concepts[idx] = revised
         before_kinds = _finding_kinds(hard)
-        after_kinds = _finding_kinds(_hard_findings_for_concept(revised, revised_warnings))
+        after_kinds = _finding_kinds(revised_hard)
         resolved_kinds = sorted(before_kinds - after_kinds) or sorted(before_kinds)
 
         # Regenerate this concept's prose section so it describes the revised order.
