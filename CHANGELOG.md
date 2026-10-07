@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **An unplayable tempo hop now gets repaired, not just reported.** A breakbeat run
+  shipped a set going 129 → 156 → 141 — neither move can be beatmatched — because
+  marking a transition `is_risky` silenced the BPM-jump finding, and the crossing
+  check outside `genre_traverse` concepts was warn-only. An unbridged regime crossing
+  (adjacent tracks more than 12 BPM apart with no halftime, double, 3:4 or 4:3 ratio
+  within ±6%) is now a hard finding for every concept at every risk level, and no
+  annotation excuses it. A single crossing is enough to trigger the bounded
+  self-revision pass; a revision is rejected if it adds a crossing, and a BPM jump on
+  the same pair counts once with its crossing, so re-labelling the hop as risky no
+  longer passes as a fix. The curation and revision prompts state the same rule.
+  Real ratio bridges such as 168 → 126 (3:4) stay allowed.
+
 ## v1.18.2 — 2026-08-17
 
 - **A run can no longer deliver the same set twice.** Two concepts came back from
