@@ -5117,7 +5117,7 @@ def test_validate_stage2_output_traverse_incompatible_crossing_warns() -> None:
     assert any("unbridged regime crossing" in w and "77" in w and "174" in w for w in warnings)
 
 
-def test_validate_stage2_output_non_traverse_incompatible_crossing_silent() -> None:
+def test_validate_stage2_output_non_traverse_incompatible_crossing_hard() -> None:
     from mixlab.llm import validate_stage2_output
 
     lib = {
@@ -5128,7 +5128,7 @@ def test_validate_stage2_output_non_traverse_incompatible_crossing_silent() -> N
     concept = MixConcept(title="Genre traverse: low -> high", mood="journey", track_ids=ids)
     canvas = _direction_canvas(ids, direction_type="")
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
-    assert not any("unbridged regime crossing" in w for w in warnings)
+    assert any("unbridged regime crossing" in w for w in warnings)
 
 
 def test_validate_stage2_output_traverse_valid_ratio_crossing_silent() -> None:
@@ -5175,10 +5175,10 @@ def test_hard_finding_markers_includes_unbridged_regime_crossing() -> None:
     assert "unbridged regime crossing" in _HARD_FINDING_MARKERS
 
 
-def test_validate_stage2_output_non_traverse_justified_crossing_warns_softly() -> None:
+def test_validate_stage2_output_non_traverse_justified_crossing_is_hard() -> None:
     """Live finding: fresh_crate/artist_thread concepts build traverse-shaped sets over
-    cross-genre pools. A justified-risk annotation suppresses the BPM-jump warning, so
-    the warn-only regime-crossing variant must fire instead — never both."""
+    cross-genre pools. A justified-risk annotation still suppresses the BPM-jump warning,
+    but it cannot excuse an unbridged crossing — the hard finding fires for every concept."""
     from mixlab.llm import validate_stage2_output
 
     lib = {
@@ -5194,14 +5194,15 @@ def test_validate_stage2_output_non_traverse_justified_crossing_warns_softly() -
     )
     canvas = _direction_canvas(ids, direction_type="fresh_crate")
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
-    assert any("regime crossing without a ratio bridge" in w for w in warnings)
+    assert any("unbridged regime crossing" in w for w in warnings)
+    assert not any("regime crossing without a ratio bridge" in w for w in warnings)
     assert not any("BPM jump" in w for w in warnings)
-    assert not any("unbridged regime crossing" in w for w in warnings)  # hard variant is traverse-only
 
 
-def test_validate_stage2_output_non_traverse_unjustified_crossing_no_duplicate() -> None:
-    """An unjustified big jump already draws the BPM-jump warning — the crossing
-    variant must stay silent so one pair never draws two warnings."""
+def test_validate_stage2_output_non_traverse_unjustified_crossing_draws_jump_and_crossing() -> None:
+    """An unannotated crossing over the risk threshold draws both the BPM-jump warning
+    and the hard crossing finding, exactly as traverse concepts do. Revision counting
+    dedups the pair (_revision_finding_count), not the validator."""
     from mixlab.llm import validate_stage2_output
 
     lib = {
@@ -5213,12 +5214,13 @@ def test_validate_stage2_output_non_traverse_unjustified_crossing_no_duplicate()
     canvas = _direction_canvas(ids, direction_type="fresh_crate")
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
     assert any("BPM jump" in w for w in warnings)
+    assert any("unbridged regime crossing" in w for w in warnings)
     assert not any("regime crossing without a ratio bridge" in w for w in warnings)
 
 
 def test_validate_stage2_output_non_traverse_subthreshold_incompatible_crossing_warns() -> None:
     """A 13-BPM incompatible crossing sits under the BPM-jump threshold (15 at medium)
-    — the crossing variant is the only signal for it."""
+    — the hard crossing finding is the only signal for it."""
     from mixlab.llm import validate_stage2_output
     from mixlab.transitions import tempo_relation
 
@@ -5233,18 +5235,53 @@ def test_validate_stage2_output_non_traverse_subthreshold_incompatible_crossing_
     concept = MixConcept(title="Wide crate", mood="m", track_ids=ids)
     canvas = _direction_canvas(ids, direction_type="fresh_crate")
     warnings = validate_stage2_output([concept], [canvas], lib, set(), set())
-    assert any("regime crossing without a ratio bridge" in w for w in warnings)
+    assert any("unbridged regime crossing" in w for w in warnings)
     assert not any("BPM jump" in w for w in warnings)
 
 
-def test_non_traverse_crossing_warning_contains_no_hard_markers() -> None:
+def _two_track_crossing_warnings(a_bpm: float, b_bpm: float) -> list[str]:
+    from mixlab.llm import validate_stage2_output
+
+    lib = {
+        "1": Track(track_id="1", artist="A", title="First", bpm=a_bpm, camelot_key="8A", genre="breaks"),
+        "2": Track(track_id="2", artist="B", title="Second", bpm=b_bpm, camelot_key="8A", genre="breaks"),
+    }
+    ids = ["1", "2"]
+    concept = MixConcept(title="Wide crate", mood="m", track_ids=ids)
+    canvas = _direction_canvas(ids, direction_type="fresh_crate")
+    return validate_stage2_output([concept], [canvas], lib, set(), set())
+
+
+def test_validate_stage2_output_non_traverse_crossing_wording_carries_hard_marker() -> None:
     from mixlab.llm import _HARD_FINDING_MARKERS
 
-    sample = (
-        "[Wide crate] regime crossing without a ratio bridge 77→174 between "
-        "A — Slow One and B — Fast One — plan a cut or a reorder"
-    )
-    assert not any(marker in sample for marker in _HARD_FINDING_MARKERS)
+    warnings = _two_track_crossing_warnings(129.0, 156.0)
+    crossing = [w for w in warnings if "unbridged regime crossing" in w]
+    assert len(crossing) == 1
+    assert "reorder or swap so the tempo move is a ratio bridge" in crossing[0]
+    assert "traverse hops must be ratio bridges" not in crossing[0]
+    assert any(marker in crossing[0] for marker in _HARD_FINDING_MARKERS)
+
+
+def test_validate_stage2_output_three_four_bridge_not_a_crossing() -> None:
+    warnings = _two_track_crossing_warnings(168.0, 126.0)
+    assert not any("unbridged regime crossing" in w for w in warnings)
+    assert not any("BPM jump" in w for w in warnings)
+
+
+def test_validate_stage2_output_twelve_bpm_incompatible_move_not_a_crossing() -> None:
+    """Pins the accepted 12 BPM floor: 129 -> 141 is incompatible but not a crossing."""
+    from mixlab.transitions import tempo_relation
+
+    rel, _stretch = tempo_relation(129.0, 141.0)
+    assert rel == "incompatible"
+    warnings = _two_track_crossing_warnings(129.0, 141.0)
+    assert not any("unbridged regime crossing" in w for w in warnings)
+
+
+def test_validate_stage2_output_zero_bpm_pair_not_a_crossing() -> None:
+    warnings = _two_track_crossing_warnings(0.0, 150.0)
+    assert not any("unbridged regime crossing" in w for w in warnings)
 
 
 # ---------------------------------------------------------------------------

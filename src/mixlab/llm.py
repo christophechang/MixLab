@@ -1507,23 +1507,27 @@ def validate_stage2_output(
                         f"{group.label} — missing: {names or 'unresolvable ids'}"
                     )
 
-        # Tempo-regime crossings must ride pitch-locked ratio bridges. For genre_traverse
-        # concepts (#82) an unbridged crossing is a HARD structural error (marker in
-        # _HARD_FINDING_MARKERS triggers self-revision) and is never suppressed by
-        # justified_risk. Non-traverse concepts get a warn-only variant inside the jump
-        # loop below, where the justified_risk/threshold context avoids duplicate noise.
+        # Tempo-regime crossings must ride pitch-locked ratio bridges. For every concept
+        # an unbridged crossing (> 12 BPM, no halftime/double/3:4/4:3 ratio) is a HARD
+        # structural error (marker in _HARD_FINDING_MARKERS triggers self-revision) and is
+        # never suppressed by justified_risk — an is_risky annotation can't make a hop
+        # rideable. genre_traverse concepts (#82) keep their traverse-specific suffix.
+        # Unknown tempo (0 BPM) on either side is not a crossing.
         is_traverse_concept = thread_canvas is not None and thread_canvas.direction_type == "genre_traverse"
-        if is_traverse_concept:
-            for i in range(len(seq) - 1):
-                a, b = seq[i], seq[i + 1]
-                if abs(a.bpm - b.bpm) > 12.0:
-                    rel, _stretch = tempo_relation(a.bpm, b.bpm)
-                    if rel == "incompatible":
-                        warnings.append(
-                            f"{label} unbridged regime crossing {a.bpm:g}→{b.bpm:g} between "
-                            f"{a.artist} — {a.title} and {b.artist} — {b.title} — "
-                            "traverse hops must be ratio bridges"
-                        )
+        crossing_hint = (
+            "traverse hops must be ratio bridges"
+            if is_traverse_concept
+            else "reorder or swap so the tempo move is a ratio bridge"
+        )
+        for i in range(len(seq) - 1):
+            a, b = seq[i], seq[i + 1]
+            if a.bpm > 0 and b.bpm > 0 and abs(a.bpm - b.bpm) > 12.0:
+                rel, _stretch = tempo_relation(a.bpm, b.bpm)
+                if rel == "incompatible":
+                    warnings.append(
+                        f"{label} unbridged regime crossing {a.bpm:g}→{b.bpm:g} between "
+                        f"{a.artist} — {a.title} and {b.artist} — {b.title} — {crossing_hint}"
+                    )
 
         # Suppress BPM/Camelot jump warnings when the corresponding transition is annotated
         # as a justified risk (is_risky=True with non-empty risk_type). Mirrors the
@@ -1543,17 +1547,6 @@ def validate_stage2_output(
             if bpm_jump > bpm_thr and not justified_risk and not is_ratio_move:
                 warnings.append(
                     f"{label} BPM jump {bpm_jump:.1f} between {a.artist} — {a.title} and {b.artist} — {b.title}"
-                )
-            # Regime-crossing awareness for non-traverse concepts (live finding: other
-            # direction types build traverse-shaped sets over cross-genre pools). Fires
-            # only when the raw BPM-jump warning above did NOT cover the pair — i.e. the
-            # jump was annotated as a justified risk, or sits in the 12→threshold window —
-            # so a crossing never draws two warnings. Warn-only by design: the wording
-            # must not contain any _HARD_FINDING_MARKERS substring.
-            elif not is_traverse_concept and bpm_jump > 12.0 and rel == "incompatible":
-                warnings.append(
-                    f"{label} regime crossing without a ratio bridge {a.bpm:g}→{b.bpm:g} between "
-                    f"{a.artist} — {a.title} and {b.artist} — {b.title} — plan a cut or a reorder"
                 )
             cam_dist = camelot_distance(a.camelot_key, b.camelot_key)
             if cam_dist > cam_thr and not justified_risk:
