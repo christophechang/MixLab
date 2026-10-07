@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.18.3 — 2026-10-07
+
 - **An unplayable tempo hop now gets repaired, not just reported.** A breakbeat run
   shipped a set going 129 → 156 → 141 — neither move can be beatmatched — because
   marking a transition `is_risky` silenced the BPM-jump finding, and the crossing
