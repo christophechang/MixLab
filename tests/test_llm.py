@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Literal, cast, get_args
 
@@ -2753,6 +2754,116 @@ async def test_stage2_playlist_mode_returns_winner_first_with_labeled_titles(
     ) in report
     assert "Alternative strategies considered: practical" not in report
     assert "Selection tolerance: low." in report
+
+
+def test_positional_playlist_strategies_all_labels_returns_none() -> None:
+    from mixlab.llm import _positional_playlist_strategies
+
+    concepts = [
+        MixConcept(title="B", mood="Balanced", track_ids=["1"]),
+        MixConcept(title="P", mood="practical", track_ids=["1"]),
+        MixConcept(title="A", mood="adventurous", track_ids=["1"]),
+    ]
+
+    assert _positional_playlist_strategies(concepts) is None
+
+
+def test_positional_playlist_strategies_descriptive_moods_assigns_by_order() -> None:
+    """Sonnet 5.5 writes a descriptive mood instead of the strategy label — fall back to the prompt's order."""
+    from mixlab.llm import _positional_playlist_strategies
+
+    concepts = [
+        MixConcept(title="P", mood="Melodic progressive lift, controlled climb", track_ids=["1"]),
+        MixConcept(title="B", mood="balanced", track_ids=["1"]),
+        MixConcept(title="A", mood="Stranger, more spacious", track_ids=["1"]),
+    ]
+
+    assert _positional_playlist_strategies(concepts) == ["practical", "balanced", "adventurous"]
+
+
+def test_positional_playlist_strategies_extra_concepts_fall_back_to_practical() -> None:
+    from mixlab.llm import _positional_playlist_strategies
+
+    concepts = [MixConcept(title=str(i), mood="moody", track_ids=["1"]) for i in range(4)]
+
+    assert _positional_playlist_strategies(concepts) == ["practical", "balanced", "adventurous", "practical"]
+
+
+@respx.mock
+async def test_stage2_playlist_mode_descriptive_moods_keeps_three_variants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Descriptive moods used to collapse every variant to "practical" and dedup down to one."""
+    from mixlab.llm import stage2_curate_and_report
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    payload = json.dumps(
+        [
+            {"title": "Practical Set", "mood": "Clean restrained groove", "track_ids": ["1", "2", "3", "4"]},
+            {"title": "Balanced Set", "mood": "Warmer melodic arc", "track_ids": ["1", "2", "3", "4"]},
+            {"title": "Adventurous Set", "mood": "Strange spacious detours", "track_ids": ["1", "2", "3", "4"]},
+        ]
+    )
+
+    def make_report(title: str) -> str:
+        return f"CONCEPT: {title}\n\nThesis.\n\nTrack order:\n1. A1 — T1 [8A · 121.0] | Role: opener | Why: opens | Risk: none"
+
+    respx.post(_ANTHROPIC_URL).mock(
+        side_effect=[
+            Response(200, json=_anthropic_response(payload)),
+            Response(200, json=_anthropic_response(make_report("Practical Set"))),
+            Response(200, json=_anthropic_response(make_report("Balanced Set"))),
+            Response(200, json=_anthropic_response(make_report("Adventurous Set"))),
+        ]
+    )
+
+    def fake_score_variant(
+        concept: MixConcept,
+        seed_track_ids: list[str],
+        intent_brief: object,
+        tracks_by_id: dict[str, Track],
+    ) -> CompletionVariant:
+        del seed_track_ids, intent_brief, tracks_by_id
+        score = {"Practical Set": 0.9, "Balanced Set": 0.7, "Adventurous Set": 0.6}[concept.title]
+        # Mirror the real scorer: an unrecognised mood maps to "practical".
+        return CompletionVariant(
+            strategy="practical",
+            concept=concept,
+            anchor_retention_rate=1.0,
+            practicality_score=DJPracticalityScore(score, score, score, score),
+        )
+
+    monkeypatch.setattr("mixlab.llm._score_variant", fake_score_variant)
+
+    shortlists = [MixConcept(title="Pool A", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=120.0 + i, camelot_key="8A", genre="House")
+        for i in range(1, 5)
+    }
+
+    concepts, _ = await stage2_curate_and_report(
+        shortlists,
+        tracks_by_id,
+        playlist_name="Monday Night",
+        seed_ids=frozenset({"1", "2", "3", "4"}),
+        seed_track_ids=["1", "2", "3", "4"],
+    )
+
+    assert [concept.title for concept in concepts] == [
+        "WINNER - PRACTICAL - Practical Set",
+        "BALANCED - Balanced Set",
+        "ADVENTUROUS - Adventurous Set",
+    ]
+
+
+def test_stage2_name_reason_example_references_its_title() -> None:
+    """The rule says name_reason must reference the title; the example has to model that, not contradict it."""
+    from mixlab.llm import _STAGE2_SYSTEM
+
+    match = re.search(r'Example: if title is "([^"]+)", write\s+"([^"]+)"', _STAGE2_SYSTEM)
+    assert match is not None
+    title, example = match.groups()
+    assert title in example
 
 
 # ---------------------------------------------------------------------------
