@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.19.3 — 2026-10-15
+
 - **The engine now builds as a container image.** A `Dockerfile` (Python 3.12 slim,
   pinned by digest, non-root, `linux/amd64`) and `.github/workflows/image.yml` build
   it on every push and pull request and check that its default command runs. When a
