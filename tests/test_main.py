@@ -1984,3 +1984,51 @@ def test_main_direction_spec_ignored_in_playlist_mode_with_note(
     err = capsys.readouterr().err
     assert "--direction-spec ignored in playlist mode" in err
     assert playlist_mock.await_args is not None
+
+
+# ---------------------------------------------------------------------------
+# _write_html_report — same-day reruns must not overwrite earlier reports
+# ---------------------------------------------------------------------------
+
+
+def test_write_html_report_first_run_uses_plain_dated_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.__main__ import _write_html_report
+
+    monkeypatch.setenv("MIXLAB_REPORT_DIR", str(tmp_path))
+
+    path = _write_html_report("<html>1</html>", "house", None)
+
+    assert path.name.startswith("mixlab-house-")
+    assert not path.stem.endswith("-2")
+    assert path.read_text(encoding="utf-8") == "<html>1</html>"
+
+
+def test_write_html_report_same_day_rerun_gets_numbered_suffix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixlab.__main__ import _write_html_report
+
+    monkeypatch.setenv("MIXLAB_REPORT_DIR", str(tmp_path))
+
+    first = _write_html_report("<html>1</html>", None, "WIP/Electronica")
+    second = _write_html_report("<html>2</html>", None, "WIP/Electronica")
+    third = _write_html_report("<html>3</html>", None, "WIP/Electronica")
+
+    assert second == first.with_name(f"{first.stem}-2.html")
+    assert third == first.with_name(f"{first.stem}-3.html")
+    assert first.read_text(encoding="utf-8") == "<html>1</html>"
+    assert second.read_text(encoding="utf-8") == "<html>2</html>"
+
+
+def test_write_html_report_existing_json_summary_counts_as_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run summary shares the HTML stem, so a leftover JSON must not be overwritten either."""
+    from mixlab.__main__ import _write_html_report
+
+    monkeypatch.setenv("MIXLAB_REPORT_DIR", str(tmp_path))
+    first = _write_html_report("<html>1</html>", "house", None)
+    first.unlink()
+    first.with_suffix(".json").write_text("{}", encoding="utf-8")
+
+    second = _write_html_report("<html>2</html>", "house", None)
+
+    assert second == first.with_name(f"{first.stem}-2.html")

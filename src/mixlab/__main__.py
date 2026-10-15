@@ -111,12 +111,19 @@ def _write_html_report(html: str, genre: str | None, playlist_name: str | None) 
     """Write the standalone HTML report to disk and return its path (#45).
 
     Directory defaults to ``output/reports`` and can be overridden with
-    ``MIXLAB_REPORT_DIR``. The filename embeds the genre/playlist slug and today's date.
+    ``MIXLAB_REPORT_DIR``. The filename embeds the genre/playlist slug and today's date; a
+    same-day rerun gets a ``-2``, ``-3``… suffix rather than overwriting the earlier report.
+    The run summary JSON shares the stem, so a leftover JSON also counts as taken.
     """
     report_dir = Path(os.environ.get("MIXLAB_REPORT_DIR", "output/reports"))
     report_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.date.today().isoformat()
-    path = report_dir / report_filename(genre, playlist_name, today)
+    base = report_dir / report_filename(genre, playlist_name, today)
+    path = base
+    n = 2
+    while path.exists() or path.with_suffix(".json").exists():
+        path = base.with_name(f"{base.stem}-{n}.html")
+        n += 1
     path.write_text(html, encoding="utf-8")
     print(f"HTML report: {path}")
     return path
