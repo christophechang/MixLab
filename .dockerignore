@@ -1,0 +1,22 @@
+# Keep local state and secrets out of the build context. The CI build runs from a clean
+# checkout; this guards local builds, where the working tree holds a real .env.
+.env
+.env.*
+!.env.example
+output/
+import/
+build/
+.mixlab/
+.mixlab_genres.json
+.venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.claude/
+.git/
+tests/
+docs/
+.DS_Store
+__pycache__/
+*.py[cod]
+*.egg-info/

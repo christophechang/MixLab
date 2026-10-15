@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **The engine now builds as a container image.** A `Dockerfile` (Python 3.12 slim,
+  pinned by digest, non-root, `linux/amd64`) and `.github/workflows/image.yml` build
+  it on every push and pull request and check that its default command runs. When a
+  release is published, the workflow pushes `ghcr.io/christophechang/mixlab:<tag>`
+  and appends the image digest to the release notes. The default command only
+  prints a one-line start-up probe; the image has no entrypoint, and the engine's
+  behaviour is unchanged.
+
 ## v1.19.2 — 2026-10-15
 
 - **A same-day rerun no longer overwrites the earlier report.** Report files are
