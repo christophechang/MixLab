@@ -301,6 +301,62 @@ def test_process_one_happy_cycle_completes_and_syncs(tmp_path: Path) -> None:
     sync_up_mock.assert_called_once_with(remote, history_path)
 
 
+def test_summarise_anthropic_usage_aggregates_per_model() -> None:
+    stderr = (
+        "Anthropic usage: model=claude-sonnet-5-5 in=1000 out=200\n"
+        "some other line\n"
+        "Anthropic usage: model=claude-sonnet-5-5 in=500 out=300\n"
+        "Anthropic usage: model=claude-sonnet-4-6 in=10 out=20\n"
+    )
+
+    assert worker_module._summarise_anthropic_usage(stderr) == [
+        "Anthropic usage: model=claude-sonnet-5-5 calls=2 in=1500 out=500",
+        "Anthropic usage: model=claude-sonnet-4-6 calls=1 in=10 out=20",
+    ]
+
+
+def test_summarise_anthropic_usage_no_usage_lines_returns_empty() -> None:
+    assert worker_module._summarise_anthropic_usage("Stage 1 seed: 1\nnothing here\n") == []
+
+
+def test_summarise_anthropic_usage_missing_counts_count_as_zero() -> None:
+    stderr = "Anthropic usage: model=claude-sonnet-5-5 in=None out=None\n"
+
+    assert worker_module._summarise_anthropic_usage(stderr) == [
+        "Anthropic usage: model=claude-sonnet-5-5 calls=1 in=0 out=0"
+    ]
+
+
+@respx.mock
+def test_process_one_success_logs_anthropic_usage_summary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A successful run's stderr is otherwise discarded — the usage totals must reach the worker log."""
+    remote = _remote()
+    config = _config(tmp_path)
+    manifest = _manifest_dict(flags={"genre": "house"})
+
+    respx.post(_CLAIM_URL).mock(return_value=Response(200, json=manifest))
+    respx.get(f"{_BASE}/api/mixlab/uploads/u1").mock(
+        return_value=Response(200, content=gzip.compress(b"<COLLECTION/>"))
+    )
+    respx.post(f"{_BASE}/api/mixlab/runs/r1/complete").mock(return_value=Response(200))
+
+    stdout = _write_artifacts(tmp_path)
+    stderr = (
+        "Anthropic usage: model=claude-sonnet-5-5 in=1000 out=200\n"
+        "Anthropic usage: model=claude-sonnet-5-5 in=500 out=300\n"
+    )
+
+    with (
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
+        patch("mixlab.worker.sync_up"),
+        patch("mixlab.worker.subprocess.run", return_value=_completed(stdout=stdout, stderr=stderr)),
+    ):
+        assert process_one(remote, config) is True
+
+    out = capsys.readouterr().out
+    assert "run r1: Anthropic usage: model=claude-sonnet-5-5 calls=2 in=1500 out=500" in out
+
+
 def test_resolve_optional_export_absent_line_returns_none(tmp_path: Path) -> None:
     assert _resolve_optional_export("HTML report: x\nRun summary: y\n", tmp_path) is None
 

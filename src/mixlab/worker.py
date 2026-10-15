@@ -21,6 +21,7 @@ unrecognised or ill-typed is rejected before a subprocess is ever spawned.
 from __future__ import annotations
 
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -220,6 +221,27 @@ def _as_text(value: object) -> str:
     return str(value)
 
 
+_USAGE_LINE_RE = re.compile(r"^Anthropic usage: model=(\S+) in=(\S+) out=(\S+)$", re.MULTILINE)
+
+
+def _summarise_anthropic_usage(stderr: str) -> list[str]:
+    """Per-model call count and token totals from the pipeline's ``Anthropic usage:`` lines.
+
+    A successful run's captured output is otherwise discarded, so this is the only record of
+    what the run cost. Counts the API omitted (logged as ``None``) add zero.
+    """
+    totals: dict[str, list[int]] = {}
+    for model, tokens_in, tokens_out in _USAGE_LINE_RE.findall(stderr):
+        calls_in_out = totals.setdefault(model, [0, 0, 0])
+        calls_in_out[0] += 1
+        calls_in_out[1] += int(tokens_in) if tokens_in.isdigit() else 0
+        calls_in_out[2] += int(tokens_out) if tokens_out.isdigit() else 0
+    return [
+        f"Anthropic usage: model={model} calls={calls} in={tokens_in} out={tokens_out}"
+        for model, (calls, tokens_in, tokens_out) in totals.items()
+    ]
+
+
 def _combine_tail(stdout: str, stderr: str) -> str:
     """Last :data:`_TAIL_LEN` chars of the combined stderr+stdout capture."""
     return (stderr + stdout)[-_TAIL_LEN:]
@@ -353,6 +375,8 @@ def _run_claimed(remote: MixLabRemote, config: WorkerConfig, manifest: RunManife
 
     # Step 6 — success. Parse the required artifact paths the pipeline printed, plus the
     # optional playlist export (absent for a run that produced no concepts).
+    for usage_line in _summarise_anthropic_usage(completed.stderr):
+        _log(f"run {run_id}: {usage_line}")
     try:
         summary_path = _resolve_artifact(completed.stdout, _SUMMARY_PREFIX, config.repo_root)
         report_path = _resolve_artifact(completed.stdout, _REPORT_PREFIX, config.repo_root)
