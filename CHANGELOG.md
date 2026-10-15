@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## v1.19.1 — 2026-10-15
+
+- **Playlist completion returns all three variants again on Sonnet 5.5.** The
+  playlist prompt asks for each concept's mood to be the bare strategy label
+  (`practical`, `balanced`, `adventurous`). Sonnet 5.5 writes a descriptive mood
+  instead, which mapped every variant to `practical` and cut the run down to a
+  single variant. When a mood isn't a strategy label, strategies are now
+  assigned by response order, the order the prompt asks for.
+- **The thesis example now names its own title.** The rule says a concept's
+  thesis (`name_reason`) must reference the title, but the example beneath it
+  didn't, and Sonnet 5.5 followed the example.
+- **The worker logs what each run used.** A successful run's output is
+  discarded, so its token usage was lost. The worker log now gets one line per
+  model with the call count and input/output token totals.
+
 ## v1.19.0 — 2026-10-15
 
 - **Stage 2 can run on Claude Sonnet 5.5.** Set `MIXLAB_STAGE2_MODEL=claude-sonnet-5-5`

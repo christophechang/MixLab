@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import datetime
 import json
 import math
@@ -1799,7 +1800,7 @@ Add a "name_reason" field: one short sentence (max 15 words) explaining WHY this
 chosen — what literal or metaphorical quality in the track list earns the name. This must reference \
 the title explicitly and connect it to something audible (BPM arc, key centre, a specific track, \
 a mood shift). Do not repeat the mood description. Example: if title is "Slow Burn", write \
-"Ten tracks of locked 122–127 BPM tension with no release until the final two." Must be verifiable \
+"Slow Burn: ten tracks of locked 122–127 BPM tension, no release until the last two." Must be verifiable \
 from the track list; do not invent.
 The track_ids must be the final selected tracks in play order.
 The "report" value must be a single string (with \\n for line breaks) in this exact format:
@@ -2489,6 +2490,30 @@ def _score_variant(
         anchor_retention_rate=anchor_retention_rate,
         practicality_score=practicality_score,
     )
+
+
+_PLAYLIST_STRATEGY_ORDER: tuple[Literal["practical", "balanced", "adventurous"], ...] = (
+    "practical",
+    "balanced",
+    "adventurous",
+)
+
+
+def _positional_playlist_strategies(
+    concepts: list[MixConcept],
+) -> list[Literal["practical", "balanced", "adventurous"]] | None:
+    """Strategies by response order when any mood isn't a strategy label; None when all are.
+
+    The playlist prompt asks for the three strategies in a fixed order and for the mood to be
+    the bare label. Sonnet 5.5 writes a descriptive mood instead, which used to map every
+    variant to "practical" and dedup the run down to one. Concepts past the third fall back
+    to "practical", as an unlabelled mood always did.
+    """
+    if all(c.mood.lower() in _PLAYLIST_STRATEGY_ORDER for c in concepts):
+        return None
+    return [
+        _PLAYLIST_STRATEGY_ORDER[i] if i < len(_PLAYLIST_STRATEGY_ORDER) else "practical" for i in range(len(concepts))
+    ]
 
 
 _STRATEGY_PRIORITY: dict[str, int] = {"practical": 0, "balanced": 1, "adventurous": 2}
@@ -3900,6 +3925,13 @@ async def stage2_curate_and_report(
 
         # Score all returned concepts
         variants = [_score_variant(c, playlist_seed_track_ids, intent_brief, tracks_by_id) for c in curated]
+        positional = _positional_playlist_strategies(curated)
+        if positional is not None:
+            print(
+                "Stage 2: mood is not a strategy label — assigning strategies by response order",
+                file=sys.stderr,
+            )
+            variants = [dataclasses.replace(v, strategy=s) for v, s in zip(variants, positional, strict=True)]
 
         # Deduplicate: keep only the best-scoring variant per strategy.
         # The LLM sometimes returns multiple concepts with the same mood label.
