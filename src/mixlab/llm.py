@@ -459,6 +459,11 @@ def _stage2_temperature() -> float:
         return 0.5
 
 
+def _is_sonnet_5_5(model: str) -> bool:
+    """Sonnet 5.5 400s on non-default temperature and thinks by default — its payload differs."""
+    return model.startswith("claude-sonnet-5-5")
+
+
 async def _call_anthropic_http(
     api_key: str,
     model: str,
@@ -471,16 +476,20 @@ async def _call_anthropic_http(
     headers = {
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
-        "anthropic-beta": "output-128k-2025-02-19",
         "Content-Type": "application/json",
     }
-    payload = {
+    payload: dict[str, object] = {
         "model": model,
         "max_tokens": max_tokens,
-        "temperature": temperature,
         "system": system,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if _is_sonnet_5_5(model):
+        # between_tools is 5.5's thinking-off setting; it is only valid at effort high or below.
+        payload["thinking"] = {"type": "between_tools"}
+        payload["output_config"] = {"effort": "high"}
+    else:
+        payload["temperature"] = temperature
     async with httpx.AsyncClient(timeout=timeout) as client:
         for attempt in range(1, _ANTHROPIC_MAX_ATTEMPTS + 1):
             is_final_attempt = attempt == _ANTHROPIC_MAX_ATTEMPTS
@@ -516,7 +525,19 @@ async def _call_anthropic_http(
 
             resp.raise_for_status()  # non-retryable 4xx raises immediately
             data = resp.json()
-            text = str(data["content"][0]["text"])
+            usage = data.get("usage") or {}
+            print(
+                f"Anthropic usage: model={model} in={usage.get('input_tokens')} out={usage.get('output_tokens')}",
+                file=sys.stderr,
+            )
+            if data.get("stop_reason") == "refusal":
+                category = (data.get("stop_details") or {}).get("category")
+                print(f"WARNING: Anthropic refused (model={model}, category={category}).", file=sys.stderr)
+                raise RuntimeError(f"Anthropic refused the request (category={category}).")
+            text_block = next((b for b in data["content"] if b.get("type") == "text"), None)
+            if text_block is None:
+                raise RuntimeError("Anthropic response contained no text block.")
+            text = str(text_block["text"])
             if data.get("stop_reason") == "max_tokens":
                 dump_path = _dump_truncated_response(model, max_tokens, text)
                 saved = f" Raw response saved to {dump_path}." if dump_path is not None else ""

@@ -76,7 +76,7 @@ _REPORT_TEXT = "CONCEPT: Dark Rollers\n\nA relentless journey.\n\nTrack order:\n
 
 
 def _anthropic_response(content: str) -> dict[str, object]:
-    return {"content": [{"text": content}], "stop_reason": "end_turn"}
+    return {"content": [{"type": "text", "text": content}], "stop_reason": "end_turn"}
 
 
 def _make_tracks(n: int, genre: str = "Drum & Bass") -> list[Track]:
@@ -178,7 +178,7 @@ async def test_call_anthropic_http_warns_on_truncated_response(
 
     monkeypatch.setenv("MIXLAB_DIAGNOSTICS_DIR", str(tmp_path))
     respx.post(_ANTHROPIC_URL).mock(
-        return_value=Response(200, json={"content": [{"text": "partial"}], "stop_reason": "max_tokens"})
+        return_value=Response(200, json={"content": [{"type": "text", "text": "partial"}], "stop_reason": "max_tokens"})
     )
 
     text = await _call_anthropic_http("key", "model", "system", "prompt", max_tokens=256)
@@ -198,7 +198,9 @@ async def test_call_anthropic_http_truncated_response_dumps_raw_text(
 
     monkeypatch.setenv("MIXLAB_DIAGNOSTICS_DIR", str(tmp_path))
     respx.post(_ANTHROPIC_URL).mock(
-        return_value=Response(200, json={"content": [{"text": '[{"title": "cut off'}], "stop_reason": "max_tokens"})
+        return_value=Response(
+            200, json={"content": [{"type": "text", "text": '[{"title": "cut off'}], "stop_reason": "max_tokens"}
+        )
     )
 
     await _call_anthropic_http("key", "claude-sonnet-4-6", "system", "prompt", max_tokens=256)
@@ -239,7 +241,7 @@ async def test_call_anthropic_http_returns_text_when_dump_write_fails(
     blocked.write_text("occupied", encoding="utf-8")
     monkeypatch.setenv("MIXLAB_DIAGNOSTICS_DIR", str(blocked))
     respx.post(_ANTHROPIC_URL).mock(
-        return_value=Response(200, json={"content": [{"text": "partial"}], "stop_reason": "max_tokens"})
+        return_value=Response(200, json={"content": [{"type": "text", "text": "partial"}], "stop_reason": "max_tokens"})
     )
 
     text = await _call_anthropic_http("key", "model", "system", "prompt", max_tokens=256)
@@ -248,6 +250,151 @@ async def test_call_anthropic_http_returns_text_when_dump_write_fails(
     captured = capsys.readouterr()
     assert "could not write truncation dump" in captured.err
     assert "WARNING: Anthropic response truncated at max_tokens=256" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# _call_anthropic_http — Sonnet 5.5 request shape and response handling
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_call_anthropic_http_sonnet_5_5_omits_temperature() -> None:
+    """Sonnet 5.5 rejects any non-default temperature with a 400."""
+    from mixlab.llm import _call_anthropic_http
+
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response("ok")))
+
+    await _call_anthropic_http("key", "claude-sonnet-5-5", "system", "prompt", temperature=0.3)
+
+    payload = json.loads(route.calls[0].request.content)
+    assert "temperature" not in payload
+
+
+@respx.mock
+async def test_call_anthropic_http_sonnet_5_5_sends_between_tools_thinking_and_high_effort() -> None:
+    """Thinking is on by default on 5.5 — between_tools keeps today's no-thinking token budget."""
+    from mixlab.llm import _call_anthropic_http
+
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response("ok")))
+
+    await _call_anthropic_http("key", "claude-sonnet-5-5", "system", "prompt")
+
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["thinking"] == {"type": "between_tools"}
+    assert payload["output_config"] == {"effort": "high"}
+
+
+@respx.mock
+async def test_call_anthropic_http_sonnet_4_6_sends_temperature_without_thinking() -> None:
+    """Rollback path: 4.6 keeps the exact pre-migration payload."""
+    from mixlab.llm import _call_anthropic_http
+
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response("ok")))
+
+    await _call_anthropic_http("key", "claude-sonnet-4-6", "system", "prompt", temperature=0.3)
+
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["temperature"] == 0.3
+    assert "thinking" not in payload
+    assert "output_config" not in payload
+
+
+@respx.mock
+async def test_call_anthropic_http_omits_output_128k_beta_header() -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response("ok")))
+
+    await _call_anthropic_http("key", "claude-sonnet-4-6", "system", "prompt")
+
+    assert "anthropic-beta" not in route.calls[0].request.headers
+
+
+@respx.mock
+async def test_call_anthropic_http_leading_thinking_block_returns_text_block() -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    respx.post(_ANTHROPIC_URL).mock(
+        return_value=Response(
+            200,
+            json={
+                "content": [
+                    {"type": "thinking", "thinking": "", "signature": "sig"},
+                    {"type": "text", "text": "the answer"},
+                ],
+                "stop_reason": "end_turn",
+            },
+        )
+    )
+
+    text = await _call_anthropic_http("key", "claude-sonnet-5-5", "system", "prompt")
+
+    assert text == "the answer"
+
+
+@respx.mock
+async def test_call_anthropic_http_refusal_raises_and_logs_category(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    monkeypatch.setenv("MIXLAB_DIAGNOSTICS_DIR", str(tmp_path))
+    respx.post(_ANTHROPIC_URL).mock(
+        return_value=Response(
+            200,
+            json={
+                "content": [],
+                "stop_reason": "refusal",
+                "stop_details": {"type": "refusal", "category": "general_harms", "explanation": "declined"},
+            },
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="refused"):
+        await _call_anthropic_http("key", "claude-sonnet-5-5", "system", "prompt")
+
+    err = capsys.readouterr().err
+    assert "refused" in err
+    assert "general_harms" in err
+    assert list(tmp_path.iterdir()) == []
+
+
+@respx.mock
+async def test_call_anthropic_http_no_text_block_raises() -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    respx.post(_ANTHROPIC_URL).mock(
+        return_value=Response(
+            200,
+            json={"content": [{"type": "thinking", "thinking": "", "signature": "sig"}], "stop_reason": "end_turn"},
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="no text block"):
+        await _call_anthropic_http("key", "claude-sonnet-5-5", "system", "prompt")
+
+
+@respx.mock
+async def test_call_anthropic_http_logs_usage_tokens(capsys: pytest.CaptureFixture[str]) -> None:
+    from mixlab.llm import _call_anthropic_http
+
+    respx.post(_ANTHROPIC_URL).mock(
+        return_value=Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1234, "output_tokens": 567},
+            },
+        )
+    )
+
+    await _call_anthropic_http("key", "claude-sonnet-5-5", "system", "prompt")
+
+    err = capsys.readouterr().err
+    assert "Anthropic usage: model=claude-sonnet-5-5 in=1234 out=567" in err
 
 
 @respx.mock
@@ -329,6 +476,24 @@ async def test_stage2_raw_request_carries_env_override_model(monkeypatch: pytest
     assert selection_body["model"] == "claude-opus-9"
     assert selection_body["temperature"] == 0.9
     assert "claude-opus-9" in report
+
+
+@respx.mock
+async def test_stage2_raw_request_sonnet_5_5_omits_temperature_despite_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MIXLAB_STAGE2_TEMPERATURE is ignored on 5.5 rather than turning every selection into a 400."""
+    from mixlab.llm import _call_stage2_raw
+
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-sonnet-5-5")
+    monkeypatch.setenv("MIXLAB_STAGE2_TEMPERATURE", "0.9")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response("[]")))
+
+    await _call_stage2_raw("prompt", "system", "key")
+
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["model"] == "claude-sonnet-5-5"
+    assert "temperature" not in payload
 
 
 # ---------------------------------------------------------------------------
@@ -2858,7 +3023,7 @@ async def test_stage2_report_prompt_includes_declared_arc_type(
     def capture(request: object) -> Response:
         body = json.loads(request.content)  # type: ignore[attr-defined]
         captured.append(body)
-        return Response(200, json={"content": [{"text": "report"}], "stop_reason": "end_turn"})
+        return Response(200, json={"content": [{"type": "text", "text": "report"}], "stop_reason": "end_turn"})
 
     respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
 
@@ -2899,7 +3064,7 @@ async def test_stage2_report_prompt_includes_transition_annotations(
     def capture(request: object) -> Response:
         body = json.loads(request.content)  # type: ignore[attr-defined]
         captured.append(body)
-        return Response(200, json={"content": [{"text": "report"}], "stop_reason": "end_turn"})
+        return Response(200, json={"content": [{"type": "text", "text": "report"}], "stop_reason": "end_turn"})
 
     respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
 
@@ -3112,7 +3277,7 @@ async def test_stage2_curate_naming_seed_injects_lenses_genre_mode_only(
     def capture(request: object) -> Response:
         body = json.loads(request.content)  # type: ignore[attr-defined]
         captured.append(body)
-        return Response(200, json={"content": [{"text": "[]"}], "stop_reason": "end_turn"})
+        return Response(200, json={"content": [{"type": "text", "text": "[]"}], "stop_reason": "end_turn"})
 
     respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
 
@@ -3270,7 +3435,7 @@ async def test_stage2_curate_used_mix_names_appends_forbidden_block(
     def capture(request: object) -> Response:
         body = json.loads(request.content)  # type: ignore[attr-defined]
         captured.append(body)
-        return Response(200, json={"content": [{"text": "[]"}], "stop_reason": "end_turn"})
+        return Response(200, json={"content": [{"type": "text", "text": "[]"}], "stop_reason": "end_turn"})
 
     respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
 
@@ -3375,8 +3540,14 @@ async def test_call_stage2_reports_returns_one_report_per_concept(
 
     respx.post(_ANTHROPIC_URL).mock(
         side_effect=[
-            Response(200, json={"content": [{"text": "CONCEPT: Set A\n\nReport A."}], "stop_reason": "end_turn"}),
-            Response(200, json={"content": [{"text": "CONCEPT: Set B\n\nReport B."}], "stop_reason": "end_turn"}),
+            Response(
+                200,
+                json={"content": [{"type": "text", "text": "CONCEPT: Set A\n\nReport A."}], "stop_reason": "end_turn"},
+            ),
+            Response(
+                200,
+                json={"content": [{"type": "text", "text": "CONCEPT: Set B\n\nReport B."}], "stop_reason": "end_turn"},
+            ),
         ]
     )
 
@@ -3399,7 +3570,9 @@ async def test_call_stage2_reports_fires_parallel_calls(
     def count_calls(request: object) -> Response:
         nonlocal call_count
         call_count += 1
-        return Response(200, json={"content": [{"text": f"Report {call_count}"}], "stop_reason": "end_turn"})
+        return Response(
+            200, json={"content": [{"type": "text", "text": f"Report {call_count}"}], "stop_reason": "end_turn"}
+        )
 
     concepts = [MixConcept(title=f"Set {i}", mood="dark", track_ids=["1", "2", "3", "4"]) for i in range(3)]
     tracks_by_id = {
@@ -6433,7 +6606,7 @@ async def test_stage2_curate_pinned_canvas_appends_pinned_rule(
     def capture(request: object) -> Response:
         body = json.loads(request.content)  # type: ignore[attr-defined]
         captured.append(body)
-        return Response(200, json={"content": [{"text": "[]"}], "stop_reason": "end_turn"})
+        return Response(200, json={"content": [{"type": "text", "text": "[]"}], "stop_reason": "end_turn"})
 
     respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
 
@@ -6462,7 +6635,7 @@ async def test_stage2_curate_unpinned_canvases_omit_pinned_rule(
     def capture(request: object) -> Response:
         body = json.loads(request.content)  # type: ignore[attr-defined]
         captured.append(body)
-        return Response(200, json={"content": [{"text": "[]"}], "stop_reason": "end_turn"})
+        return Response(200, json={"content": [{"type": "text", "text": "[]"}], "stop_reason": "end_turn"})
 
     respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
 
@@ -6561,7 +6734,7 @@ async def test_stage2_curate_pinned_prompt_is_a_direction_study(
     def capture(request: object) -> Response:
         body = json.loads(request.content)  # type: ignore[attr-defined]
         captured.append(body)
-        return Response(200, json={"content": [{"text": "[]"}], "stop_reason": "end_turn"})
+        return Response(200, json={"content": [{"type": "text", "text": "[]"}], "stop_reason": "end_turn"})
 
     respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
 
@@ -6591,7 +6764,7 @@ async def test_stage2_curate_unpinned_prompt_keeps_classic_instruction(
     def capture(request: object) -> Response:
         body = json.loads(request.content)  # type: ignore[attr-defined]
         captured.append(body)
-        return Response(200, json={"content": [{"text": "[]"}], "stop_reason": "end_turn"})
+        return Response(200, json={"content": [{"type": "text", "text": "[]"}], "stop_reason": "end_turn"})
 
     respx.post(_ANTHROPIC_URL).mock(side_effect=capture)
 
