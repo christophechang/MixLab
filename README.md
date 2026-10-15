@@ -86,8 +86,8 @@ cp .env.example .env
 | `DISCORD_GUILD_ID` | No | Discord server ID |
 | `MIXLAB_DISCORD_CHANNEL_ID` | No | Target channel ID (preferred over name) |
 | `MIXLAB_DISCORD_CHANNEL` | No | Target channel name (default: `mix-lab`) |
-| `MIXLAB_STAGE2_MODEL` | No | Override the Stage 2 Anthropic model id (default: `claude-sonnet-4-6`) |
-| `MIXLAB_STAGE2_TEMPERATURE` | No | Override the Stage 2 selection-pass temperature (default: `0.5`) |
+| `MIXLAB_STAGE2_MODEL` | No | Override the Stage 2 Anthropic model id (default: `claude-sonnet-4-6`; `claude-sonnet-5-5` supported) |
+| `MIXLAB_STAGE2_TEMPERATURE` | No | Override the Stage 2 selection-pass temperature (default: `0.5`; ignored on `claude-sonnet-5-5`, which rejects a non-default temperature) |
 
 `ANTHROPIC_API_KEY` is required for Stage 2 report generation. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only. `MIXLAB_STAGE2_MODEL` and `MIXLAB_STAGE2_TEMPERATURE` let you point Stage 2 at a different Anthropic model or tune selection-pass creativity without editing code — both fall back to the current defaults when unset or invalid.
 
@@ -566,7 +566,7 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 
 ### LLM Stage 2 — report generation
 
-- Uses Claude Sonnet 4.6 (Anthropic-only, no fallback provider)
+- Uses Claude Sonnet 4.6 by default, or Claude Sonnet 5.5 via `MIXLAB_STAGE2_MODEL=claude-sonnet-5-5` (Anthropic-only, no fallback provider)
 - Before sequencing, chooses an explicit energy path (Slow Climb, Wave, Plateau With Detail, Double Peak, Front-Loaded Hook, Dark to Light, Light to Dark) and assigns every track to one of five sections: Invitation, Groove Lock, Development, Peak/Payoff, Resolution
 - Assigns each track a role from a focused 10-role vocabulary: opener, groove, hook, pivot, lift, vocal-moment, texture-change, peak, resolution, closer (a track may carry more than one)
 - Each report includes: named energy path, structured `arc_type` field, section breakdown with track numbers, per-track role and transition risk, dedicated opener and closer rationale, excluded tracks with reasons, a `Bold moves:` summary of bridge/wildcard usage with the mechanism that justified each pick, and a one-line `Practicality:` score (bpm_smoothness, harmonic_ratio, risk_justified, overall) for triage

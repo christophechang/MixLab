@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## v1.19.0 — 2026-10-15
+
+- **Stage 2 can run on Claude Sonnet 5.5.** Set `MIXLAB_STAGE2_MODEL=claude-sonnet-5-5`
+  to use it; the default stays `claude-sonnet-4-6`, so unsetting the variable rolls
+  back. Sonnet 5.5 costs $2 / $10 per million tokens against 4.6's $3 / $15. It
+  rejects a non-default temperature, so on 5.5 no temperature is sent and
+  `MIXLAB_STAGE2_TEMPERATURE` is ignored. It also thinks by default, so requests
+  send `thinking: between_tools` to keep today's no-thinking token budget.
+- **Anthropic responses are read more defensively.** The text is taken from the
+  first `text` block rather than the first block, a `refusal` stop is logged with
+  its category and treated as a failed call, and every call logs its input and
+  output token counts to stderr.
+- The obsolete `output-128k-2025-02-19` beta header is no longer sent.
+
 ## v1.18.4 — 2026-10-07
 
 - **Hardcore is its own genre, no longer part of breakbeat.** `--genre breakbeat`
