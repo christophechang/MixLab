@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v1.19.2 — 2026-10-15
+
+- **A same-day rerun no longer overwrites the earlier report.** Report files are
+  named by genre or playlist and date, so a second run of the same genre or
+  playlist on one day replaced the first run's HTML report and JSON summary. A
+  rerun now writes `…-2.html` / `…-2.json`, then `-3`, and so on; the first run
+  of the day keeps the plain dated name.
+
 ## v1.19.1 — 2026-10-15
 
 - **Playlist completion returns all three variants again on Sonnet 5.5.** The
