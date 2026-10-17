@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "source": "MixLab src/mixlab/worker.py _FLAG_SPECS @ 4631880",
+  "description": "The run flags a tenant run may carry: the engine's allow-list (worker.py:97-118) plus the bounds the API enforces at enqueue (spec §3.1). Order is the engine's argv order. valueRules says what a value of each kind must be; for every kind, a null value or an absent key means the flag is not passed (worker.py:137-141). An unknown key, a wrong kind, a value outside allowed, or a value outside min, max or maxLength is refused with 400 before anything is charged. clientSettable false means a request from the browser carrying the key is refused with 400 (spec §3.1: no raw directionSpec or trackPool from the client); only the API may put it on a manifest.",
+  "valueRules": {
+    "str": "a non-empty string (worker.py:143-148); maxLength, when given, counts Unicode code points",
+    "enum": "a string, exactly one of allowed (worker.py:149-151)",
+    "int": "a JSON integer; true and false are refused (worker.py:153-158)",
+    "float": "a JSON number, integer or not; true and false are refused (worker.py:159-164)",
+    "bool": "true or false; true emits the bare CLI flag, false emits nothing (worker.py:165-169)"
+  },
+  "flags": [
+    { "wireKey": "genre", "cliFlag": "--genre", "kind": "str", "clientSettable": true },
+    { "wireKey": "mode", "cliFlag": "--mode", "kind": "enum", "allowed": ["unplayed", "all", "played"], "clientSettable": true },
+    { "wireKey": "risk", "cliFlag": "--risk", "kind": "enum", "allowed": ["low", "medium", "high"], "clientSettable": true },
+    { "wireKey": "directions", "cliFlag": "--directions", "kind": "enum", "allowed": ["mixed", "off", "only"], "clientSettable": true },
+    { "wireKey": "intent", "cliFlag": "--intent", "kind": "str", "maxLength": 1000, "clientSettable": true },
+    { "wireKey": "directionSpec", "cliFlag": "--direction-spec", "kind": "str", "clientSettable": false },
+    { "wireKey": "trackPool", "cliFlag": "--track-pool", "kind": "str", "clientSettable": false },
+    { "wireKey": "mixLength", "cliFlag": "--mix-length", "kind": "int", "min": 45, "max": 180, "clientSettable": true },
+    { "wireKey": "stage1Seed", "cliFlag": "--stage1-seed", "kind": "int", "clientSettable": true },
+    { "wireKey": "resequence", "cliFlag": "--resequence", "kind": "bool", "clientSettable": true },
+    { "wireKey": "deep", "cliFlag": "--deep", "kind": "bool", "clientSettable": true },
+    { "wireKey": "playlist", "cliFlag": "--playlist", "kind": "str", "clientSettable": true },
+    { "wireKey": "minBpm", "cliFlag": "--min-bpm", "kind": "float", "clientSettable": true },
+    { "wireKey": "maxBpm", "cliFlag": "--max-bpm", "kind": "float", "clientSettable": true },
+    { "wireKey": "minYear", "cliFlag": "--min-year", "kind": "int", "clientSettable": true },
+    { "wireKey": "maxYear", "cliFlag": "--max-year", "kind": "int", "clientSettable": true }
+  ]
+}
