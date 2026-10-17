@@ -40,7 +40,7 @@ from typing import Any, Callable, Literal, cast, get_args
 import httpx
 
 from mixlab import modes, sequencer
-from mixlab.clustering import camelot_distance
+from mixlab.clustering import _CAMELOT_RE, camelot_distance
 from mixlab.config import TRACK_COUNT_TARGETS, shortfall_warning
 from mixlab.history import ConceptHistory, format_recent_concepts
 from mixlab.models import (
@@ -347,6 +347,9 @@ async def stage0_intent_brief(
 
     tracks_by_id = {t.track_id: t for t in seed_tracks}
     det_brief = compute_deterministic_intent(seed_track_ids, tracks_by_id)
+
+    if modes.STUB_MODE:
+        return det_brief  # _stub: ahead of both the cascade and MIXLAB_STAGE0_MODEL
 
     if len(seed_tracks) <= 5:
         # Too few tracks for LLM classification to be reliable
@@ -1526,8 +1529,8 @@ async def _reroll_colliding_titles(
     """
     forbidden_keys = {name.strip().casefold() for name in used_mix_names}
     colliding = [c for c in curated if c.title.strip().casefold() in forbidden_keys]
-    if not colliding:
-        return curated, []
+    if not colliding or modes.STUB_MODE:
+        return curated, []  # _stub: the value a failed re-roll returns
 
     listing = "\n".join(f'- old_title: "{c.title}" | mood: {c.mood} | thesis: {c.name_reason}' for c in colliding)
     prompt = f"Concepts to rename:\n{listing}\n\nFORBIDDEN LIST:\n{', '.join(used_mix_names)}"
@@ -3233,6 +3236,8 @@ async def _call_stage2_report_single(
     purpose: Purpose = "report",
 ) -> str:
     """Generate a prose mix report for one curated concept via Anthropic."""
+    if modes.STUB_MODE:
+        return _stub_report(concept)
     track_lines: list[str] = []
     for i, tid in enumerate(concept.track_ids, 1):
         t = tracks_by_id.get(tid)
@@ -3358,6 +3363,8 @@ async def _call_stage2_critique_single(
     stage2_key: str,
 ) -> Critique:
     """Run one critique pass for a single concept. Returns a Critique (never raises)."""
+    if modes.STUB_MODE:
+        return _stub_critique()
     track_lines: list[str] = []
     for i, tid in enumerate(concept.track_ids, 1):
         t = tracks_by_id.get(tid)
@@ -3634,6 +3641,8 @@ async def _call_stage2_revision_single(
 ) -> MixConcept | None:
     """Run one minimal-repair pass for a single concept. Returns the revised concept,
     or None when the call fails or parsing yields nothing (caller keeps the original)."""
+    if modes.STUB_MODE:
+        return None  # _stub: the value a failed repair returns
     track_lines: list[str] = []
     for i, tid in enumerate(concept.track_ids, 1):
         t = tracks_by_id.get(tid)
@@ -3717,8 +3726,8 @@ async def revise_concepts(
     matches the revised track list (best-effort — a regeneration failure keeps the
     pre-revision prose with a disclaimer rather than losing the repair).
     """
-    stage2_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not stage2_key:
+    stage2_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not stage2_key and not modes.STUB_MODE:
         print("Revision skipped — ANTHROPIC_API_KEY is not set.", file=sys.stderr)
         return concepts, report, warnings
 
@@ -4180,6 +4189,81 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
     return signals
 
 
+# ---------------------------------------------------------------------------
+# _stub: MIXLAB_LLM_STUB=1 (M2b spec §6.7, M2b-D24). Zero LLM requests. The selection is
+# deterministic JSON in the real selection's shape, so parsing, validation, the sequencer,
+# the report, the export and the summary run unchanged; every other call returns the value
+# its caller already handles for a failed call. Read at call time through ``modes``.
+# ---------------------------------------------------------------------------
+
+_STUB_MAX_CONCEPTS = 6
+_STUB_CONCEPT_TRACKS = 12
+_STUB_CALL_FAILURE = "MIXLAB_LLM_STUB=1 makes no LLM request"
+
+
+def _stub_camelot_order(track_ids: list[str], tracks_by_id: dict[str, Track]) -> list[str]:
+    """Camelot order, number then letter; tracks without a parseable key last, stable."""
+
+    def key(tid: str) -> tuple[int, int, str]:
+        match = _CAMELOT_RE.match(tracks_by_id[tid].camelot_key)
+        return (0, int(match.group(1)), match.group(2).upper()) if match else (1, 0, "")
+
+    return sorted(track_ids, key=key)
+
+
+def _stub_concept(n: int, label: str, mood: str, track_ids: list[str]) -> dict[str, object]:
+    title = f"Stub {n}: {label}"
+    return {
+        "title": title,
+        "name_reason": f"{title}: {len(track_ids)} tracks chosen without a model call.",
+        "mood": mood,
+        "track_ids": track_ids,
+        "transitions": [],
+    }
+
+
+def _stub_selection_json(
+    pools: list[MixCanvas] | list[MixConcept],
+    tracks_by_id: dict[str, Track],
+    *,
+    playlist_seed_ids: list[str] | None,
+) -> str:
+    """The selection a stub run returns: genre mode one concept per canvas or shortlist, playlist mode three variants."""
+    sources = [(p.source_concept if isinstance(p, MixCanvas) else p) for p in pools]
+    offered = [list(dict.fromkeys(tid for tid in s.track_ids if tid in tracks_by_id)) for s in sources]
+    concepts: list[dict[str, object]] = []
+    if playlist_seed_ids is None:
+        for n, (source, ids) in enumerate(zip(sources[:_STUB_MAX_CONCEPTS], offered, strict=False), 1):
+            ordered = _stub_camelot_order(ids, tracks_by_id)[:_STUB_CONCEPT_TRACKS]
+            concepts.append(_stub_concept(n, source.title, "stub", ordered))
+    elif sources:
+        offered_ids = {tid for ids in offered for tid in ids}
+        admitted = [tid for tid in playlist_seed_ids if tid in offered_ids]
+        seeds = list(dict.fromkeys(admitted))
+        library = [tid for tid in offered[0] if tid not in seeds]
+        ids = seeds + library[: max(_STUB_CONCEPT_TRACKS, len(seeds)) - len(seeds)]
+        if len(ids) < _MIN_CONCEPT_TRACKS:
+            # A locked playlist offers only its seeds: keep a repeated seed so the parser's minimum holds.
+            ids = admitted
+        for n, strategy in enumerate(_PLAYLIST_STRATEGY_ORDER, 1):
+            concepts.append(_stub_concept(n, sources[0].title, strategy, ids))
+    return json.dumps(concepts)
+
+
+def _stub_report(concept: MixConcept) -> str:
+    """The fixed report paragraph a stub run writes for one concept."""
+    return (
+        f"CONCEPT: {concept.title}\n\n"
+        f"{concept.title}: a stub concept of {len(concept.track_ids)} tracks, chosen and written "
+        "without a model call (MIXLAB_LLM_STUB=1)."
+    )
+
+
+def _stub_critique() -> Critique:
+    """The critique's own fallback for a failed call (``_call_stage2_critique_single``)."""
+    return Critique(verdict="needs_attention", single_weakest_moment=f"critique call failed: {_STUB_CALL_FAILURE}")
+
+
 async def stage2_curate_and_report(
     shortlists: list[MixConcept],
     tracks_by_id: dict[str, Track],
@@ -4201,8 +4285,8 @@ async def stage2_curate_and_report(
     mix_length: int | None = None,
     naming_seed: int | None = None,
 ) -> tuple[list[MixConcept], str]:
-    stage2_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not stage2_key:
+    stage2_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not stage2_key and not modes.STUB_MODE:
         raise RuntimeError("ANTHROPIC_API_KEY is not set — Stage 2 curation requires Anthropic.")
     stage2_model_display = _stage2_model()
 
@@ -4449,7 +4533,13 @@ async def stage2_curate_and_report(
     if used_mix_names:
         stage2_system = stage2_system + _forbidden_names_block(used_mix_names)
 
-    raw = await _call_stage2_raw(prompt, stage2_system, stage2_key)
+    if modes.STUB_MODE:
+        stub_seed_ids = (seed_track_ids or sorted(seed_ids or [])) if playlist_name is not None else None
+        raw = _stub_selection_json(
+            canvases if canvases is not None else shortlists, tracks_by_id, playlist_seed_ids=stub_seed_ids
+        )
+    else:
+        raw = await _call_stage2_raw(prompt, stage2_system, stage2_key)
 
     if os.environ.get("MIXLAB_DEBUG_STAGE2"):
         print(f"[DEBUG] Stage 2 raw response (first 2000 chars):\n{raw[:2000]}", file=sys.stderr)
@@ -4558,7 +4648,10 @@ async def stage2_curate_and_report(
                 f"Dropped seeds: {dropped_labels}.\n"
                 "Retry with one concept only. Include as many dropped seeds as possible.\n\n"
             ) + prompt
-            raw = await _call_stage2_raw(retry_prompt, stage2_system, stage2_key)
+            if modes.STUB_MODE:
+                raw = _stub_selection_json(shortlists, tracks_by_id, playlist_seed_ids=playlist_seed_track_ids)
+            else:
+                raw = await _call_stage2_raw(retry_prompt, stage2_system, stage2_key)
             curated = _parse_selection(raw, offered_ids)
             if curated:
                 concept = curated[0]

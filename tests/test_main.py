@@ -2607,3 +2607,164 @@ def test_argparse_error_exits_two_outside_tenant_mode(
 
     assert exc.value.code == 2
     assert "error: argument --intent: expected one argument" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# M2b E2: stub mode (spec §6.7, M2b-D24, A6)
+# ---------------------------------------------------------------------------
+
+_S6_STANDARD = Path(__file__).parent / "fixtures" / "run_contract" / "s6-standard.xml"
+# Every host llm.py calls: Anthropic, then the Stage 0 cascade (_try_groq, _try_gemini, _try_mistral, OpenRouter).
+_LLM_HOSTS = (
+    "api.anthropic.com",
+    "api.groq.com",
+    "generativelanguage.googleapis.com",
+    "api.mistral.ai",
+    "openrouter.ai",
+)
+_PROVIDER_KEYS = ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "MISTRAL_API_KEY", "OPENROUTER_API_KEY")
+_STUB_GENRE_RUN = ["--genre", "techno", "--mode", "all"]
+_STUB_PLAYLIST_RUN = ["--playlist", "Seeds/Four", "--mode", "all"]
+
+
+@pytest.fixture
+def stub_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, modes_restored: None) -> Iterator[None]:
+    """s6-standard.xml under MIXLAB_LLM_STUB=1 and MIXLAB_PLAYED_SOURCE=file; no key, no catalogue; all under tmp_path."""
+    del modes_restored
+    for var in (*_PROVIDER_KEYS, "CATALOG_API_URL", "MIXLAB_STAGE0_MODEL", "MIXLAB_STAGE2_MODEL", "DISCORD_BOT_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("MIXLAB_LLM_STUB", "1")
+    monkeypatch.setenv("MIXLAB_PLAYED_SOURCE", "file")
+    monkeypatch.setenv("MIXLAB_REPORT_DIR", str(tmp_path / "reports"))
+    monkeypatch.setenv("MIXLAB_DIAGNOSTICS_DIR", str(tmp_path / "diagnostics"))
+    importlib.reload(modes)
+    _setup_run(tmp_path, monkeypatch, _S6_STANDARD.read_text(encoding="utf-8"))
+    yield
+    monkeypatch.delenv("MIXLAB_LLM_STUB", raising=False)
+    monkeypatch.delenv("MIXLAB_PLAYED_SOURCE", raising=False)
+    importlib.reload(modes)
+
+
+def _stub_summaries(tmp_path: Path) -> list[dict[str, object]]:
+    """Every summary.json the runs wrote, oldest first."""
+    paths = sorted((tmp_path / "reports").glob("*.json"), key=lambda p: p.stat().st_mtime_ns)
+    return [json.loads(p.read_text(encoding="utf-8")) for p in paths]
+
+
+def _summary_concepts(summary: dict[str, object]) -> list[dict[str, object]]:
+    concepts = summary["concepts"]
+    assert isinstance(concepts, list)
+    return concepts
+
+
+def _concept_track_ids(concept: dict[str, object]) -> list[str]:
+    tracks = concept["tracks"]
+    assert isinstance(tracks, list)
+    return [str(t["id"]) for t in tracks]
+
+
+def _fixture_track_ids() -> set[str]:
+    root = etree.parse(str(_S6_STANDARD)).getroot()
+    return {str(el.get("TrackID")) for el in root.iter("TRACK") if el.get("TrackID")}
+
+
+@pytest.mark.usefixtures("stub_env")
+def test_stub_mode_makes_no_llm_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in _PROVIDER_KEYS:
+        monkeypatch.setenv(var, "test-key")  # keyed: a real run would reach every one of these hosts
+    reroll = AsyncMock(wraps=llm._reroll_colliding_titles)
+    requests: list[httpx.Request] = []
+
+    def refuse(request: httpx.Request) -> Response:
+        requests.append(request)
+        raise AssertionError(f"LLM request in stub mode: {request.url}")
+
+    with respx.mock(assert_all_called=False) as router, patch("mixlab.llm._reroll_colliding_titles", reroll):
+        routes = [router.route(host=host).mock(side_effect=refuse) for host in _LLM_HOSTS]
+        assert _main_outcome(monkeypatch, _STUB_GENRE_RUN) is None  # writes the history
+        assert _main_outcome(monkeypatch, [*_STUB_GENRE_RUN, "--deep"]) is None  # its titles now collide
+        assert _main_outcome(monkeypatch, _STUB_PLAYLIST_RUN) is None
+
+    assert requests == []
+    assert all(not route.called for route in routes)
+    assert len(router.calls) == 0
+    assert llm.RECORDER.calls == []
+    first_title = str(_summary_concepts(_stub_summaries(tmp_path)[0])[0]["title"])
+    assert reroll.await_count == 1  # the second genre run only: the first had no history
+    assert reroll.await_args is not None
+    assert first_title in reroll.await_args.args[1]
+    assert len(load_history(tmp_path / "history.json").runs) == 2
+
+
+@pytest.mark.usefixtures("stub_env")
+def test_stub_mode_single_tag_pool_of_twelve_delivers_twelve_track_concept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _main_outcome(monkeypatch, _STUB_GENRE_RUN) is None
+
+    (summary,) = _stub_summaries(tmp_path)
+    (concept,) = _summary_concepts(summary)
+    track_ids = _concept_track_ids(concept)
+    assert len(track_ids) == 12
+    assert set(track_ids) <= _fixture_track_ids()
+    assert len(set(track_ids)) == 12
+    transitions = concept["transitions"]
+    assert isinstance(transitions, list)
+    assert len(transitions) == 11
+    assert concept["mood"] == "stub"
+    assert str(concept["title"]).startswith("Stub 1: ")
+    assert str(concept["title"]) in str(concept["thesis"])
+    tracks = concept["tracks"]
+    assert isinstance(tracks, list)
+    keys = [str(t["camelotKey"]) for t in tracks]
+    parsed = [(int(k[:-1]), k[-1].upper()) for k in keys]
+    assert parsed == sorted(parsed)  # Camelot order, number then letter
+    assert llm.RECORDER.calls == []
+
+
+@pytest.mark.usefixtures("stub_env")
+def test_stub_mode_playlist_keeps_every_seed_and_emits_three_variants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _main_outcome(monkeypatch, _STUB_PLAYLIST_RUN) is None
+
+    (summary,) = _stub_summaries(tmp_path)
+    concepts = _summary_concepts(summary)
+    assert [str(c["title"]).split(" - ")[0] for c in concepts] == ["WINNER", "BALANCED", "ADVENTUROUS"]
+    assert str(concepts[0]["title"]).startswith("WINNER - PRACTICAL - Stub 1: ")
+    assert [c["mood"] for c in concepts] == ["practical", "balanced", "adventurous"]
+    seeds = ["8", "9", "18"]  # Seeds/Four is 8, 9, 9, 18
+    for concept in concepts:
+        track_ids = _concept_track_ids(concept)
+        assert track_ids[: len(seeds)] == seeds
+        assert len(track_ids) == len(set(track_ids))
+        assert len(seeds) < len(track_ids) <= 12
+    assert llm.RECORDER.calls == []
+
+
+@pytest.mark.usefixtures("stub_env")
+def test_stub_mode_writes_all_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    export_dir = tmp_path / "export"
+
+    assert _main_outcome(monkeypatch, [*_STUB_GENRE_RUN, "--export", str(export_dir)]) is None
+
+    (html,) = sorted((tmp_path / "reports").glob("*.html"))
+    (summary,) = _stub_summaries(tmp_path)
+    assert summary["schemaVersion"] == 1
+    (concept,) = _summary_concepts(summary)
+    assert str(concept["title"]) in html.read_text(encoding="utf-8")
+    root = etree.parse(str(export_dir / "rekordbox_export.xml")).getroot()
+    playlist_names = [str(node.get("Name")) for node in root.iter("NODE")]
+    assert any(str(concept["title"]) in name for name in playlist_names)
+    assert len(load_history(tmp_path / "history.json").runs) == 1
+
+
+@pytest.mark.usefixtures("stub_env")
+def test_stub_mode_locked_playlist_keeps_repeated_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A locked playlist offers only its seeds; Seeds/Four is 8, 9, 9, 18, and three distinct ids
+    # would fall below the parser's four-track minimum.
+    assert _main_outcome(monkeypatch, [*_STUB_PLAYLIST_RUN, "--locked"]) is None
+
+    (summary,) = _stub_summaries(tmp_path)
+    for concept in _summary_concepts(summary):
+        assert sorted(_concept_track_ids(concept)) == ["18", "8", "9", "9"]

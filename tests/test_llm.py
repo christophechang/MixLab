@@ -8611,3 +8611,110 @@ async def test_stage0_budget_exceeded_propagates(monkeypatch: pytest.MonkeyPatch
     route.mock(return_value=Response(402, json=_error_body("billing_error", "pay")))
     with pytest.raises(llm.ProviderCapError):
         await _stage0()
+
+
+# ---------------------------------------------------------------------------
+# M2b E2: stub mode (spec §6.7, M2b-D24)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def stub_mode(monkeypatch: pytest.MonkeyPatch, llm_env: None) -> Iterator[None]:
+    """MIXLAB_LLM_STUB=1 read by a reloaded modes module; restored afterwards."""
+    del llm_env
+    monkeypatch.setenv("MIXLAB_LLM_STUB", "1")
+    importlib.reload(modes)
+    yield
+    monkeypatch.delenv("MIXLAB_LLM_STUB", raising=False)
+    importlib.reload(modes)
+
+
+def _keyed_tracks() -> dict[str, Track]:
+    """Eight tracks whose Camelot order is 6, 2, 8, 4, 1, 7, 3 with track 5 unkeyed (last)."""
+    keys = {"1": "9A", "2": "3A", "3": "12B", "4": "9a", "5": "", "6": "1B", "7": "12A", "8": "3B"}
+    return {
+        tid: Track(track_id=tid, artist=f"A{tid}", title=f"T{tid}", bpm=124.0, camelot_key=key, genre="House")
+        for tid, key in keys.items()
+    }
+
+
+@pytest.mark.usefixtures("stub_mode")
+async def test_stub_mode_skips_key_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    shortlists = [MixConcept(title="Pool A", mood="m", track_ids=[str(i) for i in range(1, 9)])]
+
+    with respx.mock(assert_all_called=False) as router:
+        route = router.route().mock(return_value=Response(500))
+        concepts, report = await llm.stage2_curate_and_report(shortlists, _keyed_tracks(), deep=True)
+
+    assert not route.called
+    assert [c.title for c in concepts] == ["Stub 1: Pool A"]
+    assert concepts[0].mood == "stub"
+    assert concepts[0].track_ids == ["6", "2", "8", "1", "4", "7", "3", "5"]
+    assert concepts[0].transitions == []
+    assert "Stub 1: Pool A" in concepts[0].name_reason
+    assert report.startswith(llm._stub_report(concepts[0]))
+    assert llm.RECORDER.calls == []
+
+
+@respx.mock
+@pytest.mark.usefixtures("stub_mode")
+async def test_stub_mode_optional_calls_return_callers_failed_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    free_routes = _free_provider_routes(monkeypatch)
+    anthropic = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response("ok")))
+    tracks = _eight_tracks()
+    concept = MixConcept(title="Dark Rollers", mood="stub", track_ids=["1", "2", "3", "4"])
+
+    curated = [concept]
+    assert await llm._reroll_colliding_titles(curated, ["Dark Rollers"], "test-key") == (curated, [])
+    assert concept.title == "Dark Rollers"
+
+    critique = await llm._call_stage2_critique_single(concept, None, tracks, "test-key")
+    assert critique.verdict == "needs_attention"
+    assert critique.single_weakest_moment.startswith("critique call failed: ")
+    assert critique.structural_issues == []
+
+    canvas = _make_canvas([str(i) for i in range(1, 9)])
+    assert await llm._call_stage2_revision_single(concept, canvas, ["a finding"], tracks, "test-key") is None
+
+    report = await llm._call_stage2_report_single(concept, tracks, None, None, "test-key")
+    assert report == llm._stub_report(concept)
+    assert "Dark Rollers" in report
+
+    # Six seeds: the cascade would run, and with MIXLAB_STAGE0_MODEL set Stage 0 on Anthropic instead.
+    brief, deterministic = await _stage0()
+    assert brief == deterministic
+    monkeypatch.setenv("MIXLAB_STAGE0_MODEL", "claude-haiku-5-5")
+    brief, deterministic = await _stage0()
+    assert brief == deterministic
+
+    assert not anthropic.called
+    assert all(not free.called for free in free_routes)
+    assert len(respx.calls) == 0
+    assert llm.RECORDER.calls == []
+
+
+@pytest.mark.usefixtures("llm_env")
+async def test_stub_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MIXLAB_LLM_STUB", raising=False)
+    importlib.reload(modes)
+    assert modes.STUB_MODE is False
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    shortlists = [MixConcept(title="Pool A", mood="m", track_ids=[str(i) for i in range(1, 9)])]
+
+    def answer(request: httpx.Request) -> Response:
+        if _system_of(request).startswith(llm._STAGE2_SYSTEM_SELECTION):
+            return Response(200, json=_usage_response(_two_concepts_payload()))
+        return Response(200, json=_usage_response("CONCEPT: prose"))
+
+    with respx.mock(assert_all_called=False) as router:
+        route = router.post(_ANTHROPIC_URL).mock(side_effect=answer)
+        concepts, _report = await llm.stage2_curate_and_report(shortlists, _eight_tracks())
+
+    assert route.call_count == 3  # the selection and one report per concept
+    assert [c.title for c in concepts] == ["Dark Rollers", "Glass Steps"]
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    with pytest.raises(RuntimeError, match="^ANTHROPIC_API_KEY is not set"):
+        await llm.stage2_curate_and_report(shortlists, _eight_tracks())
