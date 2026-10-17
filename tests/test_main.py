@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 import textwrap
-from collections.abc import Iterator
+from collections.abc import Callable, Coroutine, Iterator
 from pathlib import Path
 from typing import Literal
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 import pytest
 import respx
+from httpx import Response
 from lxml import etree
 
 import mixlab.__main__ as main_mod
-from mixlab import modes
+from mixlab import llm, modes
 from mixlab.__main__ import (
     _annotate_direction_types,
     _apply_do_not_recommend_filter,
@@ -2256,3 +2259,512 @@ async def test_played_source_default_unchanged(
         patch("mixlab.__main__.fetch_mix_names", new=AsyncMock(return_value=[])),
     ):
         assert await _playlist_run("played") == ({"3", "6"}, set())
+
+
+# ---------------------------------------------------------------------------
+# M2b E2: tenant-mode exit codes (spec §5.1, M2b-D9, D10, D30)
+# ---------------------------------------------------------------------------
+
+_ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+
+
+def _set_tenant(monkeypatch: pytest.MonkeyPatch, on: bool) -> None:
+    if on:
+        monkeypatch.setenv("MIXLAB_API_MODE", "tenant")
+    else:
+        monkeypatch.delenv("MIXLAB_API_MODE", raising=False)
+    importlib.reload(modes)
+    llm.TOKEN_BUDGET.reset()
+    llm.RECORDER.reset()
+
+
+@pytest.fixture
+def modes_restored(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.delenv("MIXLAB_TOKEN_BUDGET", raising=False)
+    _set_tenant(monkeypatch, False)
+    yield
+    monkeypatch.delenv("MIXLAB_TOKEN_BUDGET", raising=False)
+    _set_tenant(monkeypatch, False)
+
+
+@pytest.fixture
+def tenant_mode(monkeypatch: pytest.MonkeyPatch, modes_restored: None) -> None:
+    del modes_restored
+    _set_tenant(monkeypatch, True)
+
+
+@pytest.fixture
+def engine_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An 18-track house collection, no catalogue, an Anthropic key, no free-provider keys, no sleeps."""
+    for var in ("CATALOG_API_URL", "GROQ_API_KEY", "GEMINI_API_KEY", "MISTRAL_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("MIXLAB_DIAGNOSTICS_DIR", str(tmp_path / "diagnostics"))
+    _setup_run(tmp_path, monkeypatch, _house_collection_xml(18))
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("mixlab.llm.asyncio.sleep", no_sleep)
+
+
+def _anthropic_text(text: str, *, output_tokens: int = 50, stop_reason: str = "end_turn") -> Response:
+    return Response(
+        200,
+        json={
+            "model": "claude-sonnet-4-6",
+            "content": [{"type": "text", "text": text}],
+            "stop_reason": stop_reason,
+            "usage": {"input_tokens": 100, "output_tokens": output_tokens},
+        },
+    )
+
+
+_REFUSAL = Response(
+    200,
+    json={
+        "model": "claude-sonnet-4-6",
+        "content": [],
+        "stop_reason": "refusal",
+        "stop_details": {"type": "refusal", "category": "cyber"},
+        "usage": {"input_tokens": 100, "output_tokens": 0},
+    },
+)
+_SPEND_LIMIT_400 = Response(
+    400,
+    json={
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "You have reached your specified API usage limits. You will regain access on 2026-11-01.",
+        },
+    },
+)
+_OVERLOADED_529 = Response(529, json={"type": "error", "error": {"type": "overloaded_error", "message": "busy"}})
+
+
+def _engine_answer(
+    *, selection: Response | None = None, critique: Response | None = None, report: Response | None = None
+) -> Callable[[httpx.Request], Response]:
+    """Answer each Stage 2 call by its system prompt; the selection picks four offered ids."""
+
+    def answer(request: httpx.Request) -> Response:
+        body = json.loads(request.content)
+        system: str = body["system"]
+        if system.startswith(llm._STAGE2_SYSTEM_SELECTION):
+            if selection is not None:
+                return selection
+            ids = list(dict.fromkeys(re.findall(r"ID:(\d+)", body["messages"][0]["content"])))[:4]
+            concept = {"title": "Deep Cuts", "name_reason": "r", "mood": "warm", "track_ids": ids, "transitions": []}
+            return _anthropic_text(json.dumps([concept]), output_tokens=16_000)
+        if system == llm._STAGE2_CRITIQUE_SYSTEM:
+            return critique or _anthropic_text(
+                '{"verdict": "solid", "single_weakest_moment": "", "structural_issues": []}'
+            )
+        if system == llm._STAGE2_REPORT_SYSTEM:
+            return report or _anthropic_text("CONCEPT: Deep Cuts\n\nprose")
+        raise AssertionError(f"unexpected Anthropic call: {system[:60]!r}")
+
+    return answer
+
+
+def _main_outcome(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> BaseException | None:
+    """Run main() with argv; return what escaped it (None when it returned)."""
+    monkeypatch.setattr("sys.argv", ["mixlab", *argv])
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.send_report", AsyncMock()):
+        try:
+            main()
+        except BaseException as exc:  # SystemExit included: the exit code is the assertion
+            return exc
+    return None
+
+
+_GENRE_RUN = ["--genre", "house", "--directions", "off"]
+
+
+@pytest.mark.usefixtures("tenant_mode", "engine_env")
+def test_exit_codes_in_tenant_mode_through_real_call_path(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The budget case: the selection spends 16,000 of 16,500 output tokens, so a critique's 1,024
+    # cannot be reserved. The other cases run on the default budget.
+    scenarios: list[tuple[str, list[str], Callable[[httpx.Request], Response], str | None, int, str]] = [
+        ("spend limit on a report", _GENRE_RUN, _engine_answer(report=_SPEND_LIMIT_400), None, 4, "ProviderCapError"),
+        ("refusal on the selection", _GENRE_RUN, _engine_answer(selection=_REFUSAL), None, 5, "RefusalError"),
+        (
+            "budget stop on a critique",
+            [*_GENRE_RUN, "--deep"],
+            _engine_answer(),
+            "150000,16500",
+            3,
+            "TokenBudgetExceeded",
+        ),
+        (
+            "exhausted 529 on a report",
+            _GENRE_RUN,
+            _engine_answer(report=_OVERLOADED_529),
+            None,
+            6,
+            "ProviderUnavailableError",
+        ),
+        ("filtered-out pool", ["--genre", "techno"], _engine_answer(), None, 2, "NoShortlistError"),
+    ]
+
+    for label, argv, answer, budget, code, error_name in scenarios:
+        if budget is None:
+            monkeypatch.delenv("MIXLAB_TOKEN_BUDGET", raising=False)
+        else:
+            monkeypatch.setenv("MIXLAB_TOKEN_BUDGET", budget)
+        llm.TOKEN_BUDGET.reset()
+        capsys.readouterr()
+        with respx.mock(assert_all_called=False) as router:
+            route = router.post(_ANTHROPIC_URL).mock(side_effect=answer)
+            outcome = _main_outcome(monkeypatch, argv)
+        assert isinstance(outcome, SystemExit), label
+        assert outcome.code == code, label
+        assert f"ERROR: {error_name}:" in capsys.readouterr().err, label
+        if code == 2:
+            assert not route.called, label
+        if code == 3:
+            systems = [json.loads(call.request.content)["system"] for call in route.calls]
+            assert llm._STAGE2_CRITIQUE_SYSTEM not in systems, label  # refused before the request
+            assert any(system.startswith(llm._STAGE2_SYSTEM_SELECTION) for system in systems), label
+
+
+@pytest.mark.usefixtures("modes_restored")
+def test_mode_flags_set_in_dotenv_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
+    # modes reads the switches at import, before main() loads .env; main() reads them again after it.
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house"])
+
+    def dotenv_sets_flags() -> bool:
+        monkeypatch.setenv("MIXLAB_API_MODE", "tenant")
+        monkeypatch.setenv("MIXLAB_LLM_STUB", "1")
+        return True
+
+    try:
+        with (
+            patch("mixlab.__main__.load_dotenv", side_effect=dotenv_sets_flags),
+            patch("mixlab.__main__.run", AsyncMock(return_value=None)),
+        ):
+            main()
+        assert modes.TENANT_MODE
+        assert modes.STUB_MODE
+    finally:
+        monkeypatch.delenv("MIXLAB_API_MODE", raising=False)
+        monkeypatch.delenv("MIXLAB_LLM_STUB", raising=False)
+        importlib.reload(modes)
+
+
+@pytest.mark.usefixtures("tenant_mode", "engine_env")
+def test_wholly_truncated_selection_exits_one_in_tenant_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    thinking_only = Response(
+        200,
+        json={
+            "model": "claude-sonnet-5-5",
+            "content": [{"type": "thinking", "thinking": "..."}],
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 100, "output_tokens": 16_000},
+        },
+    )
+    llm.RECORDER.reset()
+    with respx.mock(assert_all_called=False) as router:
+        router.post(_ANTHROPIC_URL).mock(side_effect=_engine_answer(selection=thinking_only))
+        outcome = _main_outcome(monkeypatch, _GENRE_RUN)
+
+    # The no-concept exit (M2b-D35), not a ValueError from parsing an empty selection.
+    assert isinstance(outcome, SystemExit)
+    assert outcome.code == 1
+    assert "truncated at max_tokens" in capsys.readouterr().err
+    assert [(c.purpose, c.stop_reason) for c in llm.RECORDER.calls] == [("selection", "max_tokens")]
+
+
+@pytest.mark.usefixtures("modes_restored", "engine_env")
+def test_exit_codes_outside_tenant_mode_are_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIXLAB_TOKEN_BUDGET", "1,1")  # ignored outside tenant mode
+    for answer in (
+        _engine_answer(report=_SPEND_LIMIT_400),
+        _engine_answer(selection=_REFUSAL),
+        _engine_answer(report=_OVERLOADED_529),
+    ):
+        with respx.mock(assert_all_called=False) as router:
+            router.post(_ANTHROPIC_URL).mock(side_effect=answer)
+            outcome = _main_outcome(monkeypatch, _GENRE_RUN)
+        # An uncaught exception: the interpreter exits 1, as before.
+        assert type(outcome) is RuntimeError
+        assert not isinstance(outcome, llm.TYPED_ERRORS)
+
+    with respx.mock(assert_all_called=False) as router:
+        router.post(_ANTHROPIC_URL).mock(side_effect=_engine_answer())
+        assert _main_outcome(monkeypatch, [*_GENRE_RUN, "--deep"]) is None  # no budget, the run completes
+
+    with respx.mock(assert_all_called=False) as router:
+        router.post(_ANTHROPIC_URL).mock(side_effect=_engine_answer())
+        outcome = _main_outcome(monkeypatch, ["--genre", "techno"])
+    assert isinstance(outcome, SystemExit)
+    assert outcome.code == 1
+
+
+def _no_shortlist_sites(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[tuple[str, Callable[[], Coroutine[object, object, None]]]]:
+    """Each spec §5.1 exit-2 site, as (the message it prints, a coroutine factory that reaches it)."""
+
+    def genre(xml: str, genre_label: str) -> Callable[[], Coroutine[object, object, None]]:
+        def start() -> Coroutine[object, object, None]:
+            _setup_run(tmp_path, monkeypatch, xml)
+            return run(genre=genre_label, export_dir=None, directions="off")
+
+        return start
+
+    def playlist(seed_ids: list[str], name: str = "Seed") -> Callable[[], Coroutine[object, object, None]]:
+        def start() -> Coroutine[object, object, None]:
+            _setup_run(tmp_path, monkeypatch, _play_count_xml([0] * 8, seed_ids))
+            return main_mod.run_playlist_mode(name, None, None, "all")
+
+        return start
+
+    async def no_canvas() -> None:
+        _setup_run(tmp_path, monkeypatch, _house_collection_xml(18))
+        with patch("mixlab.__main__.select_canvases", return_value=[]):
+            await run(genre="house", export_dir=None, directions="off")
+
+    async def no_zone_shortlist() -> None:
+        _setup_run(tmp_path, monkeypatch, _play_count_xml([0] * 8, ["1", "2", "4", "5"]))
+        with patch("mixlab.__main__.build_zone_shortlists", return_value=[]):
+            await main_mod.run_playlist_mode("Seed", None, None, "all")
+
+    four_seed_message = (
+        "Playlist mode requires at least 4 valid seed tracks with BPM and Camelot key after collection parsing."
+    )
+    return [
+        ("No tracks found for custom genre '170'.", genre(_house_collection_xml(18), "170")),
+        ("No tracks found for genre 'techno'.", genre(_house_collection_xml(18), "techno")),
+        ("No shortlists generated — all tracks may have been excluded.", genre(_house_collection_xml(4), "house")),
+        ("No canvases could be built — collection may be out of sync.", no_canvas),
+        ('Playlist "Nope" not found.', playlist(["1", "2", "4", "5"], name="Nope")),
+        (four_seed_message, playlist(["1", "2"])),
+        (four_seed_message, playlist(["98", "99", "1"])),  # seeds resolving to no admitted track
+        ("No zone shortlists could be built from the seed playlist.", no_zone_shortlist),
+    ]
+
+
+@pytest.mark.usefixtures("tenant_mode", "engine_env")
+async def test_no_shortlist_sites_raise_before_llm_in_tenant_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with respx.mock(assert_all_called=False) as router:
+        route = router.route()
+        for message, start in _no_shortlist_sites(tmp_path, monkeypatch):
+            with pytest.raises(llm.NoShortlistError) as exc_info:
+                await start()
+            assert str(exc_info.value) == message
+    assert not route.called
+    assert llm.RECORDER.calls == []
+
+
+@pytest.mark.usefixtures("modes_restored", "engine_env")
+async def test_no_shortlist_sites_sys_exit_outside_tenant_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with respx.mock(assert_all_called=False) as router:
+        route = router.route()
+        for message, start in _no_shortlist_sites(tmp_path, monkeypatch):
+            capsys.readouterr()
+            with pytest.raises(SystemExit) as exc_info:
+                await start()
+            assert exc_info.value.code == 1
+            assert capsys.readouterr().err.splitlines()[-1] == message
+    assert not route.called
+
+
+@pytest.mark.usefixtures("tenant_mode")
+def test_argparse_error_exits_one_in_tenant_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--intent", "-dark"])
+    run_mock = AsyncMock(return_value=None)
+
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", run_mock), pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("usage: ")
+    assert "error: argument --intent: expected one argument" in err
+    run_mock.assert_not_called()
+
+
+@pytest.mark.usefixtures("modes_restored")
+def test_argparse_error_exits_two_outside_tenant_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--intent", "-dark"])
+
+    with patch("mixlab.__main__.load_dotenv"), pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 2
+    assert "error: argument --intent: expected one argument" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# M2b E2: stub mode (spec §6.7, M2b-D24, A6)
+# ---------------------------------------------------------------------------
+
+_S6_STANDARD = Path(__file__).parent / "fixtures" / "run_contract" / "s6-standard.xml"
+# Every host llm.py calls: Anthropic, then the Stage 0 cascade (_try_groq, _try_gemini, _try_mistral, OpenRouter).
+_LLM_HOSTS = (
+    "api.anthropic.com",
+    "api.groq.com",
+    "generativelanguage.googleapis.com",
+    "api.mistral.ai",
+    "openrouter.ai",
+)
+_PROVIDER_KEYS = ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "MISTRAL_API_KEY", "OPENROUTER_API_KEY")
+_STUB_GENRE_RUN = ["--genre", "techno", "--mode", "all"]
+_STUB_PLAYLIST_RUN = ["--playlist", "Seeds/Four", "--mode", "all"]
+
+
+@pytest.fixture
+def stub_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, modes_restored: None) -> Iterator[None]:
+    """s6-standard.xml under MIXLAB_LLM_STUB=1 and MIXLAB_PLAYED_SOURCE=file; no key, no catalogue; all under tmp_path."""
+    del modes_restored
+    for var in (*_PROVIDER_KEYS, "CATALOG_API_URL", "MIXLAB_STAGE0_MODEL", "MIXLAB_STAGE2_MODEL", "DISCORD_BOT_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("MIXLAB_LLM_STUB", "1")
+    monkeypatch.setenv("MIXLAB_PLAYED_SOURCE", "file")
+    monkeypatch.setenv("MIXLAB_REPORT_DIR", str(tmp_path / "reports"))
+    monkeypatch.setenv("MIXLAB_DIAGNOSTICS_DIR", str(tmp_path / "diagnostics"))
+    importlib.reload(modes)
+    _setup_run(tmp_path, monkeypatch, _S6_STANDARD.read_text(encoding="utf-8"))
+    yield
+    monkeypatch.delenv("MIXLAB_LLM_STUB", raising=False)
+    monkeypatch.delenv("MIXLAB_PLAYED_SOURCE", raising=False)
+    importlib.reload(modes)
+
+
+def _stub_summaries(tmp_path: Path) -> list[dict[str, object]]:
+    """Every summary.json the runs wrote, oldest first."""
+    paths = sorted((tmp_path / "reports").glob("*.json"), key=lambda p: p.stat().st_mtime_ns)
+    return [json.loads(p.read_text(encoding="utf-8")) for p in paths]
+
+
+def _summary_concepts(summary: dict[str, object]) -> list[dict[str, object]]:
+    concepts = summary["concepts"]
+    assert isinstance(concepts, list)
+    return concepts
+
+
+def _concept_track_ids(concept: dict[str, object]) -> list[str]:
+    tracks = concept["tracks"]
+    assert isinstance(tracks, list)
+    return [str(t["id"]) for t in tracks]
+
+
+def _fixture_track_ids() -> set[str]:
+    root = etree.parse(str(_S6_STANDARD)).getroot()
+    return {str(el.get("TrackID")) for el in root.iter("TRACK") if el.get("TrackID")}
+
+
+@pytest.mark.usefixtures("stub_env")
+def test_stub_mode_makes_no_llm_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in _PROVIDER_KEYS:
+        monkeypatch.setenv(var, "test-key")  # keyed: a real run would reach every one of these hosts
+    reroll = AsyncMock(wraps=llm._reroll_colliding_titles)
+    requests: list[httpx.Request] = []
+
+    def refuse(request: httpx.Request) -> Response:
+        requests.append(request)
+        raise AssertionError(f"LLM request in stub mode: {request.url}")
+
+    with respx.mock(assert_all_called=False) as router, patch("mixlab.llm._reroll_colliding_titles", reroll):
+        routes = [router.route(host=host).mock(side_effect=refuse) for host in _LLM_HOSTS]
+        assert _main_outcome(monkeypatch, _STUB_GENRE_RUN) is None  # writes the history
+        assert _main_outcome(monkeypatch, [*_STUB_GENRE_RUN, "--deep"]) is None  # its titles now collide
+        assert _main_outcome(monkeypatch, _STUB_PLAYLIST_RUN) is None
+
+    assert requests == []
+    assert all(not route.called for route in routes)
+    assert len(router.calls) == 0
+    assert llm.RECORDER.calls == []
+    first_title = str(_summary_concepts(_stub_summaries(tmp_path)[0])[0]["title"])
+    assert reroll.await_count == 1  # the second genre run only: the first had no history
+    assert reroll.await_args is not None
+    assert first_title in reroll.await_args.args[1]
+    assert len(load_history(tmp_path / "history.json").runs) == 2
+
+
+@pytest.mark.usefixtures("stub_env")
+def test_stub_mode_single_tag_pool_of_twelve_delivers_twelve_track_concept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _main_outcome(monkeypatch, _STUB_GENRE_RUN) is None
+
+    (summary,) = _stub_summaries(tmp_path)
+    (concept,) = _summary_concepts(summary)
+    track_ids = _concept_track_ids(concept)
+    assert len(track_ids) == 12
+    assert set(track_ids) <= _fixture_track_ids()
+    assert len(set(track_ids)) == 12
+    transitions = concept["transitions"]
+    assert isinstance(transitions, list)
+    assert len(transitions) == 11
+    assert concept["mood"] == "stub"
+    assert str(concept["title"]).startswith("Stub 1: ")
+    assert str(concept["title"]) in str(concept["thesis"])
+    tracks = concept["tracks"]
+    assert isinstance(tracks, list)
+    keys = [str(t["camelotKey"]) for t in tracks]
+    parsed = [(int(k[:-1]), k[-1].upper()) for k in keys]
+    assert parsed == sorted(parsed)  # Camelot order, number then letter
+    assert llm.RECORDER.calls == []
+
+
+@pytest.mark.usefixtures("stub_env")
+def test_stub_mode_playlist_keeps_every_seed_and_emits_three_variants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _main_outcome(monkeypatch, _STUB_PLAYLIST_RUN) is None
+
+    (summary,) = _stub_summaries(tmp_path)
+    concepts = _summary_concepts(summary)
+    assert [str(c["title"]).split(" - ")[0] for c in concepts] == ["WINNER", "BALANCED", "ADVENTUROUS"]
+    assert str(concepts[0]["title"]).startswith("WINNER - PRACTICAL - Stub 1: ")
+    assert [c["mood"] for c in concepts] == ["practical", "balanced", "adventurous"]
+    seeds = ["8", "9", "18"]  # Seeds/Four is 8, 9, 9, 18
+    for concept in concepts:
+        track_ids = _concept_track_ids(concept)
+        assert track_ids[: len(seeds)] == seeds
+        assert len(track_ids) == len(set(track_ids))
+        assert len(seeds) < len(track_ids) <= 12
+    assert llm.RECORDER.calls == []
+
+
+@pytest.mark.usefixtures("stub_env")
+def test_stub_mode_writes_all_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    export_dir = tmp_path / "export"
+
+    assert _main_outcome(monkeypatch, [*_STUB_GENRE_RUN, "--export", str(export_dir)]) is None
+
+    (html,) = sorted((tmp_path / "reports").glob("*.html"))
+    (summary,) = _stub_summaries(tmp_path)
+    assert summary["schemaVersion"] == 1
+    (concept,) = _summary_concepts(summary)
+    assert str(concept["title"]) in html.read_text(encoding="utf-8")
+    root = etree.parse(str(export_dir / "rekordbox_export.xml")).getroot()
+    playlist_names = [str(node.get("Name")) for node in root.iter("NODE")]
+    assert any(str(concept["title"]) in name for name in playlist_names)
+    assert len(load_history(tmp_path / "history.json").runs) == 1
+
+
+@pytest.mark.usefixtures("stub_env")
+def test_stub_mode_locked_playlist_keeps_repeated_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A locked playlist offers only its seeds; Seeds/Four is 8, 9, 9, 18, and three distinct ids
+    # would fall below the parser's four-track minimum.
+    assert _main_outcome(monkeypatch, [*_STUB_PLAYLIST_RUN, "--locked"]) is None
+
+    (summary,) = _stub_summaries(tmp_path)
+    for concept in _summary_concepts(summary):
+        assert sorted(_concept_track_ids(concept)) == ["18", "8", "9", "9"]

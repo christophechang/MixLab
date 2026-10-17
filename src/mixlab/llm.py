@@ -40,7 +40,7 @@ from typing import Any, Callable, Literal, cast, get_args
 import httpx
 
 from mixlab import modes, sequencer
-from mixlab.clustering import camelot_distance
+from mixlab.clustering import _CAMELOT_RE, camelot_distance
 from mixlab.config import TRACK_COUNT_TARGETS, shortfall_warning
 from mixlab.history import ConceptHistory, format_recent_concepts
 from mixlab.models import (
@@ -348,6 +348,9 @@ async def stage0_intent_brief(
     tracks_by_id = {t.track_id: t for t in seed_tracks}
     det_brief = compute_deterministic_intent(seed_track_ids, tracks_by_id)
 
+    if modes.STUB_MODE:
+        return det_brief  # _stub: ahead of both the cascade and MIXLAB_STAGE0_MODEL
+
     if len(seed_tracks) <= 5:
         # Too few tracks for LLM classification to be reliable
         return det_brief
@@ -355,6 +358,10 @@ async def stage0_intent_brief(
     prompt = f"Seed playlist ({len(seed_tracks)} tracks in original order):\n" + _tracks_to_text(
         seed_tracks, seed_ids=frozenset(seed_track_ids)
     )
+
+    stage0_model = _stage0_model()
+    if stage0_model is not None:
+        return await _stage0_on_anthropic(stage0_model, prompt, seed_tracks, bpm_range, det_brief)
 
     for _ in range(len(_CASCADE)):
         provider = _CASCADE[state.index]
@@ -380,6 +387,51 @@ async def stage0_intent_brief(
     # All providers failed — fall back to deterministic
     print("Stage 0 LLM failed — using deterministic intent brief.", file=sys.stderr)
     state.consecutive_failures = 0  # reset so later Stage 1 calls get a fresh start
+    return det_brief
+
+
+async def _stage0_on_anthropic(
+    model: str,
+    prompt: str,
+    seed_tracks: list[Track],
+    bpm_range: tuple[float, float],
+    det_brief: IntentBrief,
+) -> IntentBrief:
+    """Stage 0 with ``MIXLAB_STAGE0_MODEL`` set: one Anthropic call, 60 s, no retry, no fallbacks (M2b spec §6.6).
+
+    A refusal, a budget stop or a cap ends the run (R-FY; the typed errors exist only in tenant
+    mode); any other failure falls back to the deterministic brief, as the exhausted cascade does.
+    """
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        try:
+            result = await _call_anthropic_http(
+                key,
+                model,
+                _STAGE0_SYSTEM,
+                prompt,
+                max_tokens=4096,
+                timeout=_STAGE0_ATTEMPT_SECS,
+                temperature=0.7,
+                purpose="intent_brief",
+                effort_payload={"output_config": {"effort": "low"}} if _is_five_family(model) else None,
+                fallbacks=False,
+                attempt_secs=_STAGE0_ATTEMPT_SECS,
+                max_attempts=1,
+            )
+            if not result.strip():
+                raise ValueError(f"Anthropic ({model}) returned empty content for Stage 0.")
+            llm_brief = _parse_intent_brief(result, seed_tracks, bpm_range)
+            # Merge: use LLM tiers but deterministic shape + adjacencies, as the cascade does.
+            llm_brief.energy_shape = det_brief.energy_shape
+            llm_brief.strong_adjacencies = det_brief.strong_adjacencies
+            llm_brief.bpm_range = det_brief.bpm_range
+            return llm_brief
+        except FATAL_ON_OPTIONAL_CALLS:
+            raise
+        except Exception as exc:  # noqa: BLE001 — Stage 0 is advisory: any other failure falls back
+            print(f"Stage 0 provider anthropic ({model}) failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    print("Stage 0 LLM failed — using deterministic intent brief.", file=sys.stderr)
     return det_brief
 
 
@@ -466,6 +518,373 @@ def _is_sonnet_5_5(model: str) -> bool:
     return model.startswith("claude-sonnet-5-5")
 
 
+# ---------------------------------------------------------------------------
+# The 5-family branch, per-call thinking, fallbacks and Stage 0 on Anthropic (M2b spec
+# §6.4, §6.6, §6.8). Each variable is read at call time; unset, every payload is today's.
+# ---------------------------------------------------------------------------
+
+_STAGE2_EFFORT_ENV = "MIXLAB_STAGE2_EFFORT"
+_STAGE2_EFFORT_LEVELS = frozenset({"low", "medium", "high"})
+_FALLBACKS_ENV = "MIXLAB_FALLBACKS"
+_FALLBACKS_BETA_HEADER = "server-side-fallback-2026-07-01"
+_STAGE0_MODEL_ENV = "MIXLAB_STAGE0_MODEL"
+_STAGE0_ATTEMPT_SECS = 60
+_FIVE_FAMILY_RE = re.compile(r"^claude-[a-z]+-(\d+)")
+# The variables whose invalid value has already been warned about: once per process, not per call.
+_WARNED_ENV: set[str] = set()
+
+
+def _warn_invalid_env_once(name: str, raw: str, effect: str) -> None:
+    if name in _WARNED_ENV:
+        return
+    _WARNED_ENV.add(name)
+    print(f"warning: {name}={raw!r} is not valid; {effect}", file=sys.stderr)
+
+
+def _is_five_family(model: str) -> bool:
+    """A model id whose version segment's major number is 5 or more (M2b-D21); consulted only when the effort is set."""
+    match = _FIVE_FAMILY_RE.match(model)
+    return match is not None and int(match.group(1)) >= 5
+
+
+def _stage2_effort() -> str | None:
+    """``MIXLAB_STAGE2_EFFORT`` when ``low``, ``medium`` or ``high``; anything else warns once and is unset."""
+    raw = os.environ.get(_STAGE2_EFFORT_ENV, "")
+    if raw in _STAGE2_EFFORT_LEVELS:
+        return raw
+    if raw:
+        _warn_invalid_env_once(_STAGE2_EFFORT_ENV, raw, "expected low, medium or high; sending today's payload")
+    return None
+
+
+def _thinking_and_effort(purpose: Purpose, configured: str) -> dict[str, object]:
+    """The thinking mode and effort of one Stage 2 call on a 5-family id (M2b spec §6.4's table, R-FA)."""
+    if purpose in ("selection", "revision"):
+        return {"thinking": {"type": "adaptive"}, "output_config": {"effort": configured}}
+    if purpose in ("report", "report_regeneration"):
+        return {"thinking": {"type": "between_tools"}, "output_config": {"effort": configured}}
+    if purpose in ("title_reroll", "critique"):
+        return {"thinking": {"type": "between_tools"}, "output_config": {"effort": "low"}}
+    raise ValueError(f"{purpose} is not a Stage 2 call")
+
+
+def _fallbacks() -> bool:
+    """``MIXLAB_FALLBACKS=default`` enables the server-side fallback; any other value warns once and is ignored."""
+    raw = os.environ.get(_FALLBACKS_ENV, "")
+    if raw == "default":
+        return True
+    if raw:
+        _warn_invalid_env_once(_FALLBACKS_ENV, raw, "only 'default' is recognised; no fallback is requested")
+    return False
+
+
+def _stage0_model() -> str | None:
+    """``MIXLAB_STAGE0_MODEL``: set, Stage 0 makes one Anthropic call on it instead of the free cascade."""
+    return os.environ.get(_STAGE0_MODEL_ENV, "").strip() or None
+
+
+def _stage2_call_options(model: str, purpose: Purpose) -> tuple[dict[str, object] | None, bool]:
+    """(effort payload, fallbacks) for one Stage 2 call: the payload only with the effort set on a 5-family id."""
+    effort = _stage2_effort()
+    effort_payload = _thinking_and_effort(purpose, effort) if effort is not None and _is_five_family(model) else None
+    return effort_payload, _fallbacks()
+
+
+# ---------------------------------------------------------------------------
+# Tenant mode (MIXLAB_API_MODE=tenant): the typed errors, the usage recorder, the
+# token budget and the attempt bounds (M2b spec §5.1, §6.1-§6.3, §6.5). Outside
+# tenant mode only the recorder runs, in memory; the call behaves as before.
+# ---------------------------------------------------------------------------
+
+Purpose = Literal[
+    "intent_brief",
+    "selection",
+    "title_reroll",
+    "critique",
+    "report",
+    "revision",
+    "report_regeneration",
+]
+
+
+class NoShortlistError(RuntimeError):
+    """Before any LLM call, the filters and Stage 1 left too few tracks (tenant exit 2)."""
+
+
+class TokenBudgetExceeded(RuntimeError):  # noqa: N818 — the contract's name (M2b spec §5.1, exit 3)
+    """A call's reservation does not fit the run's token budget (tenant exit 3)."""
+
+
+class ProviderCapError(RuntimeError):
+    """Anthropic answered with a spend-limit response (tenant exit 4)."""
+
+
+class RefusalError(RuntimeError):
+    """Anthropic declined the request, after any server-side fallback (tenant exit 5)."""
+
+    def __init__(self, message: str, category: str | None = None) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+class ProviderUnavailableError(RuntimeError):
+    """Anthropic was unreachable, overloaded or rejected the key, past the one retry (tenant exit 6)."""
+
+
+TYPED_ERRORS: tuple[type[RuntimeError], ...] = (
+    TokenBudgetExceeded,
+    ProviderCapError,
+    RefusalError,
+    ProviderUnavailableError,
+)
+# The errors that end a run even when raised by an optional call (the title re-roll, a
+# critique, a revision, a report regeneration); an outage there stays non-fatal (R-FL).
+FATAL_ON_OPTIONAL_CALLS: tuple[type[RuntimeError], ...] = (TokenBudgetExceeded, ProviderCapError, RefusalError)
+
+TENANT_SELECTION_MAX_TOKENS = 16_000
+TENANT_ATTEMPT_SECS = 480  # asyncio.timeout per attempt: httpx's timeout is per operation, not wall clock
+TENANT_MAX_ATTEMPTS = 2
+TENANT_RETRY_AFTER_CAP_SECS = 30
+SPEND_LIMIT_PREFIXES = (
+    "You have reached your specified API usage limits",
+    "You have reached your specified workspace API usage limits",
+)
+SPEND_CAP_ERROR_CODE = "enforced_spend_limit_reached"
+
+_TOKEN_BUDGET_ENV = "MIXLAB_TOKEN_BUDGET"
+_DEFAULT_TOKEN_BUDGET = (150_000, 56_000)  # R-EZ: input, output
+
+
+def _fatal_on_optional_call(exc: BaseException) -> bool:
+    """True when an optional call's failure must end the run: tenant mode and a budget, cap or refusal error."""
+    return modes.TENANT_MODE and isinstance(exc, FATAL_ON_OPTIONAL_CALLS)
+
+
+@dataclass
+class LlmCall:
+    """One Anthropic attempt that produced a response (summary.json ``llmCalls[]``)."""
+
+    model: str
+    purpose: Purpose
+    input_tokens: int
+    output_tokens: int
+    stop_reason: str
+
+
+def _token_count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _usage_attempts(data: dict[str, object], requested_model: str) -> list[tuple[str, int, int, str]]:
+    """(model, input, output, stop reason) per attempt: one per ``usage.iterations`` item, else one.
+
+    The top-level ``model`` names the model that answered; a declined ``message`` iteration before
+    the answering one ran on the requested model and stopped on ``refusal`` (M2b spec §6.1, A3).
+    """
+    answering_model = str(data.get("model") or requested_model or "unknown")
+    stop_reason = str(data.get("stop_reason") or "unknown")
+    usage = data.get("usage")
+    usage_map: dict[str, object] = {str(key): value for key, value in usage.items()} if isinstance(usage, dict) else {}
+    iterations = usage_map.get("iterations")
+    if not isinstance(iterations, list) or not iterations:
+        return [
+            (
+                answering_model,
+                _token_count(usage_map.get("input_tokens")),
+                _token_count(usage_map.get("output_tokens")),
+                stop_reason,
+            )
+        ]
+    attempts: list[tuple[str, int, int, str]] = []
+    last = len(iterations) - 1
+    for index, item in enumerate(iterations):
+        entry: dict[str, object] = {str(key): value for key, value in item.items()} if isinstance(item, dict) else {}
+        is_last = index == last
+        model = entry.get("model")
+        entry_model = str(model) if model else (answering_model if is_last else (requested_model or answering_model))
+        entry_stop = entry.get("stop_reason")
+        if entry_stop:
+            entry_stop_reason = str(entry_stop)
+        elif is_last:
+            entry_stop_reason = stop_reason
+        else:
+            entry_stop_reason = "refusal" if entry.get("type") == "message" else stop_reason
+        attempts.append(
+            (
+                entry_model,
+                _token_count(entry.get("input_tokens")),
+                _token_count(entry.get("output_tokens")),
+                entry_stop_reason,
+            )
+        )
+    return attempts
+
+
+class LlmCallRecorder:
+    """In-memory record of every Anthropic response this process received (M2b spec §6.1).
+
+    Runs in every mode; only tenant mode writes it into ``summary.json``.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[LlmCall] = []
+
+    def reset(self) -> None:
+        self.calls = []
+
+    def record(self, model: str, purpose: Purpose, input_tokens: int, output_tokens: int, stop_reason: str) -> LlmCall:
+        call = LlmCall(model, purpose, input_tokens, output_tokens, stop_reason)
+        self.calls.append(call)
+        return call
+
+    def record_response(self, data: dict[str, object], purpose: Purpose, *, requested_model: str = "") -> list[LlmCall]:
+        """Record one entry per attempt of a ``200`` response; returns the entries recorded."""
+        return [
+            self.record(model, purpose, input_tokens, output_tokens, stop_reason)
+            for model, input_tokens, output_tokens, stop_reason in _usage_attempts(data, requested_model)
+        ]
+
+    def as_summary(self) -> list[dict[str, str | int]]:
+        """The calls as ``summary.schema.json``'s ``llmCall`` objects (camelCase)."""
+        return [
+            {
+                "model": call.model,
+                "purpose": call.purpose,
+                "inputTokens": call.input_tokens,
+                "outputTokens": call.output_tokens,
+                "stopReason": call.stop_reason,
+            }
+            for call in self.calls
+        ]
+
+
+RECORDER = LlmCallRecorder()
+
+
+def _input_estimate(system: str, prompt: str) -> int:
+    """A deliberate over-estimate of a call's input tokens: a token per three characters (M2b spec §6.2)."""
+    return math.ceil(len(system + prompt) / 3)
+
+
+def _parse_token_budget(raw: str) -> tuple[int, int] | None:
+    parts = raw.split(",")
+    if len(parts) != 2:
+        return None
+    try:
+        input_allowance, output_allowance = int(parts[0].strip()), int(parts[1].strip())
+    except ValueError:
+        return None
+    if input_allowance <= 0 or output_allowance <= 0:
+        return None
+    return input_allowance, output_allowance
+
+
+@dataclass
+class TokenBudget:
+    """The run's input and output token allowances, enforced before each call (M2b spec §6.2, R-ES)."""
+
+    input_allowance: int
+    output_allowance: int
+    input_spent: int = 0
+    output_spent: int = 0
+    input_reserved: int = 0
+    output_reserved: int = 0
+
+    @classmethod
+    def from_env(cls) -> TokenBudget | None:
+        """Tenant mode only: ``MIXLAB_TOKEN_BUDGET="<input>,<output>"``, default ``150000,56000``."""
+        if not modes.TENANT_MODE:
+            return None
+        raw = os.environ.get(_TOKEN_BUDGET_ENV, "")
+        parsed = _parse_token_budget(raw) if raw else None
+        if parsed is None:
+            if raw:
+                print(
+                    f"warning: {_TOKEN_BUDGET_ENV}={raw!r} is not '<input>,<output>' positive integers; "
+                    f"using {_DEFAULT_TOKEN_BUDGET[0]},{_DEFAULT_TOKEN_BUDGET[1]}",
+                    file=sys.stderr,
+                )
+            parsed = _DEFAULT_TOKEN_BUDGET
+        return cls(input_allowance=parsed[0], output_allowance=parsed[1])
+
+    def reserve(self, input_estimate: int, max_tokens: int) -> None:
+        if self.input_spent + self.input_reserved + input_estimate > self.input_allowance:
+            raise TokenBudgetExceeded(
+                f"Token budget: input estimate {input_estimate} does not fit "
+                f"({self.input_spent} spent + {self.input_reserved} reserved of {self.input_allowance})."
+            )
+        if self.output_spent + self.output_reserved + max_tokens > self.output_allowance:
+            raise TokenBudgetExceeded(
+                f"Token budget: max_tokens {max_tokens} does not fit "
+                f"({self.output_spent} spent + {self.output_reserved} reserved of {self.output_allowance})."
+            )
+        self.input_reserved += input_estimate
+        self.output_reserved += max_tokens
+
+    def release(self, input_estimate: int, max_tokens: int) -> None:
+        self.input_reserved = max(0, self.input_reserved - input_estimate)
+        self.output_reserved = max(0, self.output_reserved - max_tokens)
+
+    def spend(self, input_tokens: int, output_tokens: int) -> None:
+        self.input_spent += input_tokens
+        self.output_spent += output_tokens
+
+
+class _TokenBudgetSlot:
+    """The process's one budget (one engine process is one run), built on first use in tenant mode."""
+
+    def __init__(self) -> None:
+        self._budget: TokenBudget | None = None
+        self._loaded = False
+
+    def get(self) -> TokenBudget | None:
+        if not modes.TENANT_MODE:
+            return None
+        if not self._loaded:
+            self._budget = TokenBudget.from_env()
+            self._loaded = True
+        return self._budget
+
+    def reset(self) -> None:
+        self._budget = None
+        self._loaded = False
+
+
+TOKEN_BUDGET = _TokenBudgetSlot()
+
+
+def _status_error(resp: httpx.Response) -> httpx.HTTPStatusError | None:
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        return exc
+    return None
+
+
+def _provider_cap_reason(resp: httpx.Response) -> str | None:
+    """The spend-limit shapes of M2b spec §6.5 (A2): a ``402``, a limit ``400``, the tier-cap ``429``."""
+    if resp.status_code == 402:
+        return "402 billing_error"
+    if resp.status_code not in (400, 429):
+        return None
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return None
+    if resp.status_code == 400:
+        message = error.get("message")
+        if isinstance(message, str) and message.startswith(SPEND_LIMIT_PREFIXES):
+            return f"400 {message}"
+        return None
+    details = error.get("details")
+    if isinstance(details, dict) and details.get("error_code") == SPEND_CAP_ERROR_CODE:
+        return f"429 {SPEND_CAP_ERROR_CODE}"
+    return None
+
+
 async def _call_anthropic_http(
     api_key: str,
     model: str,
@@ -474,6 +893,12 @@ async def _call_anthropic_http(
     max_tokens: int = 2048,
     timeout: int = 90,
     temperature: float = 0.7,
+    *,
+    purpose: Purpose | None = None,
+    effort_payload: dict[str, object] | None = None,
+    fallbacks: bool = False,
+    attempt_secs: int | None = None,
+    max_attempts: int | None = None,
 ) -> str:
     headers = {
         "x-api-key": api_key,
@@ -486,69 +911,136 @@ async def _call_anthropic_http(
         "system": system,
         "messages": [{"role": "user", "content": prompt}],
     }
-    if _is_sonnet_5_5(model):
+    if effort_payload is not None:
+        # A 5-family call with its own thinking and effort (M2b spec §6.4, §6.6): no temperature.
+        payload.update(effort_payload)
+    elif _is_sonnet_5_5(model):
         # between_tools is 5.5's thinking-off setting; it is only valid at effort high or below.
         payload["thinking"] = {"type": "between_tools"}
         payload["output_config"] = {"effort": "high"}
     else:
         payload["temperature"] = temperature
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        for attempt in range(1, _ANTHROPIC_MAX_ATTEMPTS + 1):
-            is_final_attempt = attempt == _ANTHROPIC_MAX_ATTEMPTS
-            try:
-                resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
-                if is_final_attempt:
-                    raise
-                delay = _ANTHROPIC_BACKOFFS_SECS[attempt - 1]
-                print(
-                    f"Anthropic retry {attempt}/{_ANTHROPIC_MAX_ATTEMPTS} after "
-                    f"{type(exc).__name__} (waiting {delay:.1f}s)",
-                    file=sys.stderr,
-                )
-                await asyncio.sleep(delay)
-                continue
+    if fallbacks:
+        payload["fallbacks"] = "default"  # M2b spec §6.8, Stage 2 only
+        headers["anthropic-beta"] = _FALLBACKS_BETA_HEADER
+    # Tenant mode (M2b spec §6.2, §6.3, §6.5): a budget reservation per call, each attempt
+    # wall-clock bounded, one retry, retry-after capped, and the typed errors. Outside it
+    # every line below behaves as before. A caller's attempt_secs bounds each attempt in any
+    # mode, and its max_attempts overrides the mode's default (Stage 0, M2b spec §6.6).
+    tenant = modes.TENANT_MODE
+    if attempt_secs is None and tenant:
+        attempt_secs = TENANT_ATTEMPT_SECS
+    if max_attempts is None:
+        max_attempts = TENANT_MAX_ATTEMPTS if tenant else _ANTHROPIC_MAX_ATTEMPTS
+    transport_errors: tuple[type[Exception], ...] = (
+        (httpx.TimeoutException, httpx.TransportError, TimeoutError)
+        if attempt_secs is not None
+        else (httpx.TimeoutException, httpx.TransportError)
+    )
+    budget = TOKEN_BUDGET.get() if tenant else None
+    input_estimate = _input_estimate(system, prompt)
+    if budget is not None:
+        budget.reserve(input_estimate, max_tokens)  # once per call: a retry keeps it (R-ES)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for attempt in range(1, max_attempts + 1):
+                is_final_attempt = attempt == max_attempts
+                try:
+                    if attempt_secs is not None:
+                        async with asyncio.timeout(attempt_secs):
+                            resp = await client.post(
+                                "https://api.anthropic.com/v1/messages", headers=headers, json=payload
+                            )
+                    else:
+                        resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
+                except transport_errors as exc:
+                    if is_final_attempt:
+                        if tenant:
+                            raise ProviderUnavailableError(
+                                f"Anthropic unavailable after {max_attempts} attempts ({type(exc).__name__})."
+                            ) from exc
+                        raise
+                    delay = _ANTHROPIC_BACKOFFS_SECS[attempt - 1]
+                    print(
+                        f"Anthropic retry {attempt}/{max_attempts} after {type(exc).__name__} (waiting {delay:.1f}s)",
+                        file=sys.stderr,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
 
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if is_final_attempt:
-                    resp.raise_for_status()
-                delay = _ANTHROPIC_BACKOFFS_SECS[attempt - 1]
-                retry_after_header = resp.headers.get("retry-after")
-                if retry_after_header is not None:
-                    with contextlib.suppress(ValueError):
-                        delay = max(delay, float(retry_after_header))
-                print(
-                    f"Anthropic retry {attempt}/{_ANTHROPIC_MAX_ATTEMPTS} after "
-                    f"{resp.status_code} (waiting {delay:.1f}s)",
-                    file=sys.stderr,
-                )
-                await asyncio.sleep(delay)
-                continue
+                if tenant:
+                    cap_reason = _provider_cap_reason(resp)
+                    if cap_reason is not None:
+                        raise ProviderCapError(f"Anthropic spend limit reached ({cap_reason}).") from _status_error(
+                            resp
+                        )
+                    if resp.status_code in (401, 403):
+                        raise ProviderUnavailableError(
+                            f"Anthropic rejected the credential ({resp.status_code})."
+                        ) from _status_error(resp)
 
-            resp.raise_for_status()  # non-retryable 4xx raises immediately
-            data = resp.json()
-            usage = data.get("usage") or {}
-            print(
-                f"Anthropic usage: model={model} in={usage.get('input_tokens')} out={usage.get('output_tokens')}",
-                file=sys.stderr,
-            )
-            if data.get("stop_reason") == "refusal":
-                category = (data.get("stop_details") or {}).get("category")
-                print(f"WARNING: Anthropic refused (model={model}, category={category}).", file=sys.stderr)
-                raise RuntimeError(f"Anthropic refused the request (category={category}).")
-            text_block = next((b for b in data["content"] if b.get("type") == "text"), None)
-            if text_block is None:
-                raise RuntimeError("Anthropic response contained no text block.")
-            text = str(text_block["text"])
-            if data.get("stop_reason") == "max_tokens":
-                dump_path = _dump_truncated_response(model, max_tokens, text)
-                saved = f" Raw response saved to {dump_path}." if dump_path is not None else ""
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    if is_final_attempt:
+                        if tenant:
+                            raise ProviderUnavailableError(
+                                f"Anthropic unavailable after {max_attempts} attempts ({resp.status_code})."
+                            ) from _status_error(resp)
+                        resp.raise_for_status()
+                    delay = _ANTHROPIC_BACKOFFS_SECS[attempt - 1]
+                    retry_after_header = resp.headers.get("retry-after")
+                    if retry_after_header is not None:
+                        with contextlib.suppress(ValueError):
+                            delay = max(delay, float(retry_after_header))
+                    if tenant:
+                        delay = min(delay, float(TENANT_RETRY_AFTER_CAP_SECS))
+                    print(
+                        f"Anthropic retry {attempt}/{max_attempts} after {resp.status_code} (waiting {delay:.1f}s)",
+                        file=sys.stderr,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                resp.raise_for_status()  # non-retryable 4xx raises immediately
+                data = resp.json()
+                usage = data.get("usage") or {}
                 print(
-                    f"WARNING: Anthropic response truncated at max_tokens={max_tokens} — "
-                    f"output may be incomplete.{saved}",
+                    f"Anthropic usage: model={model} in={usage.get('input_tokens')} out={usage.get('output_tokens')}",
                     file=sys.stderr,
                 )
-            return text
+                # Recorded and spent before the refusal check and the text block, so a declined
+                # or truncated attempt is counted (M2b spec §6.1, §6.4, R-GK).
+                if isinstance(data, dict):
+                    if purpose is not None:
+                        RECORDER.record_response(data, purpose, requested_model=model)
+                    if budget is not None:
+                        attempts = _usage_attempts(data, model)
+                        budget.spend(sum(a[1] for a in attempts), sum(a[2] for a in attempts))
+                if data.get("stop_reason") == "refusal":
+                    category = (data.get("stop_details") or {}).get("category")
+                    print(f"WARNING: Anthropic refused (model={model}, category={category}).", file=sys.stderr)
+                    if tenant:
+                        raise RefusalError(
+                            f"Anthropic refused the request (category={category}).",
+                            str(category) if category is not None else None,
+                        )
+                    raise RuntimeError(f"Anthropic refused the request (category={category}).")
+                text_block = next((b for b in data["content"] if b.get("type") == "text"), None)
+                if text_block is None and not (tenant and data.get("stop_reason") == "max_tokens"):
+                    raise RuntimeError("Anthropic response contained no text block.")
+                # Tenant mode: thinking that consumed the whole allowance is an empty, truncated text (R-GK).
+                text = str(text_block["text"]) if text_block is not None else ""
+                if data.get("stop_reason") == "max_tokens":
+                    dump_path = _dump_truncated_response(model, max_tokens, text)
+                    saved = f" Raw response saved to {dump_path}." if dump_path is not None else ""
+                    print(
+                        f"WARNING: Anthropic response truncated at max_tokens={max_tokens} — "
+                        f"output may be incomplete.{saved}",
+                        file=sys.stderr,
+                    )
+                return text
+    finally:
+        if budget is not None:
+            budget.release(input_estimate, max_tokens)
 
     raise RuntimeError("Anthropic request failed — retry loop exited without a response.")
 
@@ -588,7 +1080,7 @@ async def _try_anthropic(prompt: str, system: str = _STAGE1_SYSTEM) -> str | Non
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         return None
-    return await _call_anthropic_http(key, _stage2_model(), system, prompt)
+    return await _call_anthropic_http(key, _stage2_model(), system, prompt, purpose="intent_brief")
 
 
 _OPENROUTER_BASE = "https://openrouter.ai/api"
@@ -1037,14 +1529,24 @@ async def _reroll_colliding_titles(
     """
     forbidden_keys = {name.strip().casefold() for name in used_mix_names}
     colliding = [c for c in curated if c.title.strip().casefold() in forbidden_keys]
-    if not colliding:
-        return curated, []
+    if not colliding or modes.STUB_MODE:
+        return curated, []  # _stub: the value a failed re-roll returns
 
     listing = "\n".join(f'- old_title: "{c.title}" | mood: {c.mood} | thesis: {c.name_reason}' for c in colliding)
     prompt = f"Concepts to rename:\n{listing}\n\nFORBIDDEN LIST:\n{', '.join(used_mix_names)}"
+    model = _stage2_model()
+    effort_payload, fallbacks = _stage2_call_options(model, "title_reroll")
     try:
         raw = await _call_anthropic_http(
-            stage2_key, _stage2_model(), _STAGE2_RENAME_SYSTEM, prompt, max_tokens=1024, timeout=60
+            stage2_key,
+            model,
+            _STAGE2_RENAME_SYSTEM,
+            prompt,
+            max_tokens=1024,
+            timeout=60,
+            purpose="title_reroll",
+            effort_payload=effort_payload,
+            fallbacks=fallbacks,
         )
         cleaned = raw.strip()
         if cleaned.startswith("```"):
@@ -1055,6 +1557,8 @@ async def _reroll_colliding_titles(
             cleaned = cleaned[first : last + 1]
         mappings = json.loads(cleaned)
     except Exception as exc:
+        if _fatal_on_optional_call(exc):
+            raise
         print(f"Title re-roll failed ({exc}) — keeping colliding titles, warnings will flag them.", file=sys.stderr)
         return curated, []
 
@@ -2209,6 +2713,15 @@ def _parse_curated_concepts(raw: str, valid_ids: set[str]) -> tuple[list[MixConc
     return curated, "\n\n---\n\n".join(report_parts)
 
 
+def _parse_selection(raw: str, valid_ids: set[str]) -> list[MixConcept]:
+    """The selection's concepts. In tenant mode an empty selection, whose thinking took the whole
+    allowance (R-GK), is no concept rather than an error, so the run ends at the caller's no-concept exit."""
+    if modes.TENANT_MODE and not raw.strip():
+        return []
+    curated, _ = _parse_curated_concepts(raw, valid_ids)
+    return curated
+
+
 def _extract_arc_type(raw: object) -> ArcType | None:
     """Defensively extract an arc_type value from Stage 2 JSON output.
 
@@ -2688,19 +3201,28 @@ async def _call_stage2_raw(
     prompt: str,
     stage2_system: str,
     stage2_key: str,
-    max_tokens: int = _STAGE2_SELECTION_MAX_TOKENS,
+    max_tokens: int | None = None,
 ) -> str:
     """Make the Stage 2 selection HTTP call via Anthropic."""
+    if max_tokens is None:
+        max_tokens = TENANT_SELECTION_MAX_TOKENS if modes.TENANT_MODE else _STAGE2_SELECTION_MAX_TOKENS
+    model = _stage2_model()
+    effort_payload, fallbacks = _stage2_call_options(model, "selection")
     try:
         return await _call_anthropic_http(
             stage2_key,
-            _stage2_model(),
+            model,
             stage2_system,
             prompt,
             max_tokens=max_tokens,
             timeout=600,
             temperature=_stage2_temperature(),
+            purpose="selection",
+            effort_payload=effort_payload,
+            fallbacks=fallbacks,
         )
+    except TYPED_ERRORS:
+        raise
     except Exception as exc:
         raise RuntimeError(f"Stage 2 curation failed: {exc}") from exc
 
@@ -2711,8 +3233,11 @@ async def _call_stage2_report_single(
     seed_ids: frozenset[str] | None,
     unplayed_ids: set[str] | None,
     stage2_key: str,
+    purpose: Purpose = "report",
 ) -> str:
     """Generate a prose mix report for one curated concept via Anthropic."""
+    if modes.STUB_MODE:
+        return _stub_report(concept)
     track_lines: list[str] = []
     for i, tid in enumerate(concept.track_ids, 1):
         t = tracks_by_id.get(tid)
@@ -2769,15 +3294,22 @@ async def _call_stage2_report_single(
         f"Tracks in play order:\n" + "\n".join(track_lines) + transitions_block
     )
 
+    model = _stage2_model()
+    effort_payload, fallbacks = _stage2_call_options(model, purpose)
     try:
         return await _call_anthropic_http(
             stage2_key,
-            _stage2_model(),
+            model,
             _STAGE2_REPORT_SYSTEM,
             prompt,
             max_tokens=max(2048, 120 * len(concept.track_ids)),
             timeout=120,
+            purpose=purpose,
+            effort_payload=effort_payload,
+            fallbacks=fallbacks,
         )
+    except TYPED_ERRORS:
+        raise
     except Exception as exc:
         raise RuntimeError(f"Stage 2 report generation failed: {exc}") from exc
 
@@ -2831,6 +3363,8 @@ async def _call_stage2_critique_single(
     stage2_key: str,
 ) -> Critique:
     """Run one critique pass for a single concept. Returns a Critique (never raises)."""
+    if modes.STUB_MODE:
+        return _stub_critique()
     track_lines: list[str] = []
     for i, tid in enumerate(concept.track_ids, 1):
         t = tracks_by_id.get(tid)
@@ -2873,11 +3407,23 @@ async def _call_stage2_critique_single(
     if canvas_pool_lines:
         prompt += "Canvas pool (substitution candidates):\n" + "\n".join(canvas_pool_lines) + "\n"
 
+    model = _stage2_model()
+    effort_payload, fallbacks = _stage2_call_options(model, "critique")
     try:
         raw = await _call_anthropic_http(
-            stage2_key, _stage2_model(), _STAGE2_CRITIQUE_SYSTEM, prompt, max_tokens=1024, timeout=120
+            stage2_key,
+            model,
+            _STAGE2_CRITIQUE_SYSTEM,
+            prompt,
+            max_tokens=1024,
+            timeout=120,
+            purpose="critique",
+            effort_payload=effort_payload,
+            fallbacks=fallbacks,
         )
     except Exception as exc:
+        if _fatal_on_optional_call(exc):
+            raise
         # Critique failure never aborts a --deep run; surface the issue as a critique note.
         return Critique(
             verdict="needs_attention",
@@ -3095,6 +3641,8 @@ async def _call_stage2_revision_single(
 ) -> MixConcept | None:
     """Run one minimal-repair pass for a single concept. Returns the revised concept,
     or None when the call fails or parsing yields nothing (caller keeps the original)."""
+    if modes.STUB_MODE:
+        return None  # _stub: the value a failed repair returns
     track_lines: list[str] = []
     for i, tid in enumerate(concept.track_ids, 1):
         t = tracks_by_id.get(tid)
@@ -3120,11 +3668,24 @@ async def _call_stage2_revision_single(
         "Findings to resolve:\n" + "\n".join(f"- {f}" for f in findings) + "\n\n" + canvas_section
     )
 
+    model = _stage2_model()
+    effort_payload, fallbacks = _stage2_call_options(model, "revision")
     try:
         raw = await _call_anthropic_http(
-            stage2_key, _stage2_model(), _STAGE2_REVISION_SYSTEM, prompt, max_tokens=4096, timeout=180, temperature=0.3
+            stage2_key,
+            model,
+            _STAGE2_REVISION_SYSTEM,
+            prompt,
+            max_tokens=4096,
+            timeout=180,
+            temperature=0.3,
+            purpose="revision",
+            effort_payload=effort_payload,
+            fallbacks=fallbacks,
         )
     except Exception as exc:  # noqa: BLE001 — a failed repair never aborts the run
+        if _fatal_on_optional_call(exc):
+            raise
         print(f"Revision: {concept.title} — call failed ({type(exc).__name__}: {exc})", file=sys.stderr)
         return None
 
@@ -3165,8 +3726,8 @@ async def revise_concepts(
     matches the revised track list (best-effort — a regeneration failure keeps the
     pre-revision prose with a disclaimer rather than losing the repair).
     """
-    stage2_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not stage2_key:
+    stage2_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not stage2_key and not modes.STUB_MODE:
         print("Revision skipped — ANTHROPIC_API_KEY is not set.", file=sys.stderr)
         return concepts, report, warnings
 
@@ -3262,7 +3823,9 @@ async def revise_concepts(
         sections = report.split("\n\n---\n\n")
         if len(sections) >= len(concepts):
             try:
-                fresh = await _call_stage2_report_single(revised, tracks_by_id, None, unplayed_ids, stage2_key)
+                fresh = await _call_stage2_report_single(
+                    revised, tracks_by_id, None, unplayed_ids, stage2_key, purpose="report_regeneration"
+                )
                 fresh_section = _append_critique_to_report(
                     _append_practicality_to_report(
                         _append_runtime_to_report(
@@ -3276,6 +3839,8 @@ async def revise_concepts(
                     revised,
                 )
             except Exception as exc:
+                if _fatal_on_optional_call(exc):
+                    raise
                 print(
                     f"Revision: {original.title} — report regeneration failed ({exc}); keeping pre-revision prose",
                     file=sys.stderr,
@@ -3624,6 +4189,81 @@ def _parse_user_intent(intent_text: str) -> dict[str, str]:
     return signals
 
 
+# ---------------------------------------------------------------------------
+# _stub: MIXLAB_LLM_STUB=1 (M2b spec §6.7, M2b-D24). Zero LLM requests. The selection is
+# deterministic JSON in the real selection's shape, so parsing, validation, the sequencer,
+# the report, the export and the summary run unchanged; every other call returns the value
+# its caller already handles for a failed call. Read at call time through ``modes``.
+# ---------------------------------------------------------------------------
+
+_STUB_MAX_CONCEPTS = 6
+_STUB_CONCEPT_TRACKS = 12
+_STUB_CALL_FAILURE = "MIXLAB_LLM_STUB=1 makes no LLM request"
+
+
+def _stub_camelot_order(track_ids: list[str], tracks_by_id: dict[str, Track]) -> list[str]:
+    """Camelot order, number then letter; tracks without a parseable key last, stable."""
+
+    def key(tid: str) -> tuple[int, int, str]:
+        match = _CAMELOT_RE.match(tracks_by_id[tid].camelot_key)
+        return (0, int(match.group(1)), match.group(2).upper()) if match else (1, 0, "")
+
+    return sorted(track_ids, key=key)
+
+
+def _stub_concept(n: int, label: str, mood: str, track_ids: list[str]) -> dict[str, object]:
+    title = f"Stub {n}: {label}"
+    return {
+        "title": title,
+        "name_reason": f"{title}: {len(track_ids)} tracks chosen without a model call.",
+        "mood": mood,
+        "track_ids": track_ids,
+        "transitions": [],
+    }
+
+
+def _stub_selection_json(
+    pools: list[MixCanvas] | list[MixConcept],
+    tracks_by_id: dict[str, Track],
+    *,
+    playlist_seed_ids: list[str] | None,
+) -> str:
+    """The selection a stub run returns: genre mode one concept per canvas or shortlist, playlist mode three variants."""
+    sources = [(p.source_concept if isinstance(p, MixCanvas) else p) for p in pools]
+    offered = [list(dict.fromkeys(tid for tid in s.track_ids if tid in tracks_by_id)) for s in sources]
+    concepts: list[dict[str, object]] = []
+    if playlist_seed_ids is None:
+        for n, (source, ids) in enumerate(zip(sources[:_STUB_MAX_CONCEPTS], offered, strict=False), 1):
+            ordered = _stub_camelot_order(ids, tracks_by_id)[:_STUB_CONCEPT_TRACKS]
+            concepts.append(_stub_concept(n, source.title, "stub", ordered))
+    elif sources:
+        offered_ids = {tid for ids in offered for tid in ids}
+        admitted = [tid for tid in playlist_seed_ids if tid in offered_ids]
+        seeds = list(dict.fromkeys(admitted))
+        library = [tid for tid in offered[0] if tid not in seeds]
+        ids = seeds + library[: max(_STUB_CONCEPT_TRACKS, len(seeds)) - len(seeds)]
+        if len(ids) < _MIN_CONCEPT_TRACKS:
+            # A locked playlist offers only its seeds: keep a repeated seed so the parser's minimum holds.
+            ids = admitted
+        for n, strategy in enumerate(_PLAYLIST_STRATEGY_ORDER, 1):
+            concepts.append(_stub_concept(n, sources[0].title, strategy, ids))
+    return json.dumps(concepts)
+
+
+def _stub_report(concept: MixConcept) -> str:
+    """The fixed report paragraph a stub run writes for one concept."""
+    return (
+        f"CONCEPT: {concept.title}\n\n"
+        f"{concept.title}: a stub concept of {len(concept.track_ids)} tracks, chosen and written "
+        "without a model call (MIXLAB_LLM_STUB=1)."
+    )
+
+
+def _stub_critique() -> Critique:
+    """The critique's own fallback for a failed call (``_call_stage2_critique_single``)."""
+    return Critique(verdict="needs_attention", single_weakest_moment=f"critique call failed: {_STUB_CALL_FAILURE}")
+
+
 async def stage2_curate_and_report(
     shortlists: list[MixConcept],
     tracks_by_id: dict[str, Track],
@@ -3645,8 +4285,8 @@ async def stage2_curate_and_report(
     mix_length: int | None = None,
     naming_seed: int | None = None,
 ) -> tuple[list[MixConcept], str]:
-    stage2_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not stage2_key:
+    stage2_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not stage2_key and not modes.STUB_MODE:
         raise RuntimeError("ANTHROPIC_API_KEY is not set — Stage 2 curation requires Anthropic.")
     stage2_model_display = _stage2_model()
 
@@ -3893,12 +4533,18 @@ async def stage2_curate_and_report(
     if used_mix_names:
         stage2_system = stage2_system + _forbidden_names_block(used_mix_names)
 
-    raw = await _call_stage2_raw(prompt, stage2_system, stage2_key)
+    if modes.STUB_MODE:
+        stub_seed_ids = (seed_track_ids or sorted(seed_ids or [])) if playlist_name is not None else None
+        raw = _stub_selection_json(
+            canvases if canvases is not None else shortlists, tracks_by_id, playlist_seed_ids=stub_seed_ids
+        )
+    else:
+        raw = await _call_stage2_raw(prompt, stage2_system, stage2_key)
 
     if os.environ.get("MIXLAB_DEBUG_STAGE2"):
         print(f"[DEBUG] Stage 2 raw response (first 2000 chars):\n{raw[:2000]}", file=sys.stderr)
 
-    curated, _ = _parse_curated_concepts(raw, offered_ids)
+    curated = _parse_selection(raw, offered_ids)
     print(
         f"Stage 2 selection pass: {len(curated)} concept(s) returned (moods: {[c.mood for c in curated]})",
         file=sys.stderr,
@@ -4002,8 +4648,11 @@ async def stage2_curate_and_report(
                 f"Dropped seeds: {dropped_labels}.\n"
                 "Retry with one concept only. Include as many dropped seeds as possible.\n\n"
             ) + prompt
-            raw = await _call_stage2_raw(retry_prompt, stage2_system, stage2_key)
-            curated, _ = _parse_curated_concepts(raw, offered_ids)
+            if modes.STUB_MODE:
+                raw = _stub_selection_json(shortlists, tracks_by_id, playlist_seed_ids=playlist_seed_track_ids)
+            else:
+                raw = await _call_stage2_raw(retry_prompt, stage2_system, stage2_key)
+            curated = _parse_selection(raw, offered_ids)
             if curated:
                 concept = curated[0]
                 retained_ids, _, _ = _playlist_retention_stats(concept, playlist_seed_track_ids)

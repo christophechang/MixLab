@@ -4,14 +4,16 @@ import argparse
 import asyncio
 import datetime
 import difflib
+import importlib
 import io
 import json
 import os
 import sys
 import time
 import uuid
+from collections.abc import Coroutine
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 
 from dotenv import load_dotenv
 
@@ -61,6 +63,11 @@ from mixlab.html_report import (
 )
 from mixlab.library_map import MapMode, build_map_payload, render_map_json
 from mixlab.llm import (
+    NoShortlistError,
+    ProviderCapError,
+    ProviderUnavailableError,
+    RefusalError,
+    TokenBudgetExceeded,
     _match_canvas_for_concept,  # noqa: PLC2701 — reused here to stamp direction_type on cards (#84)
     _parse_user_intent,  # noqa: PLC2701 — reused here for playlist-mode risk override (#54)
     _qualifies_for_revision,  # noqa: PLC2701 — reused for the revision-gate decision (#55)
@@ -510,6 +517,58 @@ def run_prep(genre: str | None, top: int) -> int:
     return 0
 
 
+# Tenant mode exit codes (M2b spec §5.1, protocol.md v2). Outside tenant mode every refusal exits 1, as before.
+EXIT_NO_SHORTLIST, EXIT_TOKEN_BUDGET, EXIT_PROVIDER_CAP, EXIT_REFUSAL, EXIT_PROVIDER_UNAVAILABLE = 2, 3, 4, 5, 6
+_TENANT_EXIT_CODES: tuple[tuple[type[BaseException], int], ...] = (
+    (NoShortlistError, EXIT_NO_SHORTLIST),
+    (TokenBudgetExceeded, EXIT_TOKEN_BUDGET),
+    (ProviderCapError, EXIT_PROVIDER_CAP),
+    (RefusalError, EXIT_REFUSAL),
+    (ProviderUnavailableError, EXIT_PROVIDER_UNAVAILABLE),
+)
+
+
+def _refuse_no_shortlist(message: str) -> NoReturn:
+    """Too few tracks before any LLM call: tenant mode raises NoShortlistError (exit 2); else print and exit 1."""
+    if modes.TENANT_MODE:
+        raise NoShortlistError(message)
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def _tenant_exit_code(exc: BaseException) -> tuple[int, BaseException] | None:
+    """The exit code for one of the five tenant errors: by the exception's own type, then by its ``__cause__``."""
+    for candidate in (exc, exc.__cause__):
+        for error_type, code in _TENANT_EXIT_CODES:
+            if isinstance(candidate, error_type):
+                return code, candidate
+    return None
+
+
+def _run_engine(coro: Coroutine[object, object, None]) -> None:
+    """Run a pipeline coroutine; in tenant mode the five typed errors exit with their codes (M2b-D9, D10)."""
+    if not modes.TENANT_MODE:
+        asyncio.run(coro)
+        return
+    try:
+        asyncio.run(coro)
+    except Exception as exc:
+        mapped = _tenant_exit_code(exc)
+        if mapped is None:
+            raise
+        code, error = mapped
+        print(f"ERROR: {type(error).__name__}: {error}", file=sys.stderr)
+        sys.exit(code)
+
+
+class _TenantArgumentParser(argparse.ArgumentParser):
+    """Tenant mode: a bad argument exits 1, never argparse's 2, which is no_shortlist (M2b-D30)."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: error: {message}\n")
+
+
 async def run_playlist_mode(
     playlist_name: str,
     genre: str | None,
@@ -569,8 +628,7 @@ async def run_playlist_mode(
     try:
         raw_seed_ids = resolve_playlist(playlist_name, playlists)
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        sys.exit(1)
+        _refuse_no_shortlist(str(exc))
 
     tracks_by_id = _build_tracks_by_id(tracks)
     seed_ids = frozenset(track_id for track_id in raw_seed_ids if track_id in tracks_by_id)
@@ -630,12 +688,10 @@ async def run_playlist_mode(
             seed_tracks, library_tracks, unplayed_ids, all_tracks_flag=mode != "unplayed", intent_brief=intent_brief
         )
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        sys.exit(1)
+        _refuse_no_shortlist(str(exc))
 
     if not shortlists:
-        print("No zone shortlists could be built from the seed playlist.", file=sys.stderr)
-        sys.exit(1)
+        _refuse_no_shortlist("No zone shortlists could be built from the seed playlist.")
 
     t_start = time.monotonic()
 
@@ -1066,8 +1122,7 @@ async def run(
     if is_custom:
         pool = build_custom_genre_pool(genre, unplayed, CUSTOM_GENRES, GENRE_MAP)
         if not pool:
-            print(f"No tracks found for custom genre '{genre}'.", file=sys.stderr)
-            sys.exit(1)
+            _refuse_no_shortlist(f"No tracks found for custom genre '{genre}'.")
         print(f"Custom genre '{genre}': {len(pool)} tracks in pool.")
         # Sort by BPM for Stage 1 — ensures BPM-coherent ordering.
         # (Camelot walk not used here: it can span large BPM gaps across sub-genres.)
@@ -1093,8 +1148,7 @@ async def run(
         genre_cluster_counts = {genre_label: len(cluster_tracks) for genre_label, cluster_tracks in clusters.items()}
 
         if not clusters:
-            print(f"No tracks found for genre '{genre}'.", file=sys.stderr)
-            sys.exit(1)
+            _refuse_no_shortlist(f"No tracks found for genre '{genre}'.")
 
         # 6a. Stage 1 — deterministic partitioning.
         for genre_label, cluster_tracks in clusters.items():
@@ -1137,8 +1191,7 @@ async def run(
             stage2_shortlist_count=0,
             stage1_overflow=total_stage1_overflow,
         )
-        print("No shortlists generated — all tracks may have been excluded.", file=sys.stderr)
-        sys.exit(1)
+        _refuse_no_shortlist("No shortlists generated — all tracks may have been excluded.")
     if len(all_shortlists) < 3:
         print(
             f"⚠️  Stage 1 produced only {len(all_shortlists)} shortlist(s) — pool may be too thin for 3–6 concepts.",
@@ -1247,8 +1300,7 @@ async def run(
         classic_selected = _distinct_from(classic_pool, direction_canvases, limit=classic_n)
         selected_canvases = classic_selected + direction_canvases
     if not selected_canvases:
-        print("No canvases could be built — collection may be out of sync.", file=sys.stderr)
-        sys.exit(1)
+        _refuse_no_shortlist("No canvases could be built — collection may be out of sync.")
     _print_pipeline_summary(
         collection_count=len(tracks),
         unplayed_count=len(unplayed),
@@ -1564,7 +1616,10 @@ def main() -> None:
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(line_buffering=True)
     load_dotenv()
-    parser = argparse.ArgumentParser(
+    # modes reads the switches at import, before .env is loaded: read them again so a value set there counts.
+    importlib.reload(modes)
+    parser_class = _TenantArgumentParser if modes.TENANT_MODE else argparse.ArgumentParser
+    parser = parser_class(
         description="MixLab — AI-powered DJ crate assistant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -1966,7 +2021,7 @@ examples:
                 "Stage 0 intent brief (#54) instead.",
                 file=sys.stderr,
             )
-        asyncio.run(
+        _run_engine(
             run_playlist_mode(
                 args.playlist,
                 args.genre,
@@ -1990,7 +2045,7 @@ examples:
             file=sys.stderr,
         )
 
-    asyncio.run(
+    _run_engine(
         run(
             args.genre,
             export_dir,
