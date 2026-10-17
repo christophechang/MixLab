@@ -3,6 +3,11 @@
 Source repository: `soltech-consulting/mixlab-multi-tenant`, commit `c186cc8` (v0.4.0; the files are
 unchanged at `3c376f7`).
 
+The vendored `src/mixlab/run_contract/` files come from the same repository's `tools/run-contract/`:
+`flags.json`, `genres.json` and `keys.json` at `c186cc8`, and `summary.schema.json` re-vendored at
+`5fad4c2` (soltech-consulting/mixlab-multi-tenant#28, v0.5.0), where `llmCall.model`'s description
+now says it is the model that answered.
+
 | File | What it is | Origin |
 | --- | --- | --- |
 | `s6-standard.xml` | 44 rows, 40 admitted: every admission rule, the deny-list, the doubling, the exact-12 techno pool, playlists | `tests/fixtures/rekordbox/` |
