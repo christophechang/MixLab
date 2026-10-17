@@ -356,6 +356,10 @@ async def stage0_intent_brief(
         seed_tracks, seed_ids=frozenset(seed_track_ids)
     )
 
+    stage0_model = _stage0_model()
+    if stage0_model is not None:
+        return await _stage0_on_anthropic(stage0_model, prompt, seed_tracks, bpm_range, det_brief)
+
     for _ in range(len(_CASCADE)):
         provider = _CASCADE[state.index]
         try:
@@ -380,6 +384,51 @@ async def stage0_intent_brief(
     # All providers failed — fall back to deterministic
     print("Stage 0 LLM failed — using deterministic intent brief.", file=sys.stderr)
     state.consecutive_failures = 0  # reset so later Stage 1 calls get a fresh start
+    return det_brief
+
+
+async def _stage0_on_anthropic(
+    model: str,
+    prompt: str,
+    seed_tracks: list[Track],
+    bpm_range: tuple[float, float],
+    det_brief: IntentBrief,
+) -> IntentBrief:
+    """Stage 0 with ``MIXLAB_STAGE0_MODEL`` set: one Anthropic call, 60 s, no retry, no fallbacks (M2b spec §6.6).
+
+    A refusal, a budget stop or a cap ends the run (R-FY; the typed errors exist only in tenant
+    mode); any other failure falls back to the deterministic brief, as the exhausted cascade does.
+    """
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        try:
+            result = await _call_anthropic_http(
+                key,
+                model,
+                _STAGE0_SYSTEM,
+                prompt,
+                max_tokens=4096,
+                timeout=_STAGE0_ATTEMPT_SECS,
+                temperature=0.7,
+                purpose="intent_brief",
+                effort_payload={"output_config": {"effort": "low"}} if _is_five_family(model) else None,
+                fallbacks=False,
+                attempt_secs=_STAGE0_ATTEMPT_SECS,
+                max_attempts=1,
+            )
+            if not result.strip():
+                raise ValueError(f"Anthropic ({model}) returned empty content for Stage 0.")
+            llm_brief = _parse_intent_brief(result, seed_tracks, bpm_range)
+            # Merge: use LLM tiers but deterministic shape + adjacencies, as the cascade does.
+            llm_brief.energy_shape = det_brief.energy_shape
+            llm_brief.strong_adjacencies = det_brief.strong_adjacencies
+            llm_brief.bpm_range = det_brief.bpm_range
+            return llm_brief
+        except FATAL_ON_OPTIONAL_CALLS:
+            raise
+        except Exception as exc:  # noqa: BLE001 — Stage 0 is advisory: any other failure falls back
+            print(f"Stage 0 provider anthropic ({model}) failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    print("Stage 0 LLM failed — using deterministic intent brief.", file=sys.stderr)
     return det_brief
 
 
@@ -464,6 +513,78 @@ def _stage2_temperature() -> float:
 def _is_sonnet_5_5(model: str) -> bool:
     """Sonnet 5.5 400s on non-default temperature and thinks by default — its payload differs."""
     return model.startswith("claude-sonnet-5-5")
+
+
+# ---------------------------------------------------------------------------
+# The 5-family branch, per-call thinking, fallbacks and Stage 0 on Anthropic (M2b spec
+# §6.4, §6.6, §6.8). Each variable is read at call time; unset, every payload is today's.
+# ---------------------------------------------------------------------------
+
+_STAGE2_EFFORT_ENV = "MIXLAB_STAGE2_EFFORT"
+_STAGE2_EFFORT_LEVELS = frozenset({"low", "medium", "high"})
+_FALLBACKS_ENV = "MIXLAB_FALLBACKS"
+_FALLBACKS_BETA_HEADER = "server-side-fallback-2026-07-01"
+_STAGE0_MODEL_ENV = "MIXLAB_STAGE0_MODEL"
+_STAGE0_ATTEMPT_SECS = 60
+_FIVE_FAMILY_RE = re.compile(r"^claude-[a-z]+-(\d+)")
+# The variables whose invalid value has already been warned about: once per process, not per call.
+_WARNED_ENV: set[str] = set()
+
+
+def _warn_invalid_env_once(name: str, raw: str, effect: str) -> None:
+    if name in _WARNED_ENV:
+        return
+    _WARNED_ENV.add(name)
+    print(f"warning: {name}={raw!r} is not valid; {effect}", file=sys.stderr)
+
+
+def _is_five_family(model: str) -> bool:
+    """A model id whose version segment's major number is 5 or more (M2b-D21); consulted only when the effort is set."""
+    match = _FIVE_FAMILY_RE.match(model)
+    return match is not None and int(match.group(1)) >= 5
+
+
+def _stage2_effort() -> str | None:
+    """``MIXLAB_STAGE2_EFFORT`` when ``low``, ``medium`` or ``high``; anything else warns once and is unset."""
+    raw = os.environ.get(_STAGE2_EFFORT_ENV, "")
+    if raw in _STAGE2_EFFORT_LEVELS:
+        return raw
+    if raw:
+        _warn_invalid_env_once(_STAGE2_EFFORT_ENV, raw, "expected low, medium or high; sending today's payload")
+    return None
+
+
+def _thinking_and_effort(purpose: Purpose, configured: str) -> dict[str, object]:
+    """The thinking mode and effort of one Stage 2 call on a 5-family id (M2b spec §6.4's table, R-FA)."""
+    if purpose in ("selection", "revision"):
+        return {"thinking": {"type": "adaptive"}, "output_config": {"effort": configured}}
+    if purpose in ("report", "report_regeneration"):
+        return {"thinking": {"type": "between_tools"}, "output_config": {"effort": configured}}
+    if purpose in ("title_reroll", "critique"):
+        return {"thinking": {"type": "between_tools"}, "output_config": {"effort": "low"}}
+    raise ValueError(f"{purpose} is not a Stage 2 call")
+
+
+def _fallbacks() -> bool:
+    """``MIXLAB_FALLBACKS=default`` enables the server-side fallback; any other value warns once and is ignored."""
+    raw = os.environ.get(_FALLBACKS_ENV, "")
+    if raw == "default":
+        return True
+    if raw:
+        _warn_invalid_env_once(_FALLBACKS_ENV, raw, "only 'default' is recognised; no fallback is requested")
+    return False
+
+
+def _stage0_model() -> str | None:
+    """``MIXLAB_STAGE0_MODEL``: set, Stage 0 makes one Anthropic call on it instead of the free cascade."""
+    return os.environ.get(_STAGE0_MODEL_ENV, "").strip() or None
+
+
+def _stage2_call_options(model: str, purpose: Purpose) -> tuple[dict[str, object] | None, bool]:
+    """(effort payload, fallbacks) for one Stage 2 call: the payload only with the effort set on a 5-family id."""
+    effort = _stage2_effort()
+    effort_payload = _thinking_and_effort(purpose, effort) if effort is not None and _is_five_family(model) else None
+    return effort_payload, _fallbacks()
 
 
 # ---------------------------------------------------------------------------
@@ -771,6 +892,10 @@ async def _call_anthropic_http(
     temperature: float = 0.7,
     *,
     purpose: Purpose | None = None,
+    effort_payload: dict[str, object] | None = None,
+    fallbacks: bool = False,
+    attempt_secs: int | None = None,
+    max_attempts: int | None = None,
 ) -> str:
     headers = {
         "x-api-key": api_key,
@@ -783,20 +908,30 @@ async def _call_anthropic_http(
         "system": system,
         "messages": [{"role": "user", "content": prompt}],
     }
-    if _is_sonnet_5_5(model):
+    if effort_payload is not None:
+        # A 5-family call with its own thinking and effort (M2b spec §6.4, §6.6): no temperature.
+        payload.update(effort_payload)
+    elif _is_sonnet_5_5(model):
         # between_tools is 5.5's thinking-off setting; it is only valid at effort high or below.
         payload["thinking"] = {"type": "between_tools"}
         payload["output_config"] = {"effort": "high"}
     else:
         payload["temperature"] = temperature
+    if fallbacks:
+        payload["fallbacks"] = "default"  # M2b spec §6.8, Stage 2 only
+        headers["anthropic-beta"] = _FALLBACKS_BETA_HEADER
     # Tenant mode (M2b spec §6.2, §6.3, §6.5): a budget reservation per call, each attempt
     # wall-clock bounded, one retry, retry-after capped, and the typed errors. Outside it
-    # every line below behaves as before.
+    # every line below behaves as before. A caller's attempt_secs bounds each attempt in any
+    # mode, and its max_attempts overrides the mode's default (Stage 0, M2b spec §6.6).
     tenant = modes.TENANT_MODE
-    max_attempts = TENANT_MAX_ATTEMPTS if tenant else _ANTHROPIC_MAX_ATTEMPTS
+    if attempt_secs is None and tenant:
+        attempt_secs = TENANT_ATTEMPT_SECS
+    if max_attempts is None:
+        max_attempts = TENANT_MAX_ATTEMPTS if tenant else _ANTHROPIC_MAX_ATTEMPTS
     transport_errors: tuple[type[Exception], ...] = (
         (httpx.TimeoutException, httpx.TransportError, TimeoutError)
-        if tenant
+        if attempt_secs is not None
         else (httpx.TimeoutException, httpx.TransportError)
     )
     budget = TOKEN_BUDGET.get() if tenant else None
@@ -808,8 +943,8 @@ async def _call_anthropic_http(
             for attempt in range(1, max_attempts + 1):
                 is_final_attempt = attempt == max_attempts
                 try:
-                    if tenant:
-                        async with asyncio.timeout(TENANT_ATTEMPT_SECS):
+                    if attempt_secs is not None:
+                        async with asyncio.timeout(attempt_secs):
                             resp = await client.post(
                                 "https://api.anthropic.com/v1/messages", headers=headers, json=payload
                             )
@@ -1396,15 +1531,19 @@ async def _reroll_colliding_titles(
 
     listing = "\n".join(f'- old_title: "{c.title}" | mood: {c.mood} | thesis: {c.name_reason}' for c in colliding)
     prompt = f"Concepts to rename:\n{listing}\n\nFORBIDDEN LIST:\n{', '.join(used_mix_names)}"
+    model = _stage2_model()
+    effort_payload, fallbacks = _stage2_call_options(model, "title_reroll")
     try:
         raw = await _call_anthropic_http(
             stage2_key,
-            _stage2_model(),
+            model,
             _STAGE2_RENAME_SYSTEM,
             prompt,
             max_tokens=1024,
             timeout=60,
             purpose="title_reroll",
+            effort_payload=effort_payload,
+            fallbacks=fallbacks,
         )
         cleaned = raw.strip()
         if cleaned.startswith("```"):
@@ -3064,16 +3203,20 @@ async def _call_stage2_raw(
     """Make the Stage 2 selection HTTP call via Anthropic."""
     if max_tokens is None:
         max_tokens = TENANT_SELECTION_MAX_TOKENS if modes.TENANT_MODE else _STAGE2_SELECTION_MAX_TOKENS
+    model = _stage2_model()
+    effort_payload, fallbacks = _stage2_call_options(model, "selection")
     try:
         return await _call_anthropic_http(
             stage2_key,
-            _stage2_model(),
+            model,
             stage2_system,
             prompt,
             max_tokens=max_tokens,
             timeout=600,
             temperature=_stage2_temperature(),
             purpose="selection",
+            effort_payload=effort_payload,
+            fallbacks=fallbacks,
         )
     except TYPED_ERRORS:
         raise
@@ -3146,15 +3289,19 @@ async def _call_stage2_report_single(
         f"Tracks in play order:\n" + "\n".join(track_lines) + transitions_block
     )
 
+    model = _stage2_model()
+    effort_payload, fallbacks = _stage2_call_options(model, purpose)
     try:
         return await _call_anthropic_http(
             stage2_key,
-            _stage2_model(),
+            model,
             _STAGE2_REPORT_SYSTEM,
             prompt,
             max_tokens=max(2048, 120 * len(concept.track_ids)),
             timeout=120,
             purpose=purpose,
+            effort_payload=effort_payload,
+            fallbacks=fallbacks,
         )
     except TYPED_ERRORS:
         raise
@@ -3253,15 +3400,19 @@ async def _call_stage2_critique_single(
     if canvas_pool_lines:
         prompt += "Canvas pool (substitution candidates):\n" + "\n".join(canvas_pool_lines) + "\n"
 
+    model = _stage2_model()
+    effort_payload, fallbacks = _stage2_call_options(model, "critique")
     try:
         raw = await _call_anthropic_http(
             stage2_key,
-            _stage2_model(),
+            model,
             _STAGE2_CRITIQUE_SYSTEM,
             prompt,
             max_tokens=1024,
             timeout=120,
             purpose="critique",
+            effort_payload=effort_payload,
+            fallbacks=fallbacks,
         )
     except Exception as exc:
         if _fatal_on_optional_call(exc):
@@ -3508,16 +3659,20 @@ async def _call_stage2_revision_single(
         "Findings to resolve:\n" + "\n".join(f"- {f}" for f in findings) + "\n\n" + canvas_section
     )
 
+    model = _stage2_model()
+    effort_payload, fallbacks = _stage2_call_options(model, "revision")
     try:
         raw = await _call_anthropic_http(
             stage2_key,
-            _stage2_model(),
+            model,
             _STAGE2_REVISION_SYSTEM,
             prompt,
             max_tokens=4096,
             timeout=180,
             temperature=0.3,
             purpose="revision",
+            effort_payload=effort_payload,
+            fallbacks=fallbacks,
         )
     except Exception as exc:  # noqa: BLE001 — a failed repair never aborts the run
         if _fatal_on_optional_call(exc):

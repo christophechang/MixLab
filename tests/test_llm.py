@@ -21,6 +21,7 @@ from mixlab.models import (
     ContrastAssets,
     Critique,
     DJPracticalityScore,
+    IntentBrief,
     MixCanvas,
     MixConcept,
     MixPoints,
@@ -8021,3 +8022,592 @@ async def test_max_tokens_without_text_block_returns_empty_in_tenant_mode(
             "stopReason": "max_tokens",
         }
     ]
+
+
+# ---------------------------------------------------------------------------
+# M2b E2: the 5-family branch, per-call thinking, fallbacks, Stage 0 on Anthropic (spec §6.4, §6.6, §6.8)
+# ---------------------------------------------------------------------------
+
+_NEW_LLM_VARS = ("MIXLAB_STAGE2_EFFORT", "MIXLAB_FALLBACKS", "MIXLAB_STAGE0_MODEL", "MIXLAB_STAGE2_MODEL")
+_FALLBACKS_BETA = "server-side-fallback-2026-07-01"
+_FREE_PROVIDER_URLS = (_GROQ_URL, _GEMINI_URL, _MISTRAL_URL, _OPENROUTER_URL)
+
+
+def _httpx_json_bytes(payload: dict[str, object]) -> bytes:
+    """The bytes httpx 0.28 sends for ``json=payload`` (``httpx._content.encode_json``)."""
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+@pytest.fixture
+def llm_env(monkeypatch: pytest.MonkeyPatch, modes_restored: None) -> None:
+    """Every Task 6 variable unset and the once-per-process warnings re-armed."""
+    del modes_restored
+    for var in _NEW_LLM_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(llm, "_WARNED_ENV", set())
+
+
+def _body(request: httpx.Request) -> dict[str, object]:
+    body: dict[str, object] = json.loads(request.content)
+    return body
+
+
+async def _run_every_stage2_call(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[httpx.Request]]:
+    """A deep run with a title collision plus one revision: the six Stage 2 purposes, requests by purpose."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    renames = json.dumps([{"old_title": "Dark Rollers", "new_title": "Night Engines"}])
+    revision_payload = json.dumps(
+        [{"title": "Jump Fix", "name_reason": "s", "mood": "s", "track_ids": ["1", "2", "9", "4", "5", "6", "7", "8"]}]
+    )
+    by_purpose: dict[str, list[httpx.Request]] = {}
+    in_revision = False
+
+    def answer(request: httpx.Request) -> Response:
+        system = _system_of(request)
+        if system.startswith(llm._STAGE2_SYSTEM_SELECTION):
+            by_purpose.setdefault("selection", []).append(request)
+            return Response(200, json=_usage_response(_two_concepts_payload()))
+        purposes = {
+            llm._STAGE2_RENAME_SYSTEM: ("title_reroll", renames),
+            llm._STAGE2_CRITIQUE_SYSTEM: ("critique", _critique_payload("solid")),
+            llm._STAGE2_REPORT_SYSTEM: ("report_regeneration" if in_revision else "report", _REPORT_TEXT),
+            llm._STAGE2_REVISION_SYSTEM: ("revision", revision_payload),
+        }
+        purpose, text = purposes[system]
+        by_purpose.setdefault(purpose, []).append(request)
+        return Response(200, json=_usage_response(text))
+
+    respx.post(_ANTHROPIC_URL).mock(side_effect=answer)
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=[str(i) for i in range(1, 9)])]
+    await llm.stage2_curate_and_report(shortlists, _eight_tracks(), deep=True, used_mix_names=["Dark Rollers"])
+
+    in_revision = True
+    pool = [str(i) for i in range(1, 10)]
+    lib = _revision_lib({i: ("2A" if i == "3" else "8A") for i in pool})
+    canvas = _revision_canvas(pool)
+    original = MixConcept(title="Jump Fix", mood="steady", track_ids=[str(i) for i in range(1, 9)])
+    warnings = llm.validate_stage2_output(
+        [original], [canvas], lib, played_ids=set(), denylist_ids=set(), genre="house"
+    )
+    await llm.revise_concepts(
+        [original],
+        "PROSE\n\n---\n\nMain brain: m",
+        warnings,
+        [canvas],
+        lib,
+        played_ids=set(),
+        allow_played=False,
+        genre="house",
+    )
+    assert set(by_purpose) == {"selection", "title_reroll", "critique", "report", "revision", "report_regeneration"}
+    return by_purpose
+
+
+def test_five_family_detection() -> None:
+    for model in ("claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"):
+        assert llm._is_five_family(model), model
+    for model in ("claude-sonnet-4-6", "claude-opus-4-8"):
+        assert not llm._is_five_family(model), model
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+async def test_effort_unset_payload_byte_identical_every_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The bodies 5b33bda (v1.19.3) sends, captured from its own _call_stage2_raw and the
+    # _call_anthropic_http defaults under respx, pasted in the key order httpx serialises.
+    expected: dict[str, tuple[dict[str, object], dict[str, object]]] = {
+        "claude-sonnet-5-5": (
+            {
+                "model": "claude-sonnet-5-5",
+                "max_tokens": 64000,
+                "system": "system",
+                "messages": [{"role": "user", "content": "prompt"}],
+                "thinking": {"type": "between_tools"},
+                "output_config": {"effort": "high"},
+            },
+            {
+                "model": "claude-sonnet-5-5",
+                "max_tokens": 2048,
+                "system": "system",
+                "messages": [{"role": "user", "content": "prompt"}],
+                "thinking": {"type": "between_tools"},
+                "output_config": {"effort": "high"},
+            },
+        ),
+        "claude-haiku-5-5": (
+            {
+                "model": "claude-haiku-5-5",
+                "max_tokens": 64000,
+                "system": "system",
+                "messages": [{"role": "user", "content": "prompt"}],
+                "temperature": 0.5,
+            },
+            {
+                "model": "claude-haiku-5-5",
+                "max_tokens": 2048,
+                "system": "system",
+                "messages": [{"role": "user", "content": "prompt"}],
+                "temperature": 0.7,
+            },
+        ),
+        "claude-sonnet-4-6": (
+            {
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 64000,
+                "system": "system",
+                "messages": [{"role": "user", "content": "prompt"}],
+                "temperature": 0.5,
+            },
+            {
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 2048,
+                "system": "system",
+                "messages": [{"role": "user", "content": "prompt"}],
+                "temperature": 0.7,
+            },
+        ),
+    }
+    # One literal byte string as well, so the helper cannot drift with the dicts.
+    assert _httpx_json_bytes(expected["claude-sonnet-5-5"][0]) == (
+        b'{"model":"claude-sonnet-5-5","max_tokens":64000,"system":"system",'
+        b'"messages":[{"role":"user","content":"prompt"}],'
+        b'"thinking":{"type":"between_tools"},"output_config":{"effort":"high"}}'
+    )
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response()))
+
+    for model, (selection, default_call) in expected.items():
+        monkeypatch.setenv("MIXLAB_STAGE2_MODEL", model)
+        route.calls.clear()
+        await llm._call_stage2_raw("prompt", "system", "key")
+        await llm._call_anthropic_http("key", model, "system", "prompt")
+
+        assert [call.request.content for call in route.calls] == [
+            _httpx_json_bytes(selection),
+            _httpx_json_bytes(default_call),
+        ], model
+        for call in route.calls:
+            assert "anthropic-beta" not in call.request.headers, model
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+async def test_effort_set_sends_per_call_thinking_and_levels(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-opus-5-5")
+    monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "medium")
+
+    by_purpose = await _run_every_stage2_call(monkeypatch)
+
+    expected = {
+        "selection": ({"type": "adaptive"}, "medium"),
+        "revision": ({"type": "adaptive"}, "medium"),
+        "report": ({"type": "between_tools"}, "medium"),
+        "report_regeneration": ({"type": "between_tools"}, "medium"),
+        "critique": ({"type": "between_tools"}, "low"),
+        "title_reroll": ({"type": "between_tools"}, "low"),
+    }
+    for purpose, (thinking, effort) in expected.items():
+        for request in by_purpose[purpose]:
+            body = _body(request)
+            assert body["thinking"] == thinking, purpose
+            assert body["output_config"] == {"effort": effort}, purpose
+            assert "temperature" not in body, purpose
+            assert "fallbacks" not in body, purpose
+            assert "anthropic-beta" not in request.headers, purpose
+    assert llm._thinking_and_effort("selection", "high") == {
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "high"},
+    }
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+async def test_effort_invalid_warns_and_uses_unset_payload(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "max")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response()))
+
+    for model in ("claude-sonnet-5-5", "claude-opus-5-5"):
+        monkeypatch.setenv("MIXLAB_STAGE2_MODEL", model)
+        await llm._call_stage2_raw("prompt", "system", "key")
+        await llm._call_stage2_raw("prompt", "system", "key")
+
+    bodies = [_body(call.request) for call in route.calls]
+    # Today's payload: Sonnet 5.5's between_tools / high dict, temperature for every other id.
+    assert bodies[0]["thinking"] == {"type": "between_tools"}
+    assert bodies[0]["output_config"] == {"effort": "high"}
+    assert "temperature" not in bodies[0]
+    assert bodies[2]["temperature"] == 0.5
+    assert "thinking" not in bodies[2]
+    assert "output_config" not in bodies[2]
+    assert bodies[0] == bodies[1]
+    assert bodies[2] == bodies[3]
+    err = capsys.readouterr().err
+    assert err.count("MIXLAB_STAGE2_EFFORT") == 1  # warned once per process, not per call
+    assert llm._stage2_effort() is None
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+async def test_four_family_payload_byte_identical_with_effort_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-sonnet-4-6")
+    monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "high")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response()))
+
+    await llm._call_stage2_raw("prompt", "system", "key")
+
+    assert route.calls[0].request.content == _httpx_json_bytes(
+        {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64000,
+            "system": "system",
+            "messages": [{"role": "user", "content": "prompt"}],
+            "temperature": 0.5,
+        }
+    )
+
+    by_purpose = await _run_every_stage2_call(monkeypatch)
+    for purpose, requests in by_purpose.items():
+        for request in requests:
+            body = _body(request)
+            assert "temperature" in body, purpose
+            assert "thinking" not in body, purpose
+            assert "output_config" not in body, purpose
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+async def test_fallbacks_default_adds_field_and_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIXLAB_FALLBACKS", "default")
+
+    for model in ("claude-sonnet-4-6", "claude-sonnet-5-5"):
+        monkeypatch.setenv("MIXLAB_STAGE2_MODEL", model)
+        by_purpose = await _run_every_stage2_call(monkeypatch)
+        for purpose, requests in by_purpose.items():
+            for request in requests:
+                assert _body(request)["fallbacks"] == "default", (model, purpose)
+                assert request.headers["anthropic-beta"] == _FALLBACKS_BETA, (model, purpose)
+
+    # The rest of the payload is unchanged: the field is appended to today's body.
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-sonnet-4-6")
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response()))
+    await llm._call_stage2_raw("prompt", "system", "key")
+    assert respx.calls.last.request.content == _httpx_json_bytes(
+        {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64000,
+            "system": "system",
+            "messages": [{"role": "user", "content": "prompt"}],
+            "temperature": 0.5,
+            "fallbacks": "default",
+        }
+    )
+
+
+def _seed_tracks(n: int = 6) -> list[Track]:
+    return [
+        Track(
+            track_id=str(i),
+            artist=f"Artist {i}",
+            title=f"Title {i}",
+            bpm=124.0 + i * 0.5,
+            camelot_key="8A",
+            genre="House",
+        )
+        for i in range(1, n + 1)
+    ]
+
+
+_STAGE0_ANSWER = json.dumps(
+    {
+        "overall_vibe": "Deep hypnotic groove",
+        "is_coherent_set": True,
+        "risk_tolerance": "high",
+        "missing_roles": ["closer"],
+        "seed_analyses": [{"track_id": "1", "tier": "anchor", "inferred_role": "peak"}],
+    }
+)
+
+
+async def _stage0(seed_tracks: list[Track] | None = None) -> tuple[IntentBrief, IntentBrief]:
+    """(the brief stage0_intent_brief returns, the deterministic brief for the same seeds)."""
+    from mixlab.playlist_mode import compute_deterministic_intent
+
+    tracks = seed_tracks or _seed_tracks()
+    ids = [t.track_id for t in tracks]
+    deterministic = compute_deterministic_intent(ids, {t.track_id: t for t in tracks})
+    brief = await llm.stage0_intent_brief(tracks, ids, llm.make_cascade_state(), (124.0, 127.0))
+    return brief, deterministic
+
+
+def _stage0_prompt(tracks: list[Track]) -> str:
+    """Stage 0's user prompt for these seeds, as stage0_intent_brief builds it."""
+    seed_ids = frozenset(t.track_id for t in tracks)
+    return f"Seed playlist ({len(tracks)} tracks in original order):\n" + llm._tracks_to_text(tracks, seed_ids=seed_ids)
+
+
+def _free_provider_routes(monkeypatch: pytest.MonkeyPatch) -> list[respx.Route]:
+    """Every cascade provider keyed and mocked, so a cascade call would be seen."""
+    for var in ("GROQ_API_KEY", "GEMINI_API_KEY", "MISTRAL_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.setenv(var, "free-key")
+    chat = {"choices": [{"message": {"content": _STAGE0_ANSWER}}]}
+    return [respx.post(url).mock(return_value=Response(200, json=chat)) for url in _FREE_PROVIDER_URLS]
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+async def test_fallbacks_never_on_stage0(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("MIXLAB_FALLBACKS", "default")
+    monkeypatch.setenv("MIXLAB_STAGE0_MODEL", "claude-haiku-5-5")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response(_STAGE0_ANSWER)))
+
+    brief, _ = await _stage0()
+
+    assert brief.overall_vibe == "Deep hypnotic groove"
+    assert route.call_count == 1
+    assert "fallbacks" not in _body(route.calls[0].request)
+    assert "anthropic-beta" not in route.calls[0].request.headers
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+async def test_fallbacks_other_value_ignored(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("MIXLAB_FALLBACKS", "on")
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-sonnet-4-6")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response()))
+
+    await llm._call_stage2_raw("prompt", "system", "key")
+    await llm._call_stage2_raw("prompt", "system", "key")
+
+    for call in route.calls:
+        assert call.request.content == _httpx_json_bytes(
+            {
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 64000,
+                "system": "system",
+                "messages": [{"role": "user", "content": "prompt"}],
+                "temperature": 0.5,
+            }
+        )
+        assert "anthropic-beta" not in call.request.headers
+    assert capsys.readouterr().err.count("MIXLAB_FALLBACKS") == 1
+    assert llm._fallbacks() is False
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+async def test_stage0_model_set_calls_anthropic_low_effort_once_60s_no_retry(
+    monkeypatch: pytest.MonkeyPatch, sleeps: list[float]
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("MIXLAB_STAGE0_MODEL", "claude-haiku-5-5")
+    free_routes = _free_provider_routes(monkeypatch)
+    client_timeouts: list[int] = []
+    attempt_bounds: list[float | None] = []
+    real_client = httpx.AsyncClient
+    real_timeout = asyncio.timeout
+
+    def recording_client(*, timeout: int) -> httpx.AsyncClient:
+        client_timeouts.append(timeout)
+        return real_client(timeout=timeout)
+
+    def recording_timeout(delay: float | None) -> asyncio.Timeout:
+        attempt_bounds.append(delay)
+        return real_timeout(delay)
+
+    monkeypatch.setattr("mixlab.llm.httpx.AsyncClient", recording_client)
+    monkeypatch.setattr("mixlab.llm.asyncio.timeout", recording_timeout)
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response(_STAGE0_ANSWER)))
+
+    brief, deterministic = await _stage0()
+
+    assert route.call_count == 1
+    assert route.calls[0].request.content == _httpx_json_bytes(
+        {
+            "model": "claude-haiku-5-5",
+            "max_tokens": 4096,
+            "system": llm._STAGE0_SYSTEM,
+            "messages": [{"role": "user", "content": _stage0_prompt(_seed_tracks())}],
+            "output_config": {"effort": "low"},
+        }
+    )
+    assert client_timeouts == [60]
+    assert attempt_bounds == [60]
+    assert all(not free.called for free in free_routes)
+    # Parsed and merged exactly as the cascade does.
+    assert brief.overall_vibe == "Deep hypnotic groove"
+    assert brief.risk_tolerance == "high"
+    assert "1" in brief.anchor_ids
+    assert brief.energy_shape == deterministic.energy_shape
+    assert brief.strong_adjacencies == deterministic.strong_adjacencies
+    assert brief.bpm_range == deterministic.bpm_range
+    assert [call.purpose for call in llm.RECORDER.calls] == ["intent_brief"]
+
+    # A 4-family id sends temperature 0.7 and no effort.
+    monkeypatch.setenv("MIXLAB_STAGE0_MODEL", "claude-sonnet-4-6")
+    await _stage0()
+    body = _body(route.calls[1].request)
+    assert body["temperature"] == 0.7
+    assert "output_config" not in body
+    assert "thinking" not in body
+
+    # A 500 is not retried: one request, no sleep, the deterministic brief.
+    route.calls.clear()
+    route.mock(return_value=Response(500, json={"error": "boom"}))
+    brief, deterministic = await _stage0()
+    assert route.call_count == 1
+    assert sleeps == []
+    assert brief == deterministic
+    assert all(not free.called for free in free_routes)
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env", "tenant_mode")
+def test_stage0_refusal_exits_five(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    from mixlab import __main__ as main_mod
+
+    rows = "\n".join(
+        f'    <TRACK TrackID="{i}" Name="Track {i}" Artist="Artist {i}" AverageBpm="124.00" '
+        f'Tonality="8A" Genre="House" TotalTime="300" Rating="0" PlayCount="0"/>'
+        for i in range(1, 9)
+    )
+    seeds = "\n".join(f'          <TRACK Key="{i}"/>' for i in range(1, 7))
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<DJ_PLAYLISTS Version="1.0.0">\n'
+        f'  <COLLECTION Entries="8">\n{rows}\n  </COLLECTION>\n'
+        '  <PLAYLISTS>\n    <NODE Type="0" Name="ROOT" Count="1">\n'
+        f'      <NODE Type="1" Name="Seed" KeyType="0" Entries="6">\n{seeds}\n      </NODE>\n'
+        "    </NODE>\n  </PLAYLISTS>\n</DJ_PLAYLISTS>\n"
+    )
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", tmp_path / "history.json")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("MIXLAB_STAGE0_MODEL", "claude-haiku-5-5")
+    free_routes = _free_provider_routes(monkeypatch)
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_refusal_response("bio")))
+    monkeypatch.setattr("sys.argv", ["mixlab", "--playlist", "Seed", "--mode", "all"])
+
+    with (
+        patch("mixlab.__main__.load_dotenv"),
+        patch("mixlab.__main__.send_report", AsyncMock()),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        main_mod.main()
+
+    assert exc_info.value.code == 5
+    assert "ERROR: RefusalError:" in capsys.readouterr().err
+    assert route.call_count == 1  # the Stage 0 call; the run ended before Stage 2
+    assert _system_of(route.calls[0].request) == llm._STAGE0_SYSTEM
+    assert all(not free.called for free in free_routes)
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+async def test_stage0_other_failure_falls_back_to_deterministic_brief(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], sleeps: list[float]
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("MIXLAB_STAGE0_MODEL", "claude-haiku-5-5")
+    free_routes = _free_provider_routes(monkeypatch)
+    route = respx.post(_ANTHROPIC_URL)
+    failures: list[tuple[str, Response | Exception]] = [
+        ("500", Response(500, json={"error": "boom"})),
+        ("400", Response(400, json=_error_body("invalid_request_error", "bad"))),
+        ("read timeout", httpx.ReadTimeout("slow")),
+        ("attempt bound", TimeoutError()),
+        ("empty text", Response(200, json=_usage_response("  "))),
+        ("refusal outside tenant mode", Response(200, json=_refusal_response())),
+    ]
+
+    for label, failure in failures:
+        route.calls.clear()
+        route.mock(side_effect=[failure])
+        capsys.readouterr()
+        brief, deterministic = await _stage0()
+        assert brief == deterministic, label
+        assert route.call_count == 1, label
+        err = capsys.readouterr().err
+        assert "Stage 0 provider anthropic" in err, label
+        assert "Stage 0 LLM failed — using deterministic intent brief." in err, label
+
+    # Tenant mode: a 401 and an outage are ProviderUnavailableError, which falls back too.
+    _set_tenant(monkeypatch, True)
+    for label, failure in (("401", Response(401, json={})), ("529", Response(529, json={}))):
+        route.calls.clear()
+        route.mock(side_effect=[failure])
+        brief, deterministic = await _stage0()
+        assert brief == deterministic, label
+        assert route.call_count == 1, label
+        assert "ProviderUnavailableError" in capsys.readouterr().err, label
+
+    # No key: no request, the deterministic brief.
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    route.calls.clear()
+    brief, deterministic = await _stage0()
+    assert brief == deterministic
+    assert not route.called
+    assert "Stage 0 LLM failed — using deterministic intent brief." in capsys.readouterr().err
+    assert sleeps == []
+    assert all(not free.called for free in free_routes)
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+async def test_stage0_unset_runs_cascade_as_before(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    free_routes = _free_provider_routes(monkeypatch)
+    anthropic = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response(_STAGE0_ANSWER)))
+
+    brief, deterministic = await _stage0()
+
+    assert brief.overall_vibe == "Deep hypnotic groove"
+    assert brief.energy_shape == deterministic.energy_shape
+    assert free_routes[0].call_count == 1  # Groq, the cascade's first provider
+    assert all(not free.called for free in free_routes[1:])
+    assert not anthropic.called
+    groq_messages = cast("list[dict[str, str]]", _body(free_routes[0].calls[0].request)["messages"])
+    assert groq_messages == [
+        {"role": "system", "content": llm._STAGE0_SYSTEM},
+        {"role": "user", "content": _stage0_prompt(_seed_tracks())},
+    ]
+    assert llm._stage0_model() is None
+
+    # Too few seeds: neither path is taken.
+    monkeypatch.setenv("MIXLAB_STAGE0_MODEL", "claude-haiku-5-5")
+    short, short_deterministic = await _stage0(_seed_tracks(5))
+    assert short == short_deterministic
+    assert not anthropic.called
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env", "tenant_mode")
+async def test_stage0_budget_exceeded_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("MIXLAB_STAGE0_MODEL", "claude-haiku-5-5")
+    monkeypatch.setenv("MIXLAB_TOKEN_BUDGET", "150000,4000")  # Stage 0 reserves max_tokens 4,096
+    llm.TOKEN_BUDGET.reset()
+    free_routes = _free_provider_routes(monkeypatch)
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response(_STAGE0_ANSWER)))
+
+    with pytest.raises(llm.TokenBudgetExceeded):
+        await _stage0()
+
+    assert not route.called
+    assert all(not free.called for free in free_routes)
+
+    # A cap answer propagates as well (R-FY).
+    monkeypatch.delenv("MIXLAB_TOKEN_BUDGET")
+    llm.TOKEN_BUDGET.reset()
+    route.mock(return_value=Response(402, json=_error_body("billing_error", "pay")))
+    with pytest.raises(llm.ProviderCapError):
+        await _stage0()
