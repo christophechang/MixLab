@@ -55,6 +55,24 @@
   mode, makes no LLM request and needs no API key. The selection, the reports and
   Stage 0 are deterministic, and the HTML report, the export and the history are
   written as for a real run.
+- **The history and genre-cache paths can be set.** `MIXLAB_HISTORY_PATH` replaces
+  the two hard-coded history paths (runs and `--feedback`, and the Anywhere
+  worker's sync) and `MIXLAB_GENRE_CACHE_PATH` the genre cache's; both defaults are
+  unchanged.
+- **Tenant runs write `summary.json` version 2.** With `MIXLAB_API_MODE=tenant` the
+  summary adds `llmCalls` from the recorder, `historyEntry`, and `engineDigest` and
+  `protocolVersion` from `MIXLAB_ENGINE_DIGEST` and `MIXLAB_PROTOCOL_VERSION` when
+  they are valid, and playlist mode appends a history entry with empty canvases.
+  Outside tenant mode the summary stays version 1 and playlist mode writes no
+  history.
+- **A tenant worker runs one multi-tenant run per execution.** With
+  `MIXLAB_API_MODE=tenant`, `--worker-once` claims the run named by `--run` or
+  `MIXLAB_RUN_ID`, syncs history and feedback, gunzips the upload under the 96 MiB
+  cap, runs the engine in the scratch directory without the worker's credentials,
+  and posts `complete` or `fail` with a scrubbed diagnostics blob, inside the
+  protocol's 60-second, 3-minute and 3-minute windows. `--worker` is refused in
+  tenant mode. The MixLab Anywhere worker is unchanged. See
+  `docs/architecture/tenant-mode.md`.
 
 ## v1.19.3 — 2026-10-15
 
