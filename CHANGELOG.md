@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v1.20.0 — 2026-10-17
+
+The engine for the multi-tenant MixLab (M2b). With no new variable set it behaves as
+v1.19.3 apart from the parser's refusals and the `AverageBpm` grammar below. Deploying it needs
+`.venv/bin/pip install -e .` after the pull, so the `lxml` pin takes effect.
 
 - **The parser refuses input Rekordbox never writes.** A gzip file, a `DOCTYPE`
   (found by the prolog scan, or after the parse for encodings the scan does not
