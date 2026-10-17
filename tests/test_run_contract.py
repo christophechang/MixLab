@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import re
+from collections.abc import Iterator
 from importlib import resources
 from pathlib import Path
 from typing import cast
+from unittest.mock import AsyncMock, patch
 
+import jsonschema  # type: ignore[import-untyped]  # no stubs ship; types-jsonschema would be a new dependency (R-EX)
 import pytest
 
-from mixlab import run_contract
+from mixlab import llm, modes, run_contract
+from mixlab.__main__ import main
 from mixlab.config import CUSTOM_GENRES, GENRE_MAP, IGNORED_GENRES
 from mixlab.worker import _FLAG_SPECS
 
@@ -82,3 +87,74 @@ def test_bpm_grammar_fixture_matches_preflight_regex() -> None:
     text = (Path(__file__).parent / "fixtures" / "run_contract" / "bpm_grammar.txt").read_text(encoding="utf-8")
     assert text.endswith("\n")
     assert text.count("\n") == 1
+
+
+_S6_STANDARD = Path(__file__).parent / "fixtures" / "run_contract" / "s6-standard.xml"
+_STUB_ENV_CLEARED = (
+    "ANTHROPIC_API_KEY",
+    "GROQ_API_KEY",
+    "GEMINI_API_KEY",
+    "MISTRAL_API_KEY",
+    "OPENROUTER_API_KEY",
+    "CATALOG_API_URL",
+    "DISCORD_BOT_TOKEN",
+    "MIXLAB_STAGE0_MODEL",
+    "MIXLAB_STAGE2_MODEL",
+    "MIXLAB_TOKEN_BUDGET",
+)
+
+
+@pytest.fixture
+def stub_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """A stub run on s6-standard.xml under MIXLAB_PLAYED_SOURCE=file, everything under tmp_path."""
+    for var in _STUB_ENV_CLEARED:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("MIXLAB_LLM_STUB", "1")
+    monkeypatch.setenv("MIXLAB_PLAYED_SOURCE", "file")
+    monkeypatch.setenv("MIXLAB_REPORT_DIR", str(tmp_path / "reports"))
+    monkeypatch.setenv("MIXLAB_DIAGNOSTICS_DIR", str(tmp_path / "diagnostics"))
+    monkeypatch.setenv("MIXLAB_ENGINE_DIGEST", "sha256:" + "ab" * 32)
+    monkeypatch.setenv("MIXLAB_PROTOCOL_VERSION", "2")
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_bytes(_S6_STANDARD.read_bytes())
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", tmp_path / "history.json")
+    monkeypatch.chdir(tmp_path)
+    yield
+    for var in ("MIXLAB_LLM_STUB", "MIXLAB_PLAYED_SOURCE", "MIXLAB_API_MODE"):
+        monkeypatch.delenv(var, raising=False)
+    importlib.reload(modes)
+    llm.RECORDER.reset()
+    llm.TOKEN_BUDGET.reset()
+
+
+def _written_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, argv: list[str]) -> dict[str, object]:
+    """Run main() with argv and return the summary.json it wrote, read back from the file."""
+    before = set((tmp_path / "reports").glob("*.json"))
+    monkeypatch.setattr("sys.argv", ["mixlab", *argv])
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.send_report", AsyncMock()):
+        main()
+    (path,) = set((tmp_path / "reports").glob("*.json")) - before
+    return cast("dict[str, object]", json.loads(path.read_text(encoding="utf-8")))
+
+
+@pytest.mark.usefixtures("stub_run_env")
+def test_summary_v2_validates_against_schema(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    schema = run_contract.load("summary.schema.json")
+    validator = jsonschema.Draft202012Validator(schema, format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER)
+    genre_run = ["--genre", "techno", "--mode", "all"]
+    playlist_run = ["--playlist", "Seeds/Four", "--mode", "all"]
+
+    v1 = _written_summary(monkeypatch, tmp_path, genre_run)
+    assert v1["schemaVersion"] == 1
+    validator.validate(v1)
+
+    monkeypatch.setenv("MIXLAB_API_MODE", "tenant")
+    for argv in (genre_run, playlist_run):
+        summary = _written_summary(monkeypatch, tmp_path, argv)
+        assert summary["schemaVersion"] == 2
+        assert "historyEntry" in summary
+        validator.validate(summary)
+        without_calls = {key: value for key, value in summary.items() if key != "llmCalls"}
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(without_calls, schema)

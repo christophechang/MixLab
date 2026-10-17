@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import re
+import subprocess
+import sys
 import textwrap
 from collections.abc import Callable, Coroutine, Iterator
+from dataclasses import asdict
 from pathlib import Path
 from typing import Literal
 from unittest.mock import AsyncMock, Mock, patch
@@ -2768,3 +2772,162 @@ def test_stub_mode_locked_playlist_keeps_repeated_seed(tmp_path: Path, monkeypat
     (summary,) = _stub_summaries(tmp_path)
     for concept in _summary_concepts(summary):
         assert sorted(_concept_track_ids(concept)) == ["18", "8", "9", "9"]
+
+
+# ---------------------------------------------------------------------------
+# M2b E3: paths, history, summary.json v2 (spec §5.2-§5.4, M2b-D11-D14)
+# ---------------------------------------------------------------------------
+
+_DIGEST = "sha256:" + "0123456789abcdef" * 4
+_SUMMARY_V1_KEYS = {"schemaVersion", "generatedAt", "seed", "flags", "validationWarnings", "runNotes", "concepts"}
+
+
+def _engine_subprocess(args: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """``python -m mixlab`` in a fresh process: no inherited environment and no ``.env`` file."""
+    src = str(Path(main_mod.__file__).resolve().parents[1])
+    base = {"PATH": os.environ["PATH"], "PYTHONPATH": src, "PYTHON_DOTENV_DISABLED": "1", "PYTHONUTF8": "1"}
+    return subprocess.run(
+        [sys.executable, "-m", "mixlab", *args],
+        cwd=cwd,
+        env={**base, **env},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def _written_summaries(tmp_path: Path) -> list[dict[str, object]]:
+    """Every summary.json written under tmp_path/reports, oldest first."""
+    paths = sorted((tmp_path / "reports").glob("*.json"), key=lambda p: p.stat().st_mtime_ns)
+    return [json.loads(p.read_text(encoding="utf-8")) for p in paths]
+
+
+def test_history_path_env_honoured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MIXLAB_HISTORY_PATH", raising=False)
+    assert main_mod._resolve_history_path() == Path(".mixlab/concept-history.json")
+    monkeypatch.setenv("MIXLAB_HISTORY_PATH", "")  # empty is unset, not the current directory
+    assert main_mod._resolve_history_path() == Path(".mixlab/concept-history.json")
+    target = tmp_path / "scratch" / "history.json"
+    monkeypatch.setenv("MIXLAB_HISTORY_PATH", str(target))
+    assert main_mod._resolve_history_path() == target
+
+    # The module reads it at import, and mixlab --feedback reads the same path: a fresh process.
+    entry = _minimal_entry("r1")
+    entry.concepts = [
+        ConceptRecord(concept_id="c1", title="Scratch Concept", mood="dark", track_ids=["1"], arc_type="")
+    ]
+    append_run(ConceptHistory(), entry, target)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+
+    completed = _engine_subprocess(["--feedback"], cwd=cwd, env={"MIXLAB_HISTORY_PATH": str(target)})
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Scratch Concept" in completed.stdout
+    assert list(cwd.iterdir()) == []
+
+
+@pytest.mark.usefixtures("stub_env")
+def test_playlist_mode_appends_history_in_tenant_mode_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    history_path = tmp_path / "history.json"
+
+    assert _main_outcome(monkeypatch, _STUB_PLAYLIST_RUN) is None
+    assert not history_path.exists()  # outside tenant mode playlist mode writes no history, as today
+
+    _set_tenant(monkeypatch, True)
+    assert _main_outcome(monkeypatch, _STUB_PLAYLIST_RUN) is None
+
+    (entry,) = load_history(history_path).runs
+    assert entry.genre == "_default"
+    assert entry.mode == "all-tracks"
+    assert entry.selected_canvas_ids == []
+    assert entry.dominant_bpm_clusters == []
+    assert entry.core_track_ids == []
+    assert entry.canvas_score_breakdown == {}
+    assert entry.bpm_band == (0.0, 0.0)
+    summary = _written_summaries(tmp_path)[-1]
+    concept_ids = [str(c["conceptId"]) for c in _summary_concepts(summary)]
+    assert [record.concept_id for record in entry.concepts] == concept_ids
+    assert len(concept_ids) == 3
+
+
+@pytest.mark.usefixtures("tenant_mode", "engine_env")
+def test_summary_v2_fields_in_tenant_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIXLAB_ENGINE_DIGEST", _DIGEST)
+    monkeypatch.setenv("MIXLAB_PROTOCOL_VERSION", "2")
+    with respx.mock(assert_all_called=False) as router:
+        router.post(_ANTHROPIC_URL).mock(side_effect=_engine_answer())
+        assert _main_outcome(monkeypatch, _GENRE_RUN) is None
+
+    (summary,) = _written_summaries(tmp_path)
+    assert summary["schemaVersion"] == 2
+    assert summary["llmCalls"] == llm.RECORDER.as_summary()
+    llm_calls = summary["llmCalls"]
+    assert isinstance(llm_calls, list)
+    purposes = [call["purpose"] for call in llm_calls]
+    assert purposes[0] == "selection"
+    assert purposes[-1] == "report"  # completion order: the report is the last call to finish
+    history = json.loads((tmp_path / "history.json").read_text(encoding="utf-8"))
+    assert summary["historyEntry"] == history["runs"][-1]
+    assert summary["historyEntry"] == json.loads(json.dumps(asdict(load_history(tmp_path / "history.json").runs[-1])))
+    assert summary["engineDigest"] == _DIGEST
+    assert summary["protocolVersion"] == 2
+
+    # A digest that is not sha256:<64 hex> and a version that is not a positive integer are left out.
+    for digest, version in (("sha256:ABC", "two"), ("latest", "0"), ("", "")):
+        monkeypatch.setenv("MIXLAB_ENGINE_DIGEST", digest)
+        monkeypatch.setenv("MIXLAB_PROTOCOL_VERSION", version)
+        llm.RECORDER.reset()
+        llm.TOKEN_BUDGET.reset()
+        with respx.mock(assert_all_called=False) as router:
+            router.post(_ANTHROPIC_URL).mock(side_effect=_engine_answer())
+            assert _main_outcome(monkeypatch, _GENRE_RUN) is None
+        summary = _written_summaries(tmp_path)[-1]
+        assert summary["schemaVersion"] == 2, digest
+        assert "engineDigest" not in summary, digest
+        assert "protocolVersion" not in summary, version
+
+
+@pytest.mark.usefixtures("modes_restored", "engine_env")
+def test_summary_v1_outside_tenant_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIXLAB_ENGINE_DIGEST", _DIGEST)
+    monkeypatch.setenv("MIXLAB_PROTOCOL_VERSION", "2")
+    with respx.mock(assert_all_called=False) as router:
+        router.post(_ANTHROPIC_URL).mock(side_effect=_engine_answer())
+        assert _main_outcome(monkeypatch, _GENRE_RUN) is None
+
+    (summary,) = _written_summaries(tmp_path)
+    assert set(summary) == _SUMMARY_V1_KEYS
+    assert summary["schemaVersion"] == 1
+    assert llm.RECORDER.calls  # recorded in memory, written only in tenant mode
+
+
+def test_nothing_written_outside_scratch(tmp_path: Path) -> None:
+    cwd = tmp_path / "cwd"
+    scratch = tmp_path / "scratch"
+    cwd.mkdir()
+    scratch.mkdir()
+    collection = scratch / "collection.xml"
+    collection.write_bytes(_S6_STANDARD.read_bytes())
+    env = {
+        "MIXLAB_API_MODE": "tenant",
+        "MIXLAB_LLM_STUB": "1",
+        "MIXLAB_PLAYED_SOURCE": "file",
+        "MIXLAB_COLLECTION_PATH": str(collection),
+        "MIXLAB_HISTORY_PATH": str(scratch / "history.json"),
+        "MIXLAB_REPORT_DIR": str(scratch / "reports"),
+        "MIXLAB_DIAGNOSTICS_DIR": str(scratch / "diagnostics"),
+        "MIXLAB_GENRE_CACHE_PATH": str(scratch / "genres.json"),
+    }
+    (scratch / "export").mkdir()
+
+    completed = _engine_subprocess([*_STUB_GENRE_RUN, "--export", str(scratch / "export")], cwd=cwd, env=env)
+
+    assert completed.returncode == 0, completed.stderr
+    assert list(cwd.iterdir()) == []
+    assert (scratch / "history.json").is_file()
+    assert (scratch / "genres.json").is_file()
+    assert len(list((scratch / "reports").glob("*.html"))) == 1
+    assert len(list((scratch / "reports").glob("*.json"))) == 1
+    assert (scratch / "export" / "rekordbox_export.xml").is_file()

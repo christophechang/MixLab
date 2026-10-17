@@ -43,7 +43,8 @@ GitHub release → back to `develop`). Do the steps in order and stop if any che
   skipped. Notes come from the new `CHANGELOG.md` section; confirm `gh release view vX.Y.Z` shows Latest.
 - Deploy: SSH `christophechang@192.168.1.122`, then
   `cd /Users/christophechang/OpenClaw/Automations/MixLab && git checkout main && git pull origin main && git fetch --tags origin`
-  (a plain pull does not fetch the release tag). Confirm the working tree is clean (untracked `output/` is
+  (a plain pull does not fetch the release tag), then `.venv/bin/pip install -e .` so a changed pin (such as
+  `lxml`) takes effect; `.env` stays untouched. Confirm the working tree is clean (untracked `output/` is
   expected) and `git describe --tags` reports `vX.Y.Z`.
 - Restart the MixLab Anywhere worker — the `mixlab --worker` daemon (launchd job
   `com.changsta.mixlab-worker`) loads its poll-loop code once at start and does **not** hot-reload (claimed

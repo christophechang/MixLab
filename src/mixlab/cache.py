@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict, cast
 
-CACHE_PATH = Path(".mixlab_genres.json")
+# MIXLAB_GENRE_CACHE_PATH overrides it (M2b-D14), read once at import from the process environment, empty
+# meaning unset: the tenant worker names a scratch path.
+CACHE_PATH = Path(os.environ.get("MIXLAB_GENRE_CACHE_PATH") or ".mixlab_genres.json")
 
 
 class _GenreEntry(TypedDict):
