@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **The parser refuses input Rekordbox never writes.** A gzip file, a `DOCTYPE`
+  (found by the prolog scan, or after the parse for encodings the scan does not
+  read) and a collection of more than 20,000 rows are refused, as is a file whose
+  first byte is not `<`. With the `AverageBpm` grammar below these are the only
+  changes with no variable set. `lxml` is pinned to 6.1.1.
+- **Runtime dependencies are pinned by a constraints file.** `constraints.txt` is
+  written by `pip freeze`, read by the Dockerfile, and refreshed deliberately by a
+  commit.
+- **`AverageBpm` is admitted by the run contract's grammar (`bpmGrammar`).** Exotic
+  forms that `float()` accepts, such as `1_000`, `inf`, `nan` and non-ASCII digits,
+  are excluded with the missing-BPM warning instead of being read or crashing.
+- **Key notation can follow the multi-tenant API.** `MIXLAB_KEY_NOTATION=any`
+  normalises classical spellings to Camelot codes as the API reads them, from the
+  vendored `keys.json`; admission is unchanged. The default, `camelot`, copies
+  Tonality as written.
+- **Played status can come from the export.** `MIXLAB_PLAYED_SOURCE=file` takes
+  played to mean `PlayCount` of 1 or more in the file and never asks the
+  catalogue. The default, `catalog`, is unchanged.
+- **The run contract is vendored.** `src/mixlab/run_contract/` is package data,
+  hash-pinned, taken from mixlab-multi-tenant `c186cc8`. `image.yml` now checks the
+  lxml and libxml2 versions and that the package data loads, in the built image
+  and in the pushed one.
+- **A new leaf module, `modes.py`,** reads the run-mode switches
+  (`MIXLAB_API_MODE`, `MIXLAB_LLM_STUB`, `MIXLAB_KEY_NOTATION`,
+  `MIXLAB_PLAYED_SOURCE`) from the environment once and imports nothing of `mixlab`.
+
 ## v1.19.3 — 2026-10-15
 
 - **The engine now builds as a container image.** A `Dockerfile` (Python 3.12 slim,
