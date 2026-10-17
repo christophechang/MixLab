@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import importlib
 import json
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Literal
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+import respx
+from lxml import etree
 
+import mixlab.__main__ as main_mod
+from mixlab import modes
 from mixlab.__main__ import (
     _annotate_direction_types,
     _apply_do_not_recommend_filter,
@@ -26,6 +33,7 @@ from mixlab.__main__ import (
     run_feedback,
     run_prep,
 )
+from mixlab.clustering import PartitionStats
 from mixlab.history import ConceptHistory, ConceptRecord, HistoryEntry, append_run, load_history
 from mixlab.models import (
     CanvasRoleCandidates,
@@ -37,6 +45,7 @@ from mixlab.models import (
     Track,
 )
 from mixlab.playlist_exporter import build_merged_xml, parse_raw_tracks
+from mixlab.playlist_mode import build_zone_shortlists
 from mixlab.reader import parse_collection
 
 
@@ -2032,3 +2041,218 @@ def test_write_html_report_existing_json_summary_counts_as_taken(
     second = _write_html_report("<html>2</html>", "house", None)
 
     assert second == first.with_name(f"{first.stem}-2.html")
+
+
+# ---------------------------------------------------------------------------
+# MIXLAB_PLAYED_SOURCE (spec 5.5, M2b-D15)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def played_source_file(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("MIXLAB_PLAYED_SOURCE", "file")
+    importlib.reload(modes)
+    yield
+    monkeypatch.delenv("MIXLAB_PLAYED_SOURCE", raising=False)
+    importlib.reload(modes)
+
+
+def _play_count_xml(play_counts: list[int], seed_ids: list[str]) -> str:
+    """House tracks "1".."n" with the given PlayCount each, and a "Seed" playlist of seed_ids."""
+    keys = ["8A", "9A", "10A", "11A", "12A", "1A", "2A", "3A", "4A", "5A", "6A", "7A"]
+    rows = "\n".join(
+        f'    <TRACK TrackID="{i}" Name="Track {i}" Artist="Artist {i}" AverageBpm="124.00" '
+        f'Tonality="{keys[i % len(keys)]}" Genre="House" TotalTime="300" Rating="0" PlayCount="{count}"/>'
+        for i, count in enumerate(play_counts, start=1)
+    )
+    seeds = "\n".join(f'          <TRACK Key="{track_id}"/>' for track_id in seed_ids)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<DJ_PLAYLISTS Version="1.0.0">\n'
+        f'  <COLLECTION Entries="{len(play_counts)}">\n{rows}\n  </COLLECTION>\n'
+        '  <PLAYLISTS>\n    <NODE Type="0" Name="ROOT" Count="1">\n'
+        f'      <NODE Type="1" Name="Seed" KeyType="0" Entries="{len(seed_ids)}">\n{seeds}\n      </NODE>\n'
+        "    </NODE>\n  </PLAYLISTS>\n</DJ_PLAYLISTS>\n"
+    )
+
+
+# Six tracks, three played at least once (ids 1-3), three never (4-6). Playlist mode's seed (the
+# four-track minimum) is 1, 2, 4 and 5, so its library additions are 3 (played) and 6 (never played).
+_SIX_PLAY_COUNTS = [1, 4, 12, 0, 0, 0]
+_SIX_PLAYED = {"1", "2", "3"}
+_SIX_UNPLAYED = {"4", "5", "6"}
+
+
+def _setup_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, xml: str) -> None:
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text(xml)
+    monkeypatch.setattr("mixlab.__main__._XML_PATH", xml_path)
+    monkeypatch.setattr("mixlab.__main__._HISTORY_PATH", tmp_path / "history.json")
+    monkeypatch.chdir(tmp_path)
+
+
+async def _genre_none_pool(mode: Literal["unplayed", "played", "all"]) -> tuple[set[str], bool]:
+    """Run genre mode up to the crate table; return the mode-scoped pool and show_unplayed."""
+    availability = Mock(wraps=main_mod._print_availability)
+    with patch("mixlab.__main__._print_availability", availability):
+        await run(genre=None, export_dir=None, mode=mode)
+    pool: list[Track] = availability.call_args.args[1]
+    return {t.track_id for t in pool}, availability.call_args.kwargs["show_unplayed"]
+
+
+async def _genre_run_stage2_unplayed_ids(mode: Literal["unplayed", "played", "all"]) -> set[str] | None:
+    """A full genre run over the six tracks, Stage 1 stubbed to one shortlist; return Stage 2's unplayed set."""
+    stats = PartitionStats(overflow_counts=[0], seed_used=1)
+
+    def one_shortlist(tracks: list[Track], *, seed: int | None = None) -> tuple[list[MixConcept], PartitionStats]:
+        del seed
+        return [MixConcept(title="Pool", mood="m", track_ids=[t.track_id for t in tracks])], stats
+
+    concepts = [MixConcept(title="Deep Cuts", mood="warm", track_ids=["1", "2", "4", "5"])]
+    stage2 = AsyncMock(return_value=(concepts, "concept prose\n\n---\n\nmain-brain note"))
+    with (
+        patch("mixlab.__main__.partition_pool_with_stats", one_shortlist),
+        patch("mixlab.__main__.stage2_curate_and_report", stage2),
+        patch("mixlab.__main__.validate_stage2_output", return_value=[]),
+        patch("mixlab.__main__.send_report", AsyncMock()),
+    ):
+        await run(genre="house", export_dir=None, mode=mode, directions="off")
+    assert stage2.await_args is not None
+    unplayed_ids: set[str] | None = stage2.await_args.kwargs["unplayed_ids"]
+    return unplayed_ids
+
+
+async def _playlist_run(mode: Literal["unplayed", "played", "all"]) -> tuple[set[str], set[str] | None]:
+    """Run playlist mode on "Seed"; return the library additions offered and the unplayed set."""
+    zones = Mock(wraps=build_zone_shortlists)
+    concepts = [MixConcept(title="Completed Set", mood="warm", track_ids=["1", "2", "4", "5"])]
+    with (
+        patch("mixlab.__main__.build_zone_shortlists", zones),
+        patch("mixlab.__main__.stage2_curate_and_report", AsyncMock(return_value=(concepts, "Playlist report"))),
+        patch("mixlab.__main__.send_report", AsyncMock()),
+    ):
+        await main_mod.run_playlist_mode("Seed", None, None, mode)
+    library: list[Track] = zones.call_args.args[1]
+    unplayed_ids: set[str] | None = zones.call_args.args[2]
+    return {t.track_id for t in library}, unplayed_ids
+
+
+@pytest.mark.usefixtures("played_source_file")
+async def test_played_source_file_filters_by_play_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    _setup_run(tmp_path, monkeypatch, _play_count_xml(_SIX_PLAY_COUNTS, ["1", "2", "4", "5"]))
+
+    assert await _genre_none_pool("unplayed") == (_SIX_UNPLAYED, True)
+    assert await _genre_none_pool("played") == (_SIX_PLAYED, True)
+    assert await _genre_none_pool("all") == (_SIX_PLAYED | _SIX_UNPLAYED, True)
+    assert await _genre_run_stage2_unplayed_ids("all") == _SIX_UNPLAYED
+    assert await _genre_run_stage2_unplayed_ids("unplayed") is None
+
+    # Playlist mode: unplayed and all offer both additions with the unplayed set; played keeps the played one.
+    assert await _playlist_run("unplayed") == ({"3", "6"}, _SIX_UNPLAYED)
+    assert await _playlist_run("played") == ({"3"}, set())
+    assert await _playlist_run("all") == ({"3", "6"}, _SIX_UNPLAYED)
+
+
+@pytest.mark.usefixtures("played_source_file")
+async def test_played_source_file_playlist_filter_runs_with_empty_played_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    _setup_run(tmp_path, monkeypatch, _play_count_xml([0, 0, 0, 0, 0, 0], ["1", "2", "4", "5"]))
+
+    library, unplayed_ids = await _playlist_run("played")
+
+    assert library == set()  # nothing played: every addition filtered out, not all of them kept
+    assert unplayed_ids == set()
+
+
+@pytest.mark.usefixtures("played_source_file")
+async def test_played_source_file_export_unplayed_from_play_count_in_played_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    # 18 played (ids 1-18, the played pool Stage 1 partitions) and 3 never played (19-21).
+    _setup_run(tmp_path, monkeypatch, _play_count_xml([2] * 18 + [0, 0, 0], ["1"]))
+    concepts = [MixConcept(title="Deep Cuts", mood="warm", track_ids=["1", "2", "3", "4"])]
+    stage2 = AsyncMock(return_value=(concepts, "concept prose\n\n---\n\nmain-brain note"))
+
+    with (
+        patch("mixlab.__main__.stage2_curate_and_report", stage2),
+        patch("mixlab.__main__.validate_stage2_output", return_value=[]),
+        patch("mixlab.__main__.send_report", AsyncMock()),
+    ):
+        await run(genre="house", export_dir=tmp_path / "export", mode="played", directions="off")
+
+    root = etree.parse(str(tmp_path / "export" / "rekordbox_export.xml")).getroot()
+    unplayed_node = root.find(".//PLAYLISTS//NODE[@Name='All Unplayed Tunes']")
+    assert unplayed_node is not None
+    assert [el.get("Key") for el in unplayed_node.findall("TRACK")] == ["19", "20", "21"]
+
+
+@pytest.mark.usefixtures("played_source_file")
+async def test_played_source_file_ignores_catalogue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("CATALOG_API_URL", "https://catalog.test")
+    monkeypatch.setenv("CHANGSTA_API_KEY", "test-key")
+    _setup_run(tmp_path, monkeypatch, _play_count_xml(_SIX_PLAY_COUNTS, ["1", "2", "4", "5"]))
+
+    with respx.mock(assert_all_called=False) as router:
+        route = router.route()
+        for mode in ("unplayed", "played", "all"):
+            await _genre_none_pool(mode)
+            await _playlist_run(mode)
+        await _genre_run_stage2_unplayed_ids("all")
+
+    assert not route.called
+    assert len(router.calls) == 0
+    assert "catalogue mix name" not in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("played_source_file")
+async def test_crate_table_on_under_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    _setup_run(tmp_path, monkeypatch, _play_count_xml(_SIX_PLAY_COUNTS, ["1", "2", "4", "5"]))
+
+    await run(genre=None, export_dir=None, mode="unplayed")
+
+    out = capsys.readouterr().out
+    assert "Available tracks (unplayed / in collection):" in out
+    assert "No CATALOG_API_URL set" not in out
+    assert "Tracks in collection:" not in out
+
+
+async def test_played_source_default_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert modes.played_source() == "catalog"
+    _setup_run(tmp_path, monkeypatch, _play_count_xml(_SIX_PLAY_COUNTS, ["1", "2", "4", "5"]))
+
+    # No catalogue: PlayCount is not read; the full collection, the plain crate table, no unplayed list.
+    monkeypatch.delenv("CATALOG_API_URL", raising=False)
+    assert await _genre_none_pool("unplayed") == (_SIX_PLAYED | _SIX_UNPLAYED, False)
+    assert "No CATALOG_API_URL set" in capsys.readouterr().out
+    assert await _playlist_run("played") == ({"3", "6"}, None)
+
+    # The catalogue answers: played status is the catalogue's, whatever PlayCount says.
+    monkeypatch.setenv("CATALOG_API_URL", "http://fake")
+    catalogue_played = [
+        PlayedTrack(artist="Artist 5", title="Track 5"),
+        PlayedTrack(artist="Artist 6", title="Track 6"),
+    ]
+    with (
+        patch("mixlab.__main__.fetch_played_tracks", new=AsyncMock(return_value=catalogue_played)),
+        patch("mixlab.__main__.fetch_mix_names", new=AsyncMock(return_value=[])),
+    ):
+        assert await _genre_none_pool("played") == ({"5", "6"}, True)
+        assert await _genre_none_pool("unplayed") == ({"1", "2", "3", "4"}, True)
+        assert await _playlist_run("played") == ({"6"}, set())
+
+    # The :600 condition as it is: an empty catalogue played set leaves the additions unfiltered.
+    with (
+        patch("mixlab.__main__.fetch_played_tracks", new=AsyncMock(return_value=[])),
+        patch("mixlab.__main__.fetch_mix_names", new=AsyncMock(return_value=[])),
+    ):
+        assert await _playlist_run("played") == ({"3", "6"}, set())

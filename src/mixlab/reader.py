@@ -7,6 +7,7 @@ from typing import Literal
 
 from lxml import etree
 
+from mixlab import modes, run_contract
 from mixlab.hardened_xml import parse_hardened
 from mixlab.models import GridAnchor, MixPoints, Track
 
@@ -17,6 +18,60 @@ _MIK_ENERGY_RE: re.Pattern[str] = re.compile(r"\bEnergy\s+(\d+)", re.IGNORECASE)
 BPM_GRAMMAR: re.Pattern[str] = re.compile(r"^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$")
 
 _ASCII_WHITESPACE = " \t\r\n\f\v"
+
+
+def _load_key_table() -> tuple[re.Pattern[str], re.Pattern[str], dict[str, str]]:
+    """Read the vendored keys.json once: its two grammars and the spelling -> code table."""
+    data = run_contract.load("keys.json")
+    camelot_form = data["camelotForm"]
+    classical_grammar = data["classicalGrammar"]
+    codes = data["codes"]
+    if not isinstance(camelot_form, str) or not isinstance(classical_grammar, str) or not isinstance(codes, dict):
+        raise ValueError("keys.json: camelotForm, classicalGrammar or codes has the wrong type")
+    code_by_spelling: dict[str, str] = {}
+    for code, spellings in codes.items():
+        if not isinstance(spellings, list):
+            raise ValueError(f"keys.json: the spellings of {code} are not a list")
+        for spelling in spellings:
+            if not isinstance(spelling, str):
+                raise ValueError(f"keys.json: a spelling of {code} is not a string")
+            code_by_spelling[spelling] = code
+    # Case-insensitive and Unicode-aware, as KeyTable.Parse compiles them (IgnoreCase | CultureInvariant).
+    return (
+        re.compile(camelot_form, re.IGNORECASE),
+        re.compile(classical_grammar, re.IGNORECASE),
+        code_by_spelling,
+    )
+
+
+_CAMELOT_FORM, _CLASSICAL_GRAMMAR, _CODE_BY_SPELLING = _load_key_table()
+
+
+def normalise_key(raw: str) -> str:
+    """Read a Tonality value exactly as the API's KeyTable.Read does (spec 5.6), keeping raw where it returns null.
+
+    The patterns are anchored by their own ``^``/``$``, so ``re.match`` (not ``fullmatch``) gives .NET's
+    ``IsMatch``/``Match`` semantics, including ``$`` matching before one trailing newline. Python's
+    IGNORECASE also folds ``i`` with the Turkish ``\u0130``/``\u0131``, which .NET's CultureInvariant does
+    not, so a quality spelled with them is treated as no match, as the API reads it.
+    """
+    if _CAMELOT_FORM.match(raw):
+        return raw.upper()
+    match = _CLASSICAL_GRAMMAR.match(raw)
+    if match is None or not (match.group(3) or "").isascii():
+        return raw
+    note = match.group(1).upper()
+    accidental_raw = match.group(2) or ""
+    if accidental_raw in ("#", "\u266f"):
+        accidental = "#"
+    elif accidental_raw == "":
+        accidental = ""
+    else:
+        accidental = "b"
+    quality = (match.group(3) or "").lower()
+    minor = "m" if quality in ("m", "min", "minor") else ""
+    return _CODE_BY_SPELLING.get(note + accidental + minor, raw)
+
 
 _COLOUR_TO_CONFIDENCE: dict[str, Literal["high", "medium", "low"]] = {
     "#00ff00": "high",
@@ -216,6 +271,9 @@ def parse_collection(xml_path: Path) -> list[Track]:
             )
             excluded += 1
             continue
+
+        if modes.key_notation() == "any":
+            key_raw = normalise_key(key_raw)
 
         comments = element.get("Comments", "")
         play_count_raw = element.get("PlayCount", "0")

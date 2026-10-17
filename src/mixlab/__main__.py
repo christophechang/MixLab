@@ -15,6 +15,7 @@ from typing import cast
 
 from dotenv import load_dotenv
 
+from mixlab import modes
 from mixlab.cache import load_genre_cache, save_genre_cache
 from mixlab.client import fetch_mix_names, fetch_played_tracks
 from mixlab.clustering import (
@@ -314,6 +315,18 @@ def _print_pipeline_summary(
     print()
 
 
+def _genre_unplayed_by_play_count(genre: str, tracks: list[Track]) -> list[str]:
+    """The genre's PlayCount 0 tracks: its clusters and same-genre outliers (a custom genre's pool)."""
+    if genre in CUSTOM_GENRES:
+        scoped = build_custom_genre_pool(genre, tracks, CUSTOM_GENRES, GENRE_MAP)
+    else:
+        clusters, outliers = partition_outliers(tracks, GENRE_MAP)
+        clusters = resolve_genre_clusters(genre, clusters, GENRE_MAP)
+        scoped = [t for cluster_tracks in clusters.values() for t in cluster_tracks]
+        scoped += [t for t in outliers if t.genre.lower() == genre.lower()]
+    return [t.track_id for t in scoped if t.play_count == 0]
+
+
 def _print_availability(
     all_tracks: list[Track],
     unplayed: list[Track],
@@ -520,7 +533,18 @@ async def run_playlist_mode(
     unplayed_ids: set[str] | None = None
     mix_names: list[str] = []
     played_track_ids_set: set[str] = set()
-    if mode == "all":
+    # The additions filter runs on this flag, not on the played set being non-empty: an empty
+    # file-based played set must still filter (spec 5.5). Under catalog it is exactly the set's truthiness.
+    played_filter_active = False
+    if modes.played_source() == "file":
+        # MIXLAB_PLAYED_SOURCE=file: played is PlayCount >= 1 in the file; the catalogue is not asked.
+        if mode == "played":
+            played_track_ids_set = {t.track_id for t in tracks if t.play_count >= 1}
+            unplayed_ids = set()  # no unplayed bonus; pool is played-only
+            played_filter_active = True
+        else:  # "unplayed" weighting, or "all" with the unplayed set passed to Stage 2
+            unplayed_ids = {t.track_id for t in tracks if t.play_count == 0}
+    elif mode == "all":
         print("--mode all — skipping played-track weighting in playlist mode.")
     elif catalog_url:
         try:
@@ -539,6 +563,7 @@ async def run_playlist_mode(
             _unplayed_set = {t.track_id for t in filter_unplayed(tracks, played)}
             played_track_ids_set = {t.track_id for t in tracks if t.track_id not in _unplayed_set}
             unplayed_ids = set()  # no unplayed bonus; pool is played-only
+            played_filter_active = bool(played_track_ids_set)
 
     playlists = parse_playlists(_XML_PATH)
     try:
@@ -597,7 +622,7 @@ async def run_playlist_mode(
         library_tracks = _apply_range_filters(
             library_tracks, min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year
         )
-        if mode == "played" and played_track_ids_set:
+        if played_filter_active:
             library_tracks = [t for t in library_tracks if t.track_id in played_track_ids_set]
 
     try:
@@ -903,12 +928,32 @@ async def run(
     # 2. Fetch played tracks and filter pool based on mode.
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
     catalog_url = os.environ.get("CATALOG_API_URL", "")
-    used_catalog_api = False
+    # True when played status is known (the catalogue answered, or the file's PlayCount under
+    # MIXLAB_PLAYED_SOURCE=file): switches on the crate table's counts and the export's unplayed list.
+    used_played_source = False
     mix_names: list[str] = []
     played_track_ids: set[str] = set()
     unplayed_ids_for_stage2: set[str] | None = None
     pool_label = "unplayed"
-    if mode == "all":
+    if modes.played_source() == "file":
+        # MIXLAB_PLAYED_SOURCE=file (spec 5.5): played is PlayCount >= 1 in the file. No catalogue
+        # request, CATALOG_API_URL ignored; mix_names stays empty (the name-avoid list is history alone).
+        used_played_source = True
+        if mode == "played":
+            pool_label = "played"
+            unplayed = [t for t in tracks if t.play_count >= 1]
+        elif mode == "unplayed":
+            unplayed = [t for t in tracks if t.play_count == 0]
+            played_track_ids = {t.track_id for t in tracks if t.play_count >= 1}
+        else:  # mode == "all"
+            unplayed = list(tracks)
+            unplayed_ids_for_stage2 = {t.track_id for t in tracks if t.play_count == 0}
+            print(
+                f"--mode all — played status from the file: {len(tracks) - len(unplayed_ids_for_stage2)}/"
+                f"{len(tracks)} played, {len(unplayed_ids_for_stage2)} unplayed. Stage 2 will favour unplayed in ties.",
+                flush=True,
+            )
+    elif mode == "all":
         unplayed = list(tracks)
         if catalog_url:
             try:
@@ -930,7 +975,7 @@ async def run(
                     )
                 played_ids_set = {t.track_id for t in filter_played(tracks, played)}
                 unplayed_ids_for_stage2 = {t.track_id for t in tracks if t.track_id not in played_ids_set}
-                used_catalog_api = True
+                used_played_source = True
                 print(
                     f"--mode all — fetched played status: {len(played_ids_set)}/{len(tracks)} played, "
                     f"{len(unplayed_ids_for_stage2)} unplayed. Stage 2 will favour unplayed in ties.",
@@ -960,7 +1005,7 @@ async def run(
             unplayed = filter_unplayed(tracks, played)
             _unplayed_ids = {t.track_id for t in unplayed}
             played_track_ids = {t.track_id for t in tracks if t.track_id not in _unplayed_ids}
-        used_catalog_api = True
+        used_played_source = True
     else:
         print("No CATALOG_API_URL set — skipping played-track filter, using full collection.")
         unplayed = list(tracks)
@@ -990,7 +1035,7 @@ async def run(
 
     # 3. Always print the availability table (deterministic, no LLM cost).
     counts, outlier_count, outlier_genres = _print_availability(
-        tracks, unplayed, show_unplayed=used_catalog_api, excluded_count=denylist_excluded, pool_label=pool_label
+        tracks, unplayed, show_unplayed=used_played_source, excluded_count=denylist_excluded, pool_label=pool_label
     )
     save_genre_cache(counts, outlier_count, outlier_genres)
 
@@ -1083,7 +1128,7 @@ async def run(
         _print_pipeline_summary(
             collection_count=len(tracks),
             unplayed_count=len(unplayed),
-            used_catalog_api=used_catalog_api,
+            used_catalog_api=used_played_source,
             pool_label=pool_label,
             genre_cluster_counts=genre_cluster_counts,
             bpm_filtered_counts=bpm_filtered_counts,
@@ -1207,7 +1252,7 @@ async def run(
     _print_pipeline_summary(
         collection_count=len(tracks),
         unplayed_count=len(unplayed),
-        used_catalog_api=used_catalog_api,
+        used_catalog_api=used_played_source,
         pool_label=pool_label,
         genre_cluster_counts=genre_cluster_counts,
         bpm_filtered_counts=bpm_filtered_counts,
@@ -1335,8 +1380,11 @@ async def run(
     folder_name = f"Mix Lab - {genre} - {today}"
     # All unplayed tracks scoped to this genre: cluster tracks + same-genre outliers.
     # Only meaningful when we fetched played tracks from the catalogue API.
+    # Under MIXLAB_PLAYED_SOURCE=file: the genre's PlayCount 0 tracks, whatever the mode (spec 5.5).
     genre_unplayed_track_ids: list[str] | None = None
-    if used_catalog_api:
+    if modes.played_source() == "file":
+        genre_unplayed_track_ids = _genre_unplayed_by_play_count(genre, tracks)
+    elif used_played_source:
         genre_unplayed_track_ids = [t.track_id for t in genre_unplayed_track_ids_source]
         genre_unplayed_track_ids += [t.track_id for t in genre_outliers]
     merged_bytes = generate_merged_xml_bytes(all_concepts, raw_tracks_xml, folder_name, genre_unplayed_track_ids)
@@ -1417,7 +1465,7 @@ async def run(
         tracks_by_id,
         counts=counts,
         attachments=attachments,
-        show_unplayed=used_catalog_api,
+        show_unplayed=used_played_source,
         report_context=report_context,
         excluded_count=denylist_excluded,
         filter_desc=_build_filter_desc(min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year),

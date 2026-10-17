@@ -39,7 +39,7 @@ from typing import Any, Callable, Literal, cast, get_args
 
 import httpx
 
-from mixlab import sequencer
+from mixlab import modes, sequencer
 from mixlab.clustering import camelot_distance
 from mixlab.config import TRACK_COUNT_TARGETS, shortfall_warning
 from mixlab.history import ConceptHistory, format_recent_concepts
@@ -60,6 +60,7 @@ from mixlab.models import (
     TrackMode,
     Transition,
 )
+from mixlab.modes import PlayedSource
 from mixlab.transitions import (
     TransitionEdge,
     blend_headroom,
@@ -853,11 +854,45 @@ _STAGE2_MODE_FRAGMENT_ALL = """\
 The candidate pool contains both played and unplayed tracks. Tracks marked `unplayed` have never been performed live. Concepts that interleave played and unplayed material in deliberate combinations are most valuable — a known weapon supported by unplayed texture, or an unplayed peak earned by familiar groove-locks. Identify whether each concept leans played-anchored, unplayed-anchored, or balanced, and note this in the report's thesis line.\
 """
 
-_STAGE2_MODE_FRAGMENTS: dict[TrackMode, str] = {
-    "unplayed": _STAGE2_MODE_FRAGMENT_UNPLAYED,
-    "played": _STAGE2_MODE_FRAGMENT_PLAYED,
-    "all": _STAGE2_MODE_FRAGMENT_ALL,
-}
+# The same three under MIXLAB_PLAYED_SOURCE=file (spec 5.5, ADR 0012): played means played at least once
+# in the uploaded file, so the honest label replaces "live".
+_STAGE2_MODE_FRAGMENT_UNPLAYED_FILE = """\
+\nMODE: UNPLAYED\n\
+The candidate pool consists of tracks the user has not played at least once. Your job is to surface material worth introducing into their sets — concepts that justify a debut. Prefer concepts that frame the unplayed tracks as discoveries rather than safe additions to a familiar mix. A concept here is most successful when the user finishes reading and thinks "I should have been playing these."\
+"""
+
+_STAGE2_MODE_FRAGMENT_PLAYED_FILE = """\
+\nMODE: PLAYED\n\
+The candidate pool consists of tracks the user has played at least once. Familiarity is an asset — make sequencing moves you would not try with unknown material. Bolder Camelot jumps, sharper energy contrasts, and chapter pivots are more readily justified here. A concept here is most successful when the user finishes reading and thinks "I never put these together that way."\
+"""
+
+_STAGE2_MODE_FRAGMENT_ALL_FILE = """\
+\nMODE: ALL\n\
+The candidate pool contains both played and unplayed tracks. Tracks marked `unplayed` have not been played at least once. Concepts that interleave played and unplayed material in deliberate combinations are most valuable — a known weapon supported by unplayed texture, or an unplayed peak earned by familiar groove-locks. Identify whether each concept leans played-anchored, unplayed-anchored, or balanced, and note this in the report's thesis line.\
+"""
+
+
+def _mode_fragments(source: PlayedSource) -> dict[TrackMode, str]:
+    """The Stage 2 mode fragments for the played source; ``catalog`` is the wording as it has always been."""
+    if source == "file":
+        return {
+            "unplayed": _STAGE2_MODE_FRAGMENT_UNPLAYED_FILE,
+            "played": _STAGE2_MODE_FRAGMENT_PLAYED_FILE,
+            "all": _STAGE2_MODE_FRAGMENT_ALL_FILE,
+        }
+    return {
+        "unplayed": _STAGE2_MODE_FRAGMENT_UNPLAYED,
+        "played": _STAGE2_MODE_FRAGMENT_PLAYED,
+        "all": _STAGE2_MODE_FRAGMENT_ALL,
+    }
+
+
+def _unplayed_legend(source: PlayedSource) -> str:
+    """The Stage 2 track legend's ``unplayed`` line for the played source (``catalog`` is the line in ``_STAGE2_SYSTEM``)."""
+    if source == "file":
+        return "  - `unplayed` — not yet played at least once. Available for debut."
+    return "  - `unplayed` — never played live. Available for debut."
+
 
 # Risk-tolerance Stage 2 framing fragments (#42). Appended after the mode fragment,
 # genre mode only. "medium" appends nothing — byte-stable default.
@@ -3835,6 +3870,8 @@ async def stage2_curate_and_report(
         )
 
     stage2_system = _STAGE2_SYSTEM_PLAYLIST_SELECTION if playlist_name is not None else _STAGE2_SYSTEM_SELECTION
+    if modes.played_source() != "catalog":
+        stage2_system = stage2_system.replace(_unplayed_legend("catalog"), _unplayed_legend(modes.played_source()))
     if canvases is not None and playlist_name is None:
         stage2_system = stage2_system + _STAGE2_CANVAS_RULES
         if any(c.pinned for c in canvases):
@@ -3842,7 +3879,7 @@ async def stage2_curate_and_report(
     # Mode-specific Stage 2 fragment (#18). Playlist mode has its own Stage 0 intent brief
     # path, so the mode-fragment is genre-mode only.
     if playlist_name is None and mode is not None:
-        stage2_system = stage2_system + _STAGE2_MODE_FRAGMENTS[mode]
+        stage2_system = stage2_system + _mode_fragments(modes.played_source())[mode]
     # Risk-tolerance Stage 2 fragment (#42). Genre mode only, appended after the mode
     # fragment. "medium" appends nothing — byte-stable default.
     if playlist_name is None and risk == "high":

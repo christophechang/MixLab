@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import importlib
 import math
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
 
 import pytest
 
+from mixlab import modes
 from mixlab.models import GridAnchor, Track
 from mixlab.reader import (
     BPM_GRAMMAR,
     _bars_between,
     apply_bpm_corrections,
     derive_mix_points,
+    normalise_key,
     parse_collection,
     parse_playlists,
 )
@@ -761,3 +765,117 @@ def test_bpm_grammar_equals_run_contract_copy() -> None:
 def test_parse_collection_s6_standard_fixture_admits_40_tracks() -> None:
     # Equals tests/fixtures/rekordbox/expected.json's trackCount for s6-standard.xml in mixlab-multi-tenant.
     assert len(parse_collection(_RUN_CONTRACT_FIXTURES / "s6-standard.xml")) == 40
+
+
+# ---------------------------------------------------------------------------
+# Key notation (spec 5.6, M2b-D16)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def key_notation_any(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("MIXLAB_KEY_NOTATION", "any")
+    importlib.reload(modes)
+    yield
+    monkeypatch.delenv("MIXLAB_KEY_NOTATION", raising=False)
+    importlib.reload(modes)
+
+
+def _key_collection(keys: list[str]) -> str:
+    rows = "\n".join(
+        f'    <TRACK TrackID="{i}" Name="T{i}" Artist="A" AverageBpm="124" Tonality="{key}" Genre="House"/>'
+        for i, key in enumerate(keys, start=1)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<DJ_PLAYLISTS Version="1.0.0">\n  <COLLECTION>\n'
+        f"{rows}\n  </COLLECTION>\n</DJ_PLAYLISTS>\n"
+    )
+
+
+# KeyTable.Read's results at mixlab-multi-tenant 3c376f7 (src/MixLab.Core/Collections/KeyTable.cs), read
+# step by step and pasted; where Read returns null the engine keeps the raw value, so the raw value is expected.
+_KEY_TABLE_READ: list[tuple[str, str]] = [
+    ("8a", "8A"),
+    ("13A", "13A"),
+    ("AB", "4B"),
+    ("a minor", "8A"),
+    ("G\u266fm", "1A"),
+    ("Abm", "1A"),
+    (" Am ", "8A"),
+    ("Fb", "Fb"),
+    ("E#", "E#"),
+    ("8m", "8m"),
+    ("Hm", "Hm"),
+    ("B#", "B#"),
+    ("c major", "8B"),
+    ("D\u266d MIN", "12A"),
+    ("bb", "6B"),
+    ("123A", "123A"),
+    ("8A ", "8A "),
+    ("A m\u0130n", "A m\u0130n"),
+    ("", ""),
+    ("G#m", "1A"),
+    ("Abm", "1A"),
+    ("B", "1B"),
+    ("Cb", "1B"),
+    ("D#m", "2A"),
+    ("Ebm", "2A"),
+    ("F#", "2B"),
+    ("Gb", "2B"),
+    ("A#m", "3A"),
+    ("Bbm", "3A"),
+    ("C#", "3B"),
+    ("Db", "3B"),
+    ("Fm", "4A"),
+    ("G#", "4B"),
+    ("Ab", "4B"),
+    ("Cm", "5A"),
+    ("D#", "5B"),
+    ("Eb", "5B"),
+    ("Gm", "6A"),
+    ("A#", "6B"),
+    ("Bb", "6B"),
+    ("Dm", "7A"),
+    ("F", "7B"),
+    ("Am", "8A"),
+    ("C", "8B"),
+    ("Em", "9A"),
+    ("G", "9B"),
+    ("Bm", "10A"),
+    ("D", "10B"),
+    ("F#m", "11A"),
+    ("Gbm", "11A"),
+    ("A", "11B"),
+    ("C#m", "12A"),
+    ("Dbm", "12A"),
+    ("E", "12B"),
+]
+
+
+def test_key_notation_default_copies_tonality(tmp_path: Path) -> None:
+    keys = ["8a", "AB", "a minor", " Am ", "Hm"]
+    xml_path = _write_xml(tmp_path, _key_collection(keys))
+
+    assert [t.camelot_key for t in parse_collection(xml_path)] == keys
+
+
+@pytest.mark.parametrize(("raw", "expected"), _KEY_TABLE_READ)
+def test_key_notation_any_matches_key_table_read(raw: str, expected: str) -> None:
+    assert normalise_key(raw) == expected
+
+
+@pytest.mark.usefixtures("key_notation_any")
+def test_key_notation_any_on_fixtures(tmp_path: Path) -> None:
+    classical = [t.camelot_key for t in parse_collection(_RUN_CONTRACT_FIXTURES / "s6-classical.xml")]
+    mixed = [t.camelot_key for t in parse_collection(_RUN_CONTRACT_FIXTURES / "s6-mixed-keys.xml")]
+    rows = [raw for raw, _ in _KEY_TABLE_READ if raw]
+    hand_written = [t.camelot_key for t in parse_collection(_write_xml(tmp_path, _key_collection(rows)))]
+
+    codes = {f"{n}{ring}" for n in range(1, 13) for ring in "AB"}
+    assert len(classical) == 26
+    assert set(classical) - {"8m", "Hm"} == codes
+    assert len([k for k in classical if k in codes]) == 24
+    assert classical.count("8m") == 1
+    assert classical.count("Hm") == 1
+    assert mixed == ["8A", "9A", "10A", "8A", "9A", "10A"]
+    assert hand_written == [expected for raw, expected in _KEY_TABLE_READ if raw]
