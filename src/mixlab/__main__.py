@@ -8,10 +8,12 @@ import importlib
 import io
 import json
 import os
+import re
 import sys
 import time
 import uuid
 from collections.abc import Coroutine
+from dataclasses import asdict
 from pathlib import Path
 from typing import NoReturn, cast
 
@@ -63,6 +65,7 @@ from mixlab.html_report import (
 )
 from mixlab.library_map import MapMode, build_map_payload, render_map_json
 from mixlab.llm import (
+    RECORDER,
     NoShortlistError,
     ProviderCapError,
     ProviderUnavailableError,
@@ -105,10 +108,36 @@ def _resolve_collection_path() -> Path:
     return Path(os.environ.get("MIXLAB_COLLECTION_PATH", "import/rekordbox.xml"))
 
 
+def _resolve_history_path() -> Path:
+    """Concept-history path. Defaults to the local file; the tenant worker sets ``MIXLAB_HISTORY_PATH``
+    to the run's scratch (M2b-D12). ``mixlab --feedback`` reads the same path. Unset or empty, nothing
+    changes. Read at import, from the process environment: a value only in ``.env`` is not seen.
+    """
+    return Path(os.environ.get("MIXLAB_HISTORY_PATH") or ".mixlab/concept-history.json")
+
+
 _XML_PATH = _resolve_collection_path()
-_HISTORY_PATH = Path(".mixlab/concept-history.json")
+_HISTORY_PATH = _resolve_history_path()
+# A history entry's mode label for each --mode, in genre mode and in tenant playlist mode (L26).
+_HISTORY_MODE_LABELS: dict[str, str] = {"all": "all-tracks", "played": "played", "unplayed": "standard"}
+_ENGINE_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_PROTOCOL_VERSION_RE = re.compile(r"[0-9]+")
 _DO_NOT_RECOMMEND_PLAYLIST = "DO NOT RECOMMEND"
 _FEEDBACK_VERDICTS = ("played", "played_modified", "rejected", "unused")
+
+
+def _engine_digest_from_env() -> str | None:
+    """``MIXLAB_ENGINE_DIGEST`` when it is an image digest (``sha256:`` and 64 hex digits), else None (M2b spec §5.2)."""
+    value = os.environ.get("MIXLAB_ENGINE_DIGEST", "")
+    return value if _ENGINE_DIGEST_RE.fullmatch(value) else None
+
+
+def _protocol_version_from_env() -> int | None:
+    """``MIXLAB_PROTOCOL_VERSION`` as a positive integer, else None (M2b spec §5.2)."""
+    value = os.environ.get("MIXLAB_PROTOCOL_VERSION", "").strip()
+    if not _PROTOCOL_VERSION_RE.fullmatch(value) or int(value) < 1:
+        return None
+    return int(value)
 
 
 def _build_tracks_by_id(tracks: list[Track]) -> dict[str, Track]:
@@ -722,6 +751,17 @@ async def run_playlist_mode(
     for concept in all_concepts:
         concept.concept_id = str(uuid.uuid4())
 
+    # L26 (M2b-D13): in tenant mode playlist mode appends a history entry, its canvas fields empty,
+    # so feedback on a playlist concept joins a record. Outside tenant mode it writes none, as before.
+    history_entry: HistoryEntry | None = None
+    if modes.TENANT_MODE:
+        try:
+            entry = HistoryEntry.from_run([], all_concepts, genre=genre or "_default", mode=_HISTORY_MODE_LABELS[mode])
+            append_run(history, entry, _HISTORY_PATH)
+            history_entry = entry
+        except Exception as exc:
+            print(f"Warning: could not write concept history: {exc}", file=sys.stderr)
+
     elapsed = time.monotonic() - t_start
     mins, secs = divmod(int(elapsed), 60)
     elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
@@ -791,6 +831,11 @@ async def run_playlist_mode(
         validation_warnings=[],
         run_notes=run_notes,
         generated_at=today,
+        tenant=modes.TENANT_MODE,
+        llm_calls=RECORDER.as_summary(),
+        history_entry=asdict(history_entry) if history_entry is not None else None,
+        engine_digest=_engine_digest_from_env(),
+        protocol_version=_protocol_version_from_env(),
     )
     summary_path = html_path.with_suffix(".json")
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -1397,16 +1442,18 @@ async def run(
         report += "\n\n⚠ **Validation Notes**\n" + "\n".join(f"- {w}" for w in validation_warnings)
 
     # Persist run to concept history for novelty scoring in future runs.
+    history_entry: HistoryEntry | None = None
     try:
         entry = HistoryEntry.from_run(
             selected_canvases,
             all_concepts,
             genre=genre or "_default",
-            mode={"all": "all-tracks", "played": "played", "unplayed": "standard"}[mode],
+            mode=_HISTORY_MODE_LABELS[mode],
             block_label=block_label,
             block_resolved_count=block_resolved_count,
         )
         append_run(history, entry, _HISTORY_PATH)
+        history_entry = entry
     except Exception as exc:
         print(f"Warning: could not write concept history: {exc}", file=sys.stderr)
     elapsed = time.monotonic() - t_start
@@ -1503,6 +1550,11 @@ async def run(
         validation_warnings=validation_warnings,
         run_notes=run_notes,
         generated_at=today,
+        tenant=modes.TENANT_MODE,
+        llm_calls=RECORDER.as_summary(),
+        history_entry=asdict(history_entry) if history_entry is not None else None,
+        engine_digest=_engine_digest_from_env(),
+        protocol_version=_protocol_version_from_env(),
     )
     summary_path = html_path.with_suffix(".json")
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")

@@ -37,7 +37,7 @@ from mixlab.remote import MixLabRemote, RemoteError, RunManifest
 from mixlab.sync import sync_down, sync_up
 
 # Local history file synced around each run (mirrors ``mixlab.__main__._HISTORY_PATH``).
-_HISTORY_REL_PATH = Path(".mixlab/concept-history.json")
+_HISTORY_REL_PATH = Path(os.environ.get("MIXLAB_HISTORY_PATH") or ".mixlab/concept-history.json")
 
 # Where the worker downloads each run's collection. Deliberately NOT ``import/rekordbox.xml``
 # (what a local run/automation uses) so remote runs never clobber the local collection; the

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
+import mixlab.cache as cache_module
 from mixlab.cache import load_genre_cache, save_genre_cache
 
 
@@ -73,3 +76,34 @@ def test_save_load_roundtrip(
         assert result["counts"][label] == {"total": total, "unplayed": unplayed}
     for tag, (total, unplayed) in outlier_genres.items():
         assert result["outlier_genres"][tag] == {"total": total, "unplayed": unplayed}
+
+
+def _fresh_cache_module() -> ModuleType:
+    """A separate copy of ``mixlab.cache``, imported now, so its import-time path reads the current environment."""
+    spec = importlib.util.spec_from_file_location("_cache_probe", cache_module.__file__)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_genre_cache_path_env_honoured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MIXLAB_GENRE_CACHE_PATH", raising=False)
+    assert Path(".mixlab_genres.json") == _fresh_cache_module().CACHE_PATH
+    monkeypatch.setenv("MIXLAB_GENRE_CACHE_PATH", "")  # empty is unset, not the current directory
+    assert Path(".mixlab_genres.json") == _fresh_cache_module().CACHE_PATH
+
+    target = tmp_path / "scratch" / "genres.json"
+    target.parent.mkdir()
+    monkeypatch.setenv("MIXLAB_GENRE_CACHE_PATH", str(target))
+    probe = _fresh_cache_module()
+    probe.save_genre_cache({"techno": (12, 4)}, 0, {})
+
+    assert target == probe.CACHE_PATH
+    assert json.loads(target.read_text())["counts"] == {"techno": {"total": 12, "unplayed": 4}}
+    loaded = probe.load_genre_cache()
+    assert loaded is not None
+    assert loaded["counts"]["techno"] == {"total": 12, "unplayed": 4}
+    assert not (tmp_path / ".mixlab_genres.json").exists()
