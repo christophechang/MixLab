@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- S6 mixed keys: three Camelot, three classical; keyNotation mixed -->
+<DJ_PLAYLISTS Version="1.0.0">
+  <PRODUCT Name="rekordbox" Version="7.2.18" Company="AlphaTheta"/>
+  <COLLECTION Entries="6">
+    <TRACK TrackID="1" Name="Track 1" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="8A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track1.mp3"/>
+    <TRACK TrackID="2" Name="Track 2" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="9A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track2.mp3"/>
+    <TRACK TrackID="3" Name="Track 3" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="10A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track3.mp3"/>
+    <TRACK TrackID="4" Name="Track 4" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Am" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track4.mp3"/>
+    <TRACK TrackID="5" Name="Track 5" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Em" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track5.mp3"/>
+    <TRACK TrackID="6" Name="Track 6" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Bm" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track6.mp3"/>
+  </COLLECTION>
+  <PLAYLISTS>
+    <NODE Type="0" Name="ROOT" Count="0"/>
+  </PLAYLISTS>
+</DJ_PLAYLISTS>

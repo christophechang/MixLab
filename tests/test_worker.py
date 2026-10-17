@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import gzip
+import importlib.util
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import ModuleType
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 import respx
@@ -1029,3 +1032,53 @@ def test_build_argv_track_pool_empty_string_rejected() -> None:
 def test_build_argv_track_pool_must_be_string() -> None:
     with pytest.raises(WorkerFlagError, match="trackPool"):
         build_argv({"trackPool": {"track_ids": ["1"]}})
+
+
+def _fresh_worker_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    """A separate copy of ``mixlab.worker``, imported now, so its import-time history path reads the environment."""
+    spec = importlib.util.spec_from_file_location("_worker_probe", worker_module.__file__)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)  # dataclasses look their module up while it executes
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, Path(".mixlab/concept-history.json")),
+        ("", Path(".mixlab/concept-history.json")),
+        ("custom/history.json", Path("custom/history.json")),
+        ("/scratch/run/history.json", Path("/scratch/run/history.json")),
+    ],
+)
+@respx.mock
+def test_history_path_env_honoured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str | None, expected: Path
+) -> None:
+    if value is None:
+        monkeypatch.delenv("MIXLAB_HISTORY_PATH", raising=False)
+    else:
+        monkeypatch.setenv("MIXLAB_HISTORY_PATH", value)
+    probe = _fresh_worker_module(monkeypatch)
+    assert expected == probe._HISTORY_REL_PATH
+
+    respx.post(_CLAIM_URL).mock(return_value=Response(200, json=_manifest_dict(flags={"genre": "house"})))
+    respx.get(f"{_BASE}/api/mixlab/uploads/u1").mock(
+        return_value=Response(200, content=gzip.compress(b"<COLLECTION/>"))
+    )
+    respx.post(f"{_BASE}/api/mixlab/runs/r1/complete").mock(return_value=Response(200))
+    stdout = _write_artifacts(tmp_path)
+    with (
+        patch.object(probe, "sync_down", return_value=SyncReport()) as sync_down_mock,
+        patch.object(probe, "sync_up") as sync_up_mock,
+        patch.object(probe.subprocess, "run", return_value=_completed(stdout=stdout)),
+    ):
+        assert probe.process_one(_remote(), _config(tmp_path)) is True
+
+    # A relative path resolves under the repository root as today; an absolute one is used as given.
+    resolved = expected if expected.is_absolute() else tmp_path / expected
+    sync_down_mock.assert_called_once_with(ANY, resolved)
+    sync_up_mock.assert_called_once_with(ANY, resolved)

@@ -66,6 +66,8 @@ cd MixLab
 
 `setup.sh` creates the virtual environment, installs all dependencies, and copies `.env.example` to `.env` if it doesn't already exist.
 
+Runtime dependencies are pinned by `constraints.txt`, written by `pip freeze` and read by the Dockerfile; it is refreshed deliberately by a commit.
+
 ### 2. Configure environment variables
 
 Copy `.env.example` to `.env` and fill in your keys:
@@ -88,8 +90,64 @@ cp .env.example .env
 | `MIXLAB_DISCORD_CHANNEL` | No | Target channel name (default: `mix-lab`) |
 | `MIXLAB_STAGE2_MODEL` | No | Override the Stage 2 Anthropic model id (default: `claude-sonnet-4-6`; `claude-sonnet-5-5` supported) |
 | `MIXLAB_STAGE2_TEMPERATURE` | No | Override the Stage 2 selection-pass temperature (default: `0.5`; ignored on `claude-sonnet-5-5`, which rejects a non-default temperature) |
+| `MIXLAB_KEY_NOTATION` | No | `camelot` (default): Tonality is copied as written. `any`: classical spellings are normalised to Camelot codes as the multi-tenant API reads them, from the vendored `keys.json`; admission is unchanged |
+| `MIXLAB_PLAYED_SOURCE` | No | `catalog` (default): played status comes from the catalogue when `CATALOG_API_URL` is set, else the full collection is used. `file`: played means `PlayCount` ≥ 1 in the export, and the catalogue is never asked |
+| `MIXLAB_API_MODE` | No | `tenant`: the multi-tenant run behaviour (token budget, per-attempt time bound with one retry, typed provider errors and exit codes; see [Tenant mode and the LLM layer](#tenant-mode-and-the-llm-layer)). Unset or any other value: unchanged |
+| `MIXLAB_TOKEN_BUDGET` | No | `<input>,<output>` token allowances for a run (default: `150000,56000`). Tenant mode only; malformed warns and uses the default |
+| `MIXLAB_STAGE2_EFFORT` | No | `low`, `medium` or `high`. Set on a 5-family model id, Stage 2 sends `output_config.effort` and a thinking mode per call. Unset or invalid: today's payload for every model |
+| `MIXLAB_FALLBACKS` | No | `default`: Stage 2 calls ask Anthropic for its server-side fallback. Any other value warns and is ignored |
+| `MIXLAB_STAGE0_MODEL` | No | An Anthropic model id for the Stage 0 intent brief (playlist mode), replacing the free provider cascade. Unset: the cascade runs as before |
+| `MIXLAB_LLM_STUB` | No | `1`: no LLM request is made and no key is needed; the selection, reports and Stage 0 are deterministic. Any mode |
+| `MIXLAB_HISTORY_PATH` | No | Where the concept history is read and written, by runs, `--feedback` and both workers (default: `.mixlab/concept-history.json`). Read from the process environment at start-up, like `MIXLAB_COLLECTION_PATH`: a value only in `.env` is not seen; empty means unset |
+| `MIXLAB_GENRE_CACHE_PATH` | No | Where the genre-availability cache `--genres` reads is written (default: `.mixlab_genres.json`). Process environment only, as above; empty means unset |
+| `MIXLAB_ENGINE_DIGEST` | No | Tenant mode: the image digest (`sha256:` and 64 hex digits) copied into `summary.json`; any other value is left out |
+| `MIXLAB_PROTOCOL_VERSION` | No | Tenant mode: the worker protocol version, sent in the claim and copied into `summary.json` as an integer |
 
 `ANTHROPIC_API_KEY` is required for Stage 2 report generation. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only. `MIXLAB_STAGE2_MODEL` and `MIXLAB_STAGE2_TEMPERATURE` let you point Stage 2 at a different Anthropic model or tune selection-pass creativity without editing code — both fall back to the current defaults when unset or invalid.
+
+#### Tenant mode and the LLM layer
+
+These variables are read at run time. Each is unset by default, and with none set a run is exactly as before.
+
+**`MIXLAB_API_MODE=tenant`** switches on the behaviour the multi-tenant worker relies on. Any other value, or none, leaves it off.
+
+- Every Anthropic call reserves from a token budget (`MIXLAB_TOKEN_BUDGET`, below) before it is sent.
+- Each attempt is bounded to 480 seconds of wall-clock time, a call makes at most two attempts (one retry), and a `retry-after` is honoured up to 30 seconds.
+- The selection call asks for at most 16,000 output tokens, not 64,000. A selection whose thinking uses the whole allowance and leaves no text is treated as truncated, with the usual warning, rather than as an error.
+- Provider failures raise typed errors that end the run with their own exit code (table below). On the title re-roll, the critique, the revision and the report regeneration, a budget stop, a spend cap or a refusal ends the run too, but an outage stays non-fatal there, as before.
+- A bad command-line argument exits 1 instead of argparse's 2, because 2 means "no shortlist".
+- `summary.json` is `schemaVersion` 2: version 1's fields plus `llmCalls` (every Anthropic attempt, in the order it finished, with its model, purpose, tokens and stop reason), `historyEntry` (the history entry the run appended), `engineDigest` and `protocolVersion` (from the two variables above, when valid).
+- Playlist mode appends a history entry as genre mode does, its canvas fields empty, so feedback on a playlist concept finds it.
+
+**`MIXLAB_TOKEN_BUDGET=<input>,<output>`** sets the run's allowances (default `150000,56000`); tenant mode only, ignored otherwise. Before a call, its estimated input (one token per three characters of system and prompt, a deliberate over-estimate) and its `max_tokens` are reserved against what is already spent and reserved; a call that does not fit raises the token-budget error. Actual usage, thinking tokens included, replaces the reservation after the response, and a retry keeps its call's reservation. Two positive integers separated by a comma, spaces allowed; anything else prints a warning and uses the default.
+
+**`MIXLAB_STAGE2_EFFORT`** (`low`, `medium` or `high`, case-sensitive) applies only to a 5-family model id, one whose version number is 5 or more (`claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`; not `claude-sonnet-4-6`). Unset, or any other value (which warns once on stderr), the request is exactly what it was before for every model, including `claude-sonnet-5-5`'s existing `between_tools` thinking at effort `high`. Set, a 5-family model sends no `temperature` and, per call:
+
+| Call | `output_config.effort` | `thinking` |
+|---|---|---|
+| Selection, revision | the variable's value | `adaptive` |
+| Report, report regeneration | the variable's value | `between_tools` |
+| Title re-roll, critique | `low` | `between_tools` |
+
+A 4-family model id is unchanged whatever the variable says, `MIXLAB_STAGE2_TEMPERATURE` included.
+
+**`MIXLAB_FALLBACKS=default`** adds `"fallbacks": "default"` and the header `anthropic-beta: server-side-fallback-2026-07-01` to every Stage 2 call, so Anthropic may answer with a fallback model. Stage 0 never sends it. Any other value warns once and changes nothing. The attempts a fallback reports are recorded and counted against the token budget.
+
+**`MIXLAB_STAGE0_MODEL=<model id>`** makes the Stage 0 intent brief (playlist mode, more than five seed tracks) one Anthropic call on that model instead of the free provider cascade: 4,096 output tokens, a 60-second bound, no retry, no fallback, and effort `low` with no `temperature` on a 5-family id (`temperature` 0.7 otherwise). It needs `ANTHROPIC_API_KEY`; without one, or on any failure (a `400`, a `401`, a `5xx`, a timeout, an empty answer), the run uses the deterministic brief and prints the usual line. In tenant mode a refusal, a budget stop or a spend cap ends the run instead, with its exit code. Outside tenant mode a refusal falls back like any other failure.
+
+**`MIXLAB_LLM_STUB=1`** makes the run send no LLM request and need no `ANTHROPIC_API_KEY`, in any mode. Stage 0 returns the deterministic brief (ahead of `MIXLAB_STAGE0_MODEL`). The selection is built from the shortlists: in genre mode one concept per canvas, up to six, each with up to twelve tracks in Camelot order; in playlist mode three concepts (`practical`, `balanced`, `adventurous`), each with every valid seed track first and then library tracks up to twelve or the seed count, whichever is larger. Reports are a fixed paragraph per concept, and the title re-roll, the critique and the revision are skipped. Parsing, validation, sequencing, the HTML report and the export run as in a real run, so every artifact is written, and the output is deterministic. The catalogue is still read when `CATALOG_API_URL` is set.
+
+**Exit codes in tenant mode.** Outside tenant mode every refusal below exits 1 and the provider errors surface as before.
+
+| Code | Meaning | When |
+|---|---|---|
+| `0` | Success | The run completed |
+| `1` | Engine failure | Everything else: no concept returned, a wholly truncated selection, too few playlist seeds retained, a stale `--track-pool`, a `400` (other than the spend limit), `404` or `413` from Anthropic, a parser refusal, a bad argument, an unexpected exception |
+| `2` | No shortlist | Before any LLM call, the filters, deny-list and Stage 1 left too few tracks (an empty custom pool, no cluster for the genre, no canvas, a playlist that does not resolve, fewer than four valid seed tracks) |
+| `3` | Token budget | A call's reservation did not fit, or the input allowance is spent |
+| `4` | Provider spend cap | Anthropic reported a spend limit (a `400` naming the usage limit, a `429` `enforced_spend_limit_reached`, or a `402`); not retried |
+| `5` | Refusal | The model declined (`stop_reason: refusal`), after the fallback if enabled; any Anthropic call, Stage 0 included |
+| `6` | Provider unavailable | A `401` or `403`, or a `429`, `5xx`, `529` or transport error that survived the one retry, on the selection or a report |
 
 #### Catalog API (optional)
 
@@ -415,7 +473,7 @@ Emits per-canvas scoring diagnostics to stderr: every weighted component, weakne
 ./mixlab --feedback --concept "Glass Crate" --verdict rejected --notes "peak section didn't land"
 ```
 
-Every run stores its concepts in `.mixlab/concept-history.json`. `--feedback` lets you tell MixLab what actually happened to them: `played`, `played_modified`, `rejected`, or `unused`. Verdicts feed straight into novelty scoring on future runs — a concept you **played** penalises similar candidates ~1.5× harder (you've used that idea), while a **rejected** concept's penalty is muted to 0.25× (you said no; don't let it block fresh attempts). Concepts are matched by case-insensitive title or ID prefix against the most recent run containing them; no LLM or network calls.
+Every run stores its concepts in `.mixlab/concept-history.json` (or `MIXLAB_HISTORY_PATH`). `--feedback` lets you tell MixLab what actually happened to them: `played`, `played_modified`, `rejected`, or `unused`. Verdicts feed straight into novelty scoring on future runs — a concept you **played** penalises similar candidates ~1.5× harder (you've used that idea), while a **rejected** concept's penalty is muted to 0.25× (you said no; don't let it block fresh attempts). Concepts are matched by case-insensitive title or ID prefix against the most recent run containing them; no LLM or network calls.
 
 ### View cached genre counts from the last run (no API calls at all)
 
@@ -468,6 +526,22 @@ The worker mode is purely additive — your normal CLI workflow (`./mixlab --gen
 The worker also syncs concept history and feedback with the API: it pulls pending feedback events, applies them to the local history, and pushes back any changes — bidirectional sync so verdicts and ratings you record in the web UI feed into future runs.
 
 For production setup on macOS, see [`docs/ops/worker-launchd.md`](docs/ops/worker-launchd.md). Architecture and failure policies: [`docs/architecture/mixlab-anywhere.md`](docs/architecture/mixlab-anywhere.md).
+
+### Tenant worker (multi-tenant MixLab)
+
+With `MIXLAB_API_MODE=tenant`, `--worker-once` runs one run of the multi-tenant MixLab instead, as a container execution does:
+
+```bash
+MIXLAB_API_MODE=tenant python -m mixlab --worker-once --run <runId>   # or set MIXLAB_RUN_ID
+```
+
+It claims the run, syncs history and feedback, downloads and gunzips the upload, runs the engine as a subprocess in the scratch directory, and posts `complete` or `fail`. `--worker` (the loop) is refused in tenant mode: one execution runs one run. Without a run id, or with one of the variables below missing, it exits 1 before any request.
+
+**Required:** `MIXLAB_RUN_ID` (or `--run`), `MIXLAB_API_URL`, `MIXLAB_PROTOCOL_VERSION`, `MIXLAB_WORKER_CLIENT_ID`, `MIXLAB_WORKER_CLIENT_SECRET`, `MIXLAB_WORKER_TOKEN_ENDPOINT`, `MIXLAB_WORKER_SCOPE` (the worker's client-credentials grant) and `MIXLAB_WORKER_XML_PATH` (the upload's path; its directory is the run's scratch).
+
+**Optional:** `MIXLAB_HISTORY_PATH` (default `<scratch>/concept-history.json`), `MIXLAB_WORKER_RUN_TIMEOUT` (default `1200`), `MIXLAB_ENGINE_DIGEST`.
+
+The four `MIXLAB_WORKER_*` credential variables never reach the engine subprocess; the worker sets its five per-run paths (`MIXLAB_COLLECTION_PATH`, `MIXLAB_HISTORY_PATH`, `MIXLAB_REPORT_DIR`, `MIXLAB_DIAGNOSTICS_DIR`, `MIXLAB_GENRE_CACHE_PATH`) on it. The cycle, its deadlines, the exit-code mapping and the scrubbed diagnostics are in [`docs/architecture/tenant-mode.md`](docs/architecture/tenant-mode.md); the protocol itself is `tools/run-contract/protocol.md` in the mixlab-multi-tenant repository.
 
 ---
 
@@ -630,6 +704,9 @@ MixLab/
 ├── src/mixlab/
 │   ├── __main__.py        # CLI entry point and pipeline orchestration
 │   ├── reader.py          # Rekordbox XML parsing and BPM correction
+│   ├── hardened_xml.py    # Hardened XML parse: refuses gzip, DOCTYPE and over-large collections
+│   ├── modes.py           # Run-mode switches, read from the environment once at import
+│   ├── run_contract/      # Vendored run contract (package data, hash-pinned)
 │   ├── client.py          # Catalog API client (played track history, optional)
 │   ├── matcher.py         # Fuzzy played-track exclusion
 │   ├── clustering.py      # Genre grouping, BPM pool partitioning, Mix Canvas builder and scoring

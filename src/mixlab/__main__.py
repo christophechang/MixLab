@@ -4,17 +4,22 @@ import argparse
 import asyncio
 import datetime
 import difflib
+import importlib
 import io
 import json
 import os
+import re
 import sys
 import time
 import uuid
+from collections.abc import Coroutine
+from dataclasses import asdict
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 
 from dotenv import load_dotenv
 
+from mixlab import modes, tenant_worker
 from mixlab.cache import load_genre_cache, save_genre_cache
 from mixlab.client import fetch_mix_names, fetch_played_tracks
 from mixlab.clustering import (
@@ -60,6 +65,12 @@ from mixlab.html_report import (
 )
 from mixlab.library_map import MapMode, build_map_payload, render_map_json
 from mixlab.llm import (
+    RECORDER,
+    NoShortlistError,
+    ProviderCapError,
+    ProviderUnavailableError,
+    RefusalError,
+    TokenBudgetExceeded,
     _match_canvas_for_concept,  # noqa: PLC2701 — reused here to stamp direction_type on cards (#84)
     _parse_user_intent,  # noqa: PLC2701 — reused here for playlist-mode risk override (#54)
     _qualifies_for_revision,  # noqa: PLC2701 — reused for the revision-gate decision (#55)
@@ -86,6 +97,7 @@ from mixlab.prep import PrepItem, rank_prep_targets
 from mixlab.reader import apply_bpm_corrections, parse_collection, parse_playlists
 from mixlab.remote import MixLabRemote, RemoteConfig, RemoteConfigError
 from mixlab.summary import build_run_summary
+from mixlab.tenant_remote import TenantConfig, TenantConfigError, TenantRemote
 from mixlab.worker import WorkerConfig, run_worker
 
 
@@ -97,10 +109,36 @@ def _resolve_collection_path() -> Path:
     return Path(os.environ.get("MIXLAB_COLLECTION_PATH", "import/rekordbox.xml"))
 
 
+def _resolve_history_path() -> Path:
+    """Concept-history path. Defaults to the local file; the tenant worker sets ``MIXLAB_HISTORY_PATH``
+    to the run's scratch (M2b-D12). ``mixlab --feedback`` reads the same path. Unset or empty, nothing
+    changes. Read at import, from the process environment: a value only in ``.env`` is not seen.
+    """
+    return Path(os.environ.get("MIXLAB_HISTORY_PATH") or ".mixlab/concept-history.json")
+
+
 _XML_PATH = _resolve_collection_path()
-_HISTORY_PATH = Path(".mixlab/concept-history.json")
+_HISTORY_PATH = _resolve_history_path()
+# A history entry's mode label for each --mode, in genre mode and in tenant playlist mode (L26).
+_HISTORY_MODE_LABELS: dict[str, str] = {"all": "all-tracks", "played": "played", "unplayed": "standard"}
+_ENGINE_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_PROTOCOL_VERSION_RE = re.compile(r"[0-9]+")
 _DO_NOT_RECOMMEND_PLAYLIST = "DO NOT RECOMMEND"
 _FEEDBACK_VERDICTS = ("played", "played_modified", "rejected", "unused")
+
+
+def _engine_digest_from_env() -> str | None:
+    """``MIXLAB_ENGINE_DIGEST`` when it is an image digest (``sha256:`` and 64 hex digits), else None (M2b spec §5.2)."""
+    value = os.environ.get("MIXLAB_ENGINE_DIGEST", "")
+    return value if _ENGINE_DIGEST_RE.fullmatch(value) else None
+
+
+def _protocol_version_from_env() -> int | None:
+    """``MIXLAB_PROTOCOL_VERSION`` as a positive integer, else None (M2b spec §5.2)."""
+    value = os.environ.get("MIXLAB_PROTOCOL_VERSION", "").strip()
+    if not _PROTOCOL_VERSION_RE.fullmatch(value) or int(value) < 1:
+        return None
+    return int(value)
 
 
 def _build_tracks_by_id(tracks: list[Track]) -> dict[str, Track]:
@@ -314,6 +352,18 @@ def _print_pipeline_summary(
     print()
 
 
+def _genre_unplayed_by_play_count(genre: str, tracks: list[Track]) -> list[str]:
+    """The genre's PlayCount 0 tracks: its clusters and same-genre outliers (a custom genre's pool)."""
+    if genre in CUSTOM_GENRES:
+        scoped = build_custom_genre_pool(genre, tracks, CUSTOM_GENRES, GENRE_MAP)
+    else:
+        clusters, outliers = partition_outliers(tracks, GENRE_MAP)
+        clusters = resolve_genre_clusters(genre, clusters, GENRE_MAP)
+        scoped = [t for cluster_tracks in clusters.values() for t in cluster_tracks]
+        scoped += [t for t in outliers if t.genre.lower() == genre.lower()]
+    return [t.track_id for t in scoped if t.play_count == 0]
+
+
 def _print_availability(
     all_tracks: list[Track],
     unplayed: list[Track],
@@ -497,6 +547,58 @@ def run_prep(genre: str | None, top: int) -> int:
     return 0
 
 
+# Tenant mode exit codes (M2b spec §5.1, protocol.md v2). Outside tenant mode every refusal exits 1, as before.
+EXIT_NO_SHORTLIST, EXIT_TOKEN_BUDGET, EXIT_PROVIDER_CAP, EXIT_REFUSAL, EXIT_PROVIDER_UNAVAILABLE = 2, 3, 4, 5, 6
+_TENANT_EXIT_CODES: tuple[tuple[type[BaseException], int], ...] = (
+    (NoShortlistError, EXIT_NO_SHORTLIST),
+    (TokenBudgetExceeded, EXIT_TOKEN_BUDGET),
+    (ProviderCapError, EXIT_PROVIDER_CAP),
+    (RefusalError, EXIT_REFUSAL),
+    (ProviderUnavailableError, EXIT_PROVIDER_UNAVAILABLE),
+)
+
+
+def _refuse_no_shortlist(message: str) -> NoReturn:
+    """Too few tracks before any LLM call: tenant mode raises NoShortlistError (exit 2); else print and exit 1."""
+    if modes.TENANT_MODE:
+        raise NoShortlistError(message)
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def _tenant_exit_code(exc: BaseException) -> tuple[int, BaseException] | None:
+    """The exit code for one of the five tenant errors: by the exception's own type, then by its ``__cause__``."""
+    for candidate in (exc, exc.__cause__):
+        for error_type, code in _TENANT_EXIT_CODES:
+            if isinstance(candidate, error_type):
+                return code, candidate
+    return None
+
+
+def _run_engine(coro: Coroutine[object, object, None]) -> None:
+    """Run a pipeline coroutine; in tenant mode the five typed errors exit with their codes (M2b-D9, D10)."""
+    if not modes.TENANT_MODE:
+        asyncio.run(coro)
+        return
+    try:
+        asyncio.run(coro)
+    except Exception as exc:
+        mapped = _tenant_exit_code(exc)
+        if mapped is None:
+            raise
+        code, error = mapped
+        print(f"ERROR: {type(error).__name__}: {error}", file=sys.stderr)
+        sys.exit(code)
+
+
+class _TenantArgumentParser(argparse.ArgumentParser):
+    """Tenant mode: a bad argument exits 1, never argparse's 2, which is no_shortlist (M2b-D30)."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: error: {message}\n")
+
+
 async def run_playlist_mode(
     playlist_name: str,
     genre: str | None,
@@ -520,7 +622,18 @@ async def run_playlist_mode(
     unplayed_ids: set[str] | None = None
     mix_names: list[str] = []
     played_track_ids_set: set[str] = set()
-    if mode == "all":
+    # The additions filter runs on this flag, not on the played set being non-empty: an empty
+    # file-based played set must still filter (spec 5.5). Under catalog it is exactly the set's truthiness.
+    played_filter_active = False
+    if modes.played_source() == "file":
+        # MIXLAB_PLAYED_SOURCE=file: played is PlayCount >= 1 in the file; the catalogue is not asked.
+        if mode == "played":
+            played_track_ids_set = {t.track_id for t in tracks if t.play_count >= 1}
+            unplayed_ids = set()  # no unplayed bonus; pool is played-only
+            played_filter_active = True
+        else:  # "unplayed" weighting, or "all" with the unplayed set passed to Stage 2
+            unplayed_ids = {t.track_id for t in tracks if t.play_count == 0}
+    elif mode == "all":
         print("--mode all — skipping played-track weighting in playlist mode.")
     elif catalog_url:
         try:
@@ -539,13 +652,13 @@ async def run_playlist_mode(
             _unplayed_set = {t.track_id for t in filter_unplayed(tracks, played)}
             played_track_ids_set = {t.track_id for t in tracks if t.track_id not in _unplayed_set}
             unplayed_ids = set()  # no unplayed bonus; pool is played-only
+            played_filter_active = bool(played_track_ids_set)
 
     playlists = parse_playlists(_XML_PATH)
     try:
         raw_seed_ids = resolve_playlist(playlist_name, playlists)
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        sys.exit(1)
+        _refuse_no_shortlist(str(exc))
 
     tracks_by_id = _build_tracks_by_id(tracks)
     seed_ids = frozenset(track_id for track_id in raw_seed_ids if track_id in tracks_by_id)
@@ -597,7 +710,7 @@ async def run_playlist_mode(
         library_tracks = _apply_range_filters(
             library_tracks, min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year
         )
-        if mode == "played" and played_track_ids_set:
+        if played_filter_active:
             library_tracks = [t for t in library_tracks if t.track_id in played_track_ids_set]
 
     try:
@@ -605,12 +718,10 @@ async def run_playlist_mode(
             seed_tracks, library_tracks, unplayed_ids, all_tracks_flag=mode != "unplayed", intent_brief=intent_brief
         )
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        sys.exit(1)
+        _refuse_no_shortlist(str(exc))
 
     if not shortlists:
-        print("No zone shortlists could be built from the seed playlist.", file=sys.stderr)
-        sys.exit(1)
+        _refuse_no_shortlist("No zone shortlists could be built from the seed playlist.")
 
     t_start = time.monotonic()
 
@@ -640,6 +751,17 @@ async def run_playlist_mode(
     # immediately post-Stage-2, matching genre mode's run() — see docs/architecture/mixlab-anywhere.md §5.2.
     for concept in all_concepts:
         concept.concept_id = str(uuid.uuid4())
+
+    # L26 (M2b-D13): in tenant mode playlist mode appends a history entry, its canvas fields empty,
+    # so feedback on a playlist concept joins a record. Outside tenant mode it writes none, as before.
+    history_entry: HistoryEntry | None = None
+    if modes.TENANT_MODE:
+        try:
+            entry = HistoryEntry.from_run([], all_concepts, genre=genre or "_default", mode=_HISTORY_MODE_LABELS[mode])
+            append_run(history, entry, _HISTORY_PATH)
+            history_entry = entry
+        except Exception as exc:
+            print(f"Warning: could not write concept history: {exc}", file=sys.stderr)
 
     elapsed = time.monotonic() - t_start
     mins, secs = divmod(int(elapsed), 60)
@@ -710,6 +832,11 @@ async def run_playlist_mode(
         validation_warnings=[],
         run_notes=run_notes,
         generated_at=today,
+        tenant=modes.TENANT_MODE,
+        llm_calls=RECORDER.as_summary(),
+        history_entry=asdict(history_entry) if history_entry is not None else None,
+        engine_digest=_engine_digest_from_env(),
+        protocol_version=_protocol_version_from_env(),
     )
     summary_path = html_path.with_suffix(".json")
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -903,12 +1030,32 @@ async def run(
     # 2. Fetch played tracks and filter pool based on mode.
     api_key = os.environ.get("CHANGSTA_API_KEY", "")
     catalog_url = os.environ.get("CATALOG_API_URL", "")
-    used_catalog_api = False
+    # True when played status is known (the catalogue answered, or the file's PlayCount under
+    # MIXLAB_PLAYED_SOURCE=file): switches on the crate table's counts and the export's unplayed list.
+    used_played_source = False
     mix_names: list[str] = []
     played_track_ids: set[str] = set()
     unplayed_ids_for_stage2: set[str] | None = None
     pool_label = "unplayed"
-    if mode == "all":
+    if modes.played_source() == "file":
+        # MIXLAB_PLAYED_SOURCE=file (spec 5.5): played is PlayCount >= 1 in the file. No catalogue
+        # request, CATALOG_API_URL ignored; mix_names stays empty (the name-avoid list is history alone).
+        used_played_source = True
+        if mode == "played":
+            pool_label = "played"
+            unplayed = [t for t in tracks if t.play_count >= 1]
+        elif mode == "unplayed":
+            unplayed = [t for t in tracks if t.play_count == 0]
+            played_track_ids = {t.track_id for t in tracks if t.play_count >= 1}
+        else:  # mode == "all"
+            unplayed = list(tracks)
+            unplayed_ids_for_stage2 = {t.track_id for t in tracks if t.play_count == 0}
+            print(
+                f"--mode all — played status from the file: {len(tracks) - len(unplayed_ids_for_stage2)}/"
+                f"{len(tracks)} played, {len(unplayed_ids_for_stage2)} unplayed. Stage 2 will favour unplayed in ties.",
+                flush=True,
+            )
+    elif mode == "all":
         unplayed = list(tracks)
         if catalog_url:
             try:
@@ -930,7 +1077,7 @@ async def run(
                     )
                 played_ids_set = {t.track_id for t in filter_played(tracks, played)}
                 unplayed_ids_for_stage2 = {t.track_id for t in tracks if t.track_id not in played_ids_set}
-                used_catalog_api = True
+                used_played_source = True
                 print(
                     f"--mode all — fetched played status: {len(played_ids_set)}/{len(tracks)} played, "
                     f"{len(unplayed_ids_for_stage2)} unplayed. Stage 2 will favour unplayed in ties.",
@@ -960,7 +1107,7 @@ async def run(
             unplayed = filter_unplayed(tracks, played)
             _unplayed_ids = {t.track_id for t in unplayed}
             played_track_ids = {t.track_id for t in tracks if t.track_id not in _unplayed_ids}
-        used_catalog_api = True
+        used_played_source = True
     else:
         print("No CATALOG_API_URL set — skipping played-track filter, using full collection.")
         unplayed = list(tracks)
@@ -990,7 +1137,7 @@ async def run(
 
     # 3. Always print the availability table (deterministic, no LLM cost).
     counts, outlier_count, outlier_genres = _print_availability(
-        tracks, unplayed, show_unplayed=used_catalog_api, excluded_count=denylist_excluded, pool_label=pool_label
+        tracks, unplayed, show_unplayed=used_played_source, excluded_count=denylist_excluded, pool_label=pool_label
     )
     save_genre_cache(counts, outlier_count, outlier_genres)
 
@@ -1021,8 +1168,7 @@ async def run(
     if is_custom:
         pool = build_custom_genre_pool(genre, unplayed, CUSTOM_GENRES, GENRE_MAP)
         if not pool:
-            print(f"No tracks found for custom genre '{genre}'.", file=sys.stderr)
-            sys.exit(1)
+            _refuse_no_shortlist(f"No tracks found for custom genre '{genre}'.")
         print(f"Custom genre '{genre}': {len(pool)} tracks in pool.")
         # Sort by BPM for Stage 1 — ensures BPM-coherent ordering.
         # (Camelot walk not used here: it can span large BPM gaps across sub-genres.)
@@ -1048,8 +1194,7 @@ async def run(
         genre_cluster_counts = {genre_label: len(cluster_tracks) for genre_label, cluster_tracks in clusters.items()}
 
         if not clusters:
-            print(f"No tracks found for genre '{genre}'.", file=sys.stderr)
-            sys.exit(1)
+            _refuse_no_shortlist(f"No tracks found for genre '{genre}'.")
 
         # 6a. Stage 1 — deterministic partitioning.
         for genre_label, cluster_tracks in clusters.items():
@@ -1083,7 +1228,7 @@ async def run(
         _print_pipeline_summary(
             collection_count=len(tracks),
             unplayed_count=len(unplayed),
-            used_catalog_api=used_catalog_api,
+            used_catalog_api=used_played_source,
             pool_label=pool_label,
             genre_cluster_counts=genre_cluster_counts,
             bpm_filtered_counts=bpm_filtered_counts,
@@ -1092,8 +1237,7 @@ async def run(
             stage2_shortlist_count=0,
             stage1_overflow=total_stage1_overflow,
         )
-        print("No shortlists generated — all tracks may have been excluded.", file=sys.stderr)
-        sys.exit(1)
+        _refuse_no_shortlist("No shortlists generated — all tracks may have been excluded.")
     if len(all_shortlists) < 3:
         print(
             f"⚠️  Stage 1 produced only {len(all_shortlists)} shortlist(s) — pool may be too thin for 3–6 concepts.",
@@ -1202,12 +1346,11 @@ async def run(
         classic_selected = _distinct_from(classic_pool, direction_canvases, limit=classic_n)
         selected_canvases = classic_selected + direction_canvases
     if not selected_canvases:
-        print("No canvases could be built — collection may be out of sync.", file=sys.stderr)
-        sys.exit(1)
+        _refuse_no_shortlist("No canvases could be built — collection may be out of sync.")
     _print_pipeline_summary(
         collection_count=len(tracks),
         unplayed_count=len(unplayed),
-        used_catalog_api=used_catalog_api,
+        used_catalog_api=used_played_source,
         pool_label=pool_label,
         genre_cluster_counts=genre_cluster_counts,
         bpm_filtered_counts=bpm_filtered_counts,
@@ -1300,16 +1443,18 @@ async def run(
         report += "\n\n⚠ **Validation Notes**\n" + "\n".join(f"- {w}" for w in validation_warnings)
 
     # Persist run to concept history for novelty scoring in future runs.
+    history_entry: HistoryEntry | None = None
     try:
         entry = HistoryEntry.from_run(
             selected_canvases,
             all_concepts,
             genre=genre or "_default",
-            mode={"all": "all-tracks", "played": "played", "unplayed": "standard"}[mode],
+            mode=_HISTORY_MODE_LABELS[mode],
             block_label=block_label,
             block_resolved_count=block_resolved_count,
         )
         append_run(history, entry, _HISTORY_PATH)
+        history_entry = entry
     except Exception as exc:
         print(f"Warning: could not write concept history: {exc}", file=sys.stderr)
     elapsed = time.monotonic() - t_start
@@ -1335,8 +1480,11 @@ async def run(
     folder_name = f"Mix Lab - {genre} - {today}"
     # All unplayed tracks scoped to this genre: cluster tracks + same-genre outliers.
     # Only meaningful when we fetched played tracks from the catalogue API.
+    # Under MIXLAB_PLAYED_SOURCE=file: the genre's PlayCount 0 tracks, whatever the mode (spec 5.5).
     genre_unplayed_track_ids: list[str] | None = None
-    if used_catalog_api:
+    if modes.played_source() == "file":
+        genre_unplayed_track_ids = _genre_unplayed_by_play_count(genre, tracks)
+    elif used_played_source:
         genre_unplayed_track_ids = [t.track_id for t in genre_unplayed_track_ids_source]
         genre_unplayed_track_ids += [t.track_id for t in genre_outliers]
     merged_bytes = generate_merged_xml_bytes(all_concepts, raw_tracks_xml, folder_name, genre_unplayed_track_ids)
@@ -1403,6 +1551,11 @@ async def run(
         validation_warnings=validation_warnings,
         run_notes=run_notes,
         generated_at=today,
+        tenant=modes.TENANT_MODE,
+        llm_calls=RECORDER.as_summary(),
+        history_entry=asdict(history_entry) if history_entry is not None else None,
+        engine_digest=_engine_digest_from_env(),
+        protocol_version=_protocol_version_from_env(),
     )
     summary_path = html_path.with_suffix(".json")
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -1417,7 +1570,7 @@ async def run(
         tracks_by_id,
         counts=counts,
         attachments=attachments,
-        show_unplayed=used_catalog_api,
+        show_unplayed=used_played_source,
         report_context=report_context,
         excluded_count=denylist_excluded,
         filter_desc=_build_filter_desc(min_bpm=min_bpm, max_bpm=max_bpm, min_year=min_year, max_year=max_year),
@@ -1491,14 +1644,41 @@ def _warn_intent(intent: str | None) -> None:
         )
 
 
-def _run_worker_cli(*, once: bool) -> None:
+def _run_tenant_worker_cli(*, once: bool, run_id: str | None) -> None:
+    """``--worker-once`` under ``MIXLAB_API_MODE=tenant``: one claim cycle of the tenant protocol (M2b-D2).
+
+    The run is ``--run`` or ``MIXLAB_RUN_ID``; without either, or with a worker variable missing,
+    it exits 1 before any call. ``--worker`` (the poll loop) is refused: one execution runs one run.
+    """
+    if not once:
+        print(
+            "--worker is not available in tenant mode: one execution runs one run (use --worker-once)", file=sys.stderr
+        )
+        sys.exit(1)
+    resolved = (run_id or os.environ.get("MIXLAB_RUN_ID", "")).strip()
+    if not resolved:
+        print("tenant mode needs the run to claim: --run <runId> or MIXLAB_RUN_ID", file=sys.stderr)
+        sys.exit(1)
+    try:
+        config = TenantConfig.from_env()
+        worker_config = tenant_worker.WorkerConfig.from_env()
+    except TenantConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+    sys.exit(tenant_worker.run_once(TenantRemote(config), resolved, worker_config))
+
+
+def _run_worker_cli(*, once: bool, run_id: str | None = None) -> None:
     """Handle ``mixlab --worker`` / ``--worker-once`` (#91 / M3).
 
     Builds the remote config from the environment (``MIXLAB_API_URL`` /
     ``MIXLAB_API_SECRET``) — a missing value prints the reason to stderr and exits 1 —
     then drives the worker loop. ``MIXLAB_WORKER_POLL_SECONDS`` (default 30) sets the
-    empty-poll cadence.
+    empty-poll cadence. In tenant mode the tenant worker runs instead (M2b-D2).
     """
+    if modes.TENANT_MODE:
+        _run_tenant_worker_cli(once=once, run_id=run_id)
+        return
     try:
         remote_config = RemoteConfig.from_env()
     except RemoteConfigError as exc:
@@ -1516,7 +1696,10 @@ def main() -> None:
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(line_buffering=True)
     load_dotenv()
-    parser = argparse.ArgumentParser(
+    # modes reads the switches at import, before .env is loaded: read them again so a value set there counts.
+    importlib.reload(modes)
+    parser_class = _TenantArgumentParser if modes.TENANT_MODE else argparse.ArgumentParser
+    parser = parser_class(
         description="MixLab — AI-powered DJ crate assistant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -1853,10 +2036,19 @@ examples:
         dest="worker_once",
         help="Run a single worker poll cycle then exit (for cron/agent/manual use). Takes precedence over --worker.",
     )
+    parser.add_argument(
+        "--run",
+        metavar="RUN_ID",
+        default=None,
+        help=(
+            "With --worker-once in tenant mode (MIXLAB_API_MODE=tenant): the run to claim. "
+            "Defaults to MIXLAB_RUN_ID. Ignored otherwise."
+        ),
+    )
     args = parser.parse_args()
 
     if args.worker or args.worker_once:
-        _run_worker_cli(once=args.worker_once)
+        _run_worker_cli(once=args.worker_once, run_id=args.run)
         return
 
     if args.map:
@@ -1918,7 +2110,7 @@ examples:
                 "Stage 0 intent brief (#54) instead.",
                 file=sys.stderr,
             )
-        asyncio.run(
+        _run_engine(
             run_playlist_mode(
                 args.playlist,
                 args.genre,
@@ -1942,7 +2134,7 @@ examples:
             file=sys.stderr,
         )
 
-    asyncio.run(
+    _run_engine(
         run(
             args.genre,
             export_dir,

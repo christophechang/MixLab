@@ -1,6 +1,82 @@
 # Changelog
 
-## Unreleased
+## v1.20.0 — 2026-10-17
+
+The engine for the multi-tenant MixLab (M2b). With no new variable set it behaves as
+v1.19.3 apart from the parser's refusals and the `AverageBpm` grammar below. Deploying it needs
+`.venv/bin/pip install -e .` after the pull, so the `lxml` pin takes effect.
+
+- **The parser refuses input Rekordbox never writes.** A gzip file, a `DOCTYPE`
+  (found by the prolog scan, or after the parse for encodings the scan does not
+  read) and a collection of more than 20,000 rows are refused, as is a file whose
+  first byte is not `<`. With the `AverageBpm` grammar below these are the only
+  changes with no variable set. `lxml` is pinned to 6.1.1.
+- **Runtime dependencies are pinned by a constraints file.** `constraints.txt` is
+  written by `pip freeze`, read by the Dockerfile, and refreshed deliberately by a
+  commit.
+- **`AverageBpm` is admitted by the run contract's grammar (`bpmGrammar`).** Exotic
+  forms that `float()` accepts, such as `1_000`, `inf`, `nan` and non-ASCII digits,
+  are excluded with the missing-BPM warning instead of being read or crashing.
+- **Key notation can follow the multi-tenant API.** `MIXLAB_KEY_NOTATION=any`
+  normalises classical spellings to Camelot codes as the API reads them, from the
+  vendored `keys.json`; admission is unchanged. The default, `camelot`, copies
+  Tonality as written.
+- **Played status can come from the export.** `MIXLAB_PLAYED_SOURCE=file` takes
+  played to mean `PlayCount` of 1 or more in the file and never asks the
+  catalogue. The default, `catalog`, is unchanged.
+- **The run contract is vendored.** `src/mixlab/run_contract/` is package data,
+  hash-pinned, taken from mixlab-multi-tenant `c186cc8`. `image.yml` now checks the
+  lxml and libxml2 versions and that the package data loads, in the built image
+  and in the pushed one.
+- **A new leaf module, `modes.py`,** reads the run-mode switches
+  (`MIXLAB_API_MODE`, `MIXLAB_LLM_STUB`, `MIXLAB_KEY_NOTATION`,
+  `MIXLAB_PLAYED_SOURCE`) from the environment once and imports nothing of `mixlab`.
+- **Tenant mode has a token budget and typed exit codes.** With
+  `MIXLAB_API_MODE=tenant`, every Anthropic call reserves from `MIXLAB_TOKEN_BUDGET`
+  (`<input>,<output>`, default `150000,56000`) before it is sent; each attempt is
+  bounded to 480 seconds, a call makes one retry at most, a `retry-after` is honoured
+  up to 30 seconds, and the selection asks for 16,000 output tokens. Failures that end
+  the run now exit with their own code: 2 no shortlist, 3 token budget, 4 provider
+  spend cap, 5 refusal, 6 provider unavailable. A bad argument exits 1. Outside
+  tenant mode every refusal still exits 1 and the provider errors surface as before.
+- **Every Anthropic call is recorded.** An in-memory recorder keeps one entry per
+  attempt, a declined or truncated one included, with the model that answered, its
+  tokens and its stop reason. Nothing is written yet and no output changes.
+- **Stage 2 can use effort and thinking on 5-family models.** `MIXLAB_STAGE2_EFFORT`
+  (`low`, `medium`, `high`), set on a model id whose version number is 5 or more,
+  sends `output_config.effort` and a thinking mode per call and no `temperature`:
+  adaptive for the selection and revision, `between_tools` at the value for the
+  report and its regeneration, `between_tools` at `low` for the title re-roll and
+  critique. Unset or invalid, every request is exactly what it was.
+- **Stage 2 can ask for the server-side fallback.** `MIXLAB_FALLBACKS=default` adds
+  `fallbacks` and the `anthropic-beta: server-side-fallback-2026-07-01` header to
+  every Stage 2 call.
+- **Stage 0 can run on Anthropic.** `MIXLAB_STAGE0_MODEL` replaces the free provider
+  cascade with one call (60 seconds, no retry, effort `low` on a 5-family id). Any
+  failure falls back to the deterministic brief; in tenant mode a refusal, a budget
+  stop or a spend cap ends the run instead.
+- **A stub mode runs the whole pipeline without an LLM.** `MIXLAB_LLM_STUB=1`, in any
+  mode, makes no LLM request and needs no API key. The selection, the reports and
+  Stage 0 are deterministic, and the HTML report, the export and the history are
+  written as for a real run.
+- **The history and genre-cache paths can be set.** `MIXLAB_HISTORY_PATH` replaces
+  the two hard-coded history paths (runs and `--feedback`, and the Anywhere
+  worker's sync) and `MIXLAB_GENRE_CACHE_PATH` the genre cache's; both defaults are
+  unchanged.
+- **Tenant runs write `summary.json` version 2.** With `MIXLAB_API_MODE=tenant` the
+  summary adds `llmCalls` from the recorder, `historyEntry`, and `engineDigest` and
+  `protocolVersion` from `MIXLAB_ENGINE_DIGEST` and `MIXLAB_PROTOCOL_VERSION` when
+  they are valid, and playlist mode appends a history entry with empty canvases.
+  Outside tenant mode the summary stays version 1 and playlist mode writes no
+  history.
+- **A tenant worker runs one multi-tenant run per execution.** With
+  `MIXLAB_API_MODE=tenant`, `--worker-once` claims the run named by `--run` or
+  `MIXLAB_RUN_ID`, syncs history and feedback, gunzips the upload under the 96 MiB
+  cap, runs the engine in the scratch directory without the worker's credentials,
+  and posts `complete` or `fail` with a scrubbed diagnostics blob, inside the
+  protocol's 60-second, 3-minute and 3-minute windows. `--worker` is refused in
+  tenant mode. The MixLab Anywhere worker is unchanged. See
+  `docs/architecture/tenant-mode.md`.
 
 ## v1.19.3 — 2026-10-15
 

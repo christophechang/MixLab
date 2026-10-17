@@ -20,6 +20,8 @@ from mixlab.models import MixConcept, Track
 from mixlab.transitions import relation_label, score_transition
 
 SCHEMA_VERSION = 1
+# A tenant run's summary (M2b spec §5.2): version 1 plus llmCalls, historyEntry, engineDigest, protocolVersion.
+TENANT_SCHEMA_VERSION = 2
 
 
 def _resolved_tracks(concept: MixConcept, tracks_by_id: dict[str, Track]) -> list[Track]:
@@ -136,14 +138,23 @@ def build_run_summary(
     validation_warnings: list[str],
     run_notes: str,
     generated_at: str,
+    tenant: bool = False,
+    llm_calls: list[dict[str, str | int]] | None = None,
+    history_entry: dict[str, object] | None = None,
+    engine_digest: str | None = None,
+    protocol_version: int | None = None,
 ) -> dict[str, object]:
     """Build the JSON-serialisable ``summary.json`` payload for a completed run (#89).
 
     Deterministic: identical inputs produce an identical dict (the only caller-supplied
     time-varying value is ``generated_at``, matching the ``render_html_report`` contract).
+
+    With ``tenant`` the payload is ``schemaVersion`` 2 (M2b spec §5.2): ``llmCalls`` always,
+    and ``historyEntry``, ``engineDigest`` and ``protocolVersion`` when given. Without it the
+    four tenant arguments are ignored and the payload is version 1, as before.
     """
-    return {
-        "schemaVersion": SCHEMA_VERSION,
+    summary: dict[str, object] = {
+        "schemaVersion": TENANT_SCHEMA_VERSION if tenant else SCHEMA_VERSION,
         "generatedAt": generated_at,
         "seed": seed,
         "flags": flags,
@@ -151,3 +162,13 @@ def build_run_summary(
         "runNotes": run_notes,
         "concepts": [_concept_payload(c, tracks_by_id, validation_warnings) for c in concepts],
     }
+    if not tenant:
+        return summary
+    summary["llmCalls"] = list(llm_calls or [])
+    if history_entry is not None:
+        summary["historyEntry"] = history_entry
+    if engine_digest is not None:
+        summary["engineDigest"] = engine_digest
+    if protocol_version is not None:
+        summary["protocolVersion"] = protocol_version
+    return summary

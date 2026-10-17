@@ -8,7 +8,7 @@ version = "1.5.0"
 requires-python = ">=3.12"
 dependencies = [
     "httpx",
-    "lxml",
+    "lxml==6.1.1",
     "pydantic",
     "python-dotenv",
 ]
@@ -22,6 +22,7 @@ dev = [
     "pytest-mock",
     "respx",
     "lxml-stubs",
+    "jsonschema",
 ]
 
 [project.scripts]
@@ -29,6 +30,9 @@ mixlab = "mixlab.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+mixlab = ["run_contract/*.json"]
 
 [tool.ruff]
 line-length = 120
