@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- S6 standard fixture: admission, deny-list, doubling, the exact-12 techno pool, playlists at 4 and 3, multiplicity, the empty key, a case collision; spec 9.1 -->
+<DJ_PLAYLISTS Version="1.0.0">
+  <PRODUCT Name="rekordbox" Version="7.2.18" Company="AlphaTheta"/>
+  <COLLECTION Entries="44">
+    <TRACK TrackID="1" Name="Track 1" Artist="Fixture" Genre="House" AverageBpm="124.0" Tonality="1A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track1.mp3"/>
+    <TRACK TrackID="2" Name="Track 2" Artist="Fixture" Genre="House" AverageBpm="124.5" Tonality="2A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track2.mp3"/>
+    <TRACK TrackID="3" Name="Track 3" Artist="Fixture" Genre="House" AverageBpm="125.0" Tonality="3A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track3.mp3"/>
+    <TRACK TrackID="4" Name="Track 4" Artist="Fixture" Genre="House" AverageBpm="125.5" Tonality="4A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track4.mp3"/>
+    <TRACK TrackID="5" Name="Track 5" Artist="Fixture" Genre="House" AverageBpm="126.0" Tonality="5A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track5.mp3"/>
+    <TRACK TrackID="6" Name="Track 6" Artist="Fixture" Genre="House" AverageBpm="126.5" Tonality="6A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track6.mp3"/>
+    <TRACK TrackID="7" Name="Track 7" Artist="Fixture" Genre="House" AverageBpm="127.0" Tonality="7A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track7.mp3"/>
+    <TRACK TrackID="8" Name="Track 8" Artist="Fixture" Genre="House" AverageBpm="127.5" Tonality="8A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track8.mp3"/>
+    <TRACK TrackID="9" Name="Track 9" Artist="Fixture" Genre="House" AverageBpm="128.0" Tonality="9A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track9.mp3"/>
+    <TRACK TrackID="10" Name="Track 10" Artist="Fixture" Genre="House" AverageBpm="128.5" Tonality="10A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track10.mp3"/>
+    <TRACK TrackID="11" Name="Track 11" Artist="Fixture" Genre="Deep House" AverageBpm="121" Tonality="3A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track11.mp3"/>
+    <TRACK TrackID="12" Name="Track 12" Artist="Fixture" Genre="Deep House" AverageBpm="122" Tonality="4A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track12.mp3"/>
+    <TRACK TrackID="13" Name="Track 13" Artist="Fixture" Genre="Deep house" AverageBpm="120" Tonality="5A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track13.mp3"/>
+    <TRACK TrackID="14" Name="Track 14" Artist="Fixture" Genre="house" AverageBpm="123" Tonality="6A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track14.mp3"/>
+    <TRACK TrackID="15" Name="Track 15" Artist="Fixture" Genre="Techno" AverageBpm="130.0" Tonality="1A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track15.mp3"/>
+    <TRACK TrackID="16" Name="Track 16" Artist="Fixture" Genre="Techno" AverageBpm="130.25" Tonality="2A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track16.mp3"/>
+    <TRACK TrackID="17" Name="Track 17" Artist="Fixture" Genre="Techno" AverageBpm="130.5" Tonality="3A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track17.mp3"/>
+    <TRACK TrackID="18" Name="Track 18" Artist="Fixture" Genre="Techno" AverageBpm="130.75" Tonality="4A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track18.mp3"/>
+    <TRACK TrackID="19" Name="Track 19" Artist="Fixture" Genre="Techno" AverageBpm="131.0" Tonality="5A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track19.mp3"/>
+    <TRACK TrackID="20" Name="Track 20" Artist="Fixture" Genre="Techno" AverageBpm="131.25" Tonality="6A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track20.mp3"/>
+    <TRACK TrackID="21" Name="Track 21" Artist="Fixture" Genre="Techno" AverageBpm="131.5" Tonality="7A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track21.mp3"/>
+    <TRACK TrackID="22" Name="Track 22" Artist="Fixture" Genre="Techno" AverageBpm="131.75" Tonality="8A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track22.mp3"/>
+    <TRACK TrackID="23" Name="Track 23" Artist="Fixture" Genre="Techno" AverageBpm="132.0" Tonality="9A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track23.mp3"/>
+    <TRACK TrackID="24" Name="Track 24" Artist="Fixture" Genre="Techno" AverageBpm="132.25" Tonality="10A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track24.mp3"/>
+    <TRACK TrackID="25" Name="Track 25" Artist="Fixture" Genre="Techno" AverageBpm="132.5" Tonality="11A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track25.mp3"/>
+    <TRACK TrackID="26" Name="Track 26" Artist="Fixture" Genre="Techno" AverageBpm="132.75" Tonality="12A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track26.mp3"/>
+    <TRACK TrackID="27" Name="Track 27" Artist="Fixture" Genre="Techno" AverageBpm="133.0" Tonality="1B" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track27.mp3"/>
+    <TRACK TrackID="28" Name="Track 28" Artist="Fixture" Genre="Drum &amp; Bass" AverageBpm="87" Tonality="7A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track28.mp3"/>
+    <TRACK TrackID="29" Name="Track 29" Artist="Fixture" Genre="Drum &amp; Bass" AverageBpm="86.5" Tonality="7A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track29.mp3"/>
+    <TRACK TrackID="30" Name="Track 30" Artist="Fixture" Genre="Drum &amp; Bass" AverageBpm="172" Tonality="7A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track30.mp3"/>
+    <TRACK TrackID="31" Name="Track 31" Artist="Fixture" Genre="Drum &amp; Bass" AverageBpm="174" Tonality="7A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track31.mp3"/>
+    <TRACK TrackID="32" Name="Track 32" Artist="Fixture" Genre="Drum &amp; Bass" AverageBpm="176" Tonality="7A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track32.mp3"/>
+    <TRACK TrackID="33" Name="Track 33" Artist="Fixture" Genre="Drum &amp; Bass" AverageBpm="168" Tonality="7A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track33.mp3"/>
+    <TRACK TrackID="34" Name="Track 34" Artist="Fixture" Genre="DnB" AverageBpm="174" Tonality="8A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track34.mp3"/>
+    <TRACK TrackID="35" Name="Track 35" Artist="Fixture" Genre="Jungle" AverageBpm="160" Tonality="9A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track35.mp3"/>
+    <TRACK TrackID="36" Name="Track 36" Artist="Fixture" Genre="Jungle" AverageBpm="170" Tonality="9A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track36.mp3"/>
+    <TRACK TrackID="37" Name="Track 37" Artist="Fixture" Genre="Jungle" AverageBpm="175" Tonality="9A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track37.mp3"/>
+    <TRACK TrackID="38" Name="Track 38" Artist="Fixture" Genre="Rock" AverageBpm="110" Tonality="10A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track38.mp3"/>
+    <TRACK TrackID="39" Name="Track 39" Artist="Fixture" Genre="Rock" AverageBpm="111" Tonality="10A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track39.mp3"/>
+    <TRACK TrackID="40" Name="Track 40" Artist="Fixture" Genre="Techno" AverageBpm="128" Tonality="11A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhostsoundcloud/fixture/40"/>
+    <TRACK TrackID="41" Name="Track 41" Artist="Fixture" Genre="Techno" AverageBpm="128" Tonality="11A" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhostsoundcloud/fixture/41"/>
+    <TRACK TrackID="42" Name="Track 42" Artist="Fixture" Genre="House" Tonality="12A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track42.mp3"/>
+    <TRACK TrackID="43" Name="Track 43" Artist="Fixture" Genre="House" AverageBpm="125" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track43.mp3"/>
+    <TRACK TrackID="" Name="Track no id" Artist="Fixture" Genre="House" AverageBpm="121" Tonality="4A" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/trackx.mp3"/>
+  </COLLECTION>
+  <PLAYLISTS>
+    <NODE Type="0" Name="ROOT" Count="4">
+      <NODE Type="0" Name="Sets" Count="4">
+        <NODE Name="Friday" Type="1" KeyType="0" Entries="6"><TRACK Key="2"/><TRACK Key="3"/><TRACK Key="16"/><TRACK Key="15"/><TRACK Key="30"/><TRACK Key="35"/></NODE>
+        <NODE Name="Short" Type="1" KeyType="0" Entries="3"><TRACK Key="4"/><TRACK Key="5"/><TRACK Key="17"/></NODE>
+        <NODE Name="Location keyed" Type="1" KeyType="1" Entries="1"><TRACK Key="file://localhost/Users/dj/Music/track1.mp3"/></NODE>
+        <NODE Name="friday" Type="1" KeyType="0" Entries="2"><TRACK Key="6"/><TRACK Key="7"/></NODE>
+      </NODE>
+      <NODE Type="0" Name="Seeds" Count="2">
+        <NODE Name="Four" Type="1" KeyType="0" Entries="4"><TRACK Key="8"/><TRACK Key="9"/><TRACK Key="9"/><TRACK Key="18"/></NODE>
+        <NODE Name="Keyless" Type="1" KeyType="0" Entries="4"><TRACK Key="19"/><TRACK Key="20"/><TRACK Key="21"/><TRACK/></NODE>
+      </NODE>
+      <NODE Name="DO NOT RECOMMEND" Type="1" KeyType="0" Entries="2"><TRACK Key="15"/><TRACK Key="1"/></NODE>
+      <NODE Type="0" Name="Archive" Count="1">
+        <NODE Name="do not recommend" Type="1" KeyType="0" Entries="1"><TRACK Key="37"/></NODE>
+      </NODE>
+    </NODE>
+  </PLAYLISTS>
+</DJ_PLAYLISTS>

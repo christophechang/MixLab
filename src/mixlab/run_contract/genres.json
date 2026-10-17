@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "source": "MixLab src/mixlab/config.py:14-64 @ 5b33bda",
+  "genreMap": {
+    "drum_and_bass": [
+      "Drum & Bass",
+      "DnB",
+      "Liquid DnB",
+      "Jungle/Drum'n'bass"
+    ],
+    "techno": [
+      "Techno",
+      "Dark Techno",
+      "Industrial Techno",
+      "Dub Techno",
+      "Melodic House & Techno"
+    ],
+    "house": [
+      "House",
+      "Deep House",
+      "Deep house",
+      "Tech House",
+      "Classic House",
+      "Afro House",
+      "Minimal / Deep Tech"
+    ],
+    "uk_garage": [
+      "UK Garage",
+      "UKG",
+      "2-Step",
+      "Uk Garage",
+      "UK Garage / Bassline"
+    ],
+    "uk_bass": [
+      "UK Bass",
+      "Uk Bass"
+    ],
+    "jungle": [
+      "Jungle",
+      "Ragga Jungle"
+    ],
+    "breakbeat": [
+      "Breakbeat",
+      "Breaks",
+      "Nu Skool Breaks"
+    ],
+    "hardcore": [
+      "Hardcore",
+      "Rave",
+      "Hardcore, Jungle & Early House"
+    ],
+    "electronica": [
+      "Electronica",
+      "Electronic",
+      "Downtempo",
+      "Electronica / Downtempo",
+      "Trip Hop"
+    ],
+    "hip_hop": [
+      "Hip Hop",
+      "Hip-Hop",
+      "hip hop",
+      "Funk",
+      "Hip Hop/Rap",
+      "Hip hop/r&b",
+      "Hip-hop & Rap",
+      "Soul, Funk, Jazz"
+    ],
+    "progressive": [
+      "Progressive"
+    ],
+    "disco": [
+      "Disco"
+    ]
+  },
+  "customGenres": {
+    "170": {
+      "genres": [
+        "drum_and_bass",
+        "jungle"
+      ],
+      "bpmRange": [
+        165.0,
+        175.0
+      ]
+    },
+    "140": {
+      "genres": [
+        "breakbeat",
+        "uk_bass",
+        "uk_garage"
+      ],
+      "bpmRange": [
+        130.0,
+        140.0
+      ]
+    },
+    "4x4": {
+      "genres": [
+        "house",
+        "electronica",
+        "disco",
+        "progressive",
+        "techno"
+      ],
+      "bpmRange": null
+    },
+    "traverse": {
+      "genres": [
+        "house",
+        "electronica",
+        "disco",
+        "progressive",
+        "techno",
+        "uk_garage",
+        "uk_bass",
+        "breakbeat",
+        "hardcore",
+        "hip_hop",
+        "jungle",
+        "drum_and_bass"
+      ],
+      "bpmRange": null
+    }
+  },
+  "ignoredGenres": [
+    "80s Classics",
+    "Loop Samples",
+    "Pop",
+    "R & B",
+    "R&B",
+    "R&B & Soul",
+    "Reggae",
+    "Rock",
+    "sad rap"
+  ]
+}

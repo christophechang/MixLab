@@ -1,0 +1,660 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mixlab.setfolio.app/schemas/run-contract/v1/summary.schema.json",
+  "title": "MixLab run summary (summary.json)",
+  "description": "The structured artifact the engine writes for every completed run and the worker posts as the summary.json part of POST /api/worker/runs/{runId}/complete. schemaVersion 1 is today's summary, built by build_run_summary (MixLab src/mixlab/summary.py:130-153 @ 4631880, SCHEMA_VERSION at summary.py:22). schemaVersion 2 is a tenant run's summary: version 1 plus llmCalls, historyEntry, engineDigest and protocolVersion (spec §3.2 step 5, §10). Every key is camelCase, as summary.py:11-12 requires of this external contract, with one exception: the keys inside historyEntry are snake_case, because historyEntry is the engine's history-file shape (dataclasses.asdict, history.py:304) and the API appends it to the tenant's history verbatim. llmCalls is required only in schemaVersion 2 (the if/then below): the delivery predicate (spec §3.4 item 3) reads it, and a tenant run whose summary lacks it, a version 1 summary included, has missing evidence and is degraded. The predicate's other inputs (concepts, their tracks and transitions) are required in both versions. additionalProperties is left open everywhere: fields are added, never renamed.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "seed",
+    "flags",
+    "validationWarnings",
+    "runNotes",
+    "concepts"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "description": "1: today's summary (summary.py:22). 2: a tenant run's summary, which must carry llmCalls.",
+      "enum": [
+        1,
+        2
+      ]
+    },
+    "generatedAt": {
+      "description": "The run's local date, datetime.date.today().isoformat() (__main__.py:654, :1327), not a timestamp.",
+      "type": "string",
+      "format": "date"
+    },
+    "seed": {
+      "description": "The effective Stage 1 seed in genre mode; in playlist mode today's date as YYYYMMDD, carrying no reproducibility (__main__.py:682-683, :702).",
+      "type": "integer"
+    },
+    "flags": {
+      "description": "The effective flags. Opaque: the shape differs by mode (genre mode __main__.py:1372-1385, playlist mode __main__.py:684-695, which adds locked); values may be null.",
+      "type": "object"
+    },
+    "validationWarnings": {
+      "description": "Run-level validation warnings; always empty in playlist mode.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "runNotes": {
+      "description": "The report's trailing sections (renames, revisions), the same text the HTML report shows under Run notes.",
+      "type": "string"
+    },
+    "concepts": {
+      "description": "One entry per concept, in report order. May be empty; the delivery predicate, not this schema, requires at least one.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/concept"
+      }
+    },
+    "llmCalls": {
+      "description": "Every LLM call the engine made for this run, in the order made, a retry being a call of its own. A call that raised before a response carries no usage and is not listed (spec §7 residual, bounded by the token budget). Stage 2 calls are every purpose except intent_brief; the delivery predicate fails the run when any of them has stopReason max_tokens. Required when schemaVersion is 2.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/llmCall"
+      }
+    },
+    "historyEntry": {
+      "description": "This run's concept-history entry, appended by the API to the tenant's history in the batch that settles the run (spec §3.2 step 5; ledger L4). Its inner keys are snake_case: the history-file shape, appended verbatim. Absent when the run wrote no history.",
+      "$ref": "#/$defs/history_entry"
+    },
+    "engineDigest": {
+      "description": "The OCI digest of the engine image the run executed on (spec §3.4 item 5). The dispatcher records the digest from the job configuration when it starts the execution and passes it to the container as MIXLAB_ENGINE_DIGEST; the engine copies it here. This value is a cross-check only: the digest on the run document, recorded at start, is authoritative, and is the only one a failed run has.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "protocolVersion": {
+      "description": "MIXLAB_PROTOCOL_VERSION the worker claimed with (tools/run-contract/protocol.md).",
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "$defs": {
+    "nullable_number": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "nullable_string": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "concept": {
+      "description": "summary.py:109-127.",
+      "type": "object",
+      "required": [
+        "conceptId",
+        "title",
+        "directionType",
+        "arcType",
+        "mood",
+        "thesis",
+        "practicality",
+        "tracks",
+        "transitions",
+        "boothSheet",
+        "conceptWarnings"
+      ],
+      "properties": {
+        "conceptId": {
+          "description": "The concept's id, identical to ConceptRecord.concept_id in history: the join key for feedback.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "directionType": {
+          "description": "The matched direction canvas's type, or an empty string (models.py:111-114).",
+          "type": "string"
+        },
+        "arcType": {
+          "description": "models.py:67-79.",
+          "enum": [
+            "plateau",
+            "wave",
+            "progressive-build",
+            "build-and-drop",
+            "double-peak",
+            "sustained-pressure",
+            "front-loaded",
+            "dark-to-light",
+            "light-to-dark",
+            "narrative",
+            "abstract-journey",
+            null
+          ]
+        },
+        "mood": {
+          "type": "string"
+        },
+        "thesis": {
+          "type": "string"
+        },
+        "practicality": {
+          "$ref": "#/$defs/practicality"
+        },
+        "tracks": {
+          "description": "The concept's tracks in mix order, ids that did not resolve against the collection dropped (summary.py:25-31).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/track"
+          }
+        },
+        "transitions": {
+          "description": "One entry per adjacent pair of tracks (summary.py:46-64).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/transition"
+          }
+        },
+        "boothSheet": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/booth_step"
+          }
+        },
+        "conceptWarnings": {
+          "description": "The validation warnings prefixed with this concept's title.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "practicality": {
+      "description": "DJ Practicality Score (summary.py:67-77; models.py:354-379). Each component is 0.0 to 1.0.",
+      "type": "object",
+      "required": [
+        "bpmSmoothness",
+        "harmonicRatio",
+        "riskJustified",
+        "blendFeasibility",
+        "hasBlendData",
+        "overall"
+      ],
+      "properties": {
+        "bpmSmoothness": {
+          "type": "number"
+        },
+        "harmonicRatio": {
+          "type": "number"
+        },
+        "riskJustified": {
+          "type": "number"
+        },
+        "blendFeasibility": {
+          "type": "number"
+        },
+        "hasBlendData": {
+          "type": "boolean"
+        },
+        "overall": {
+          "type": "number"
+        }
+      }
+    },
+    "track": {
+      "description": "summary.py:34-43; models.py:27-47.",
+      "type": "object",
+      "required": [
+        "id",
+        "artist",
+        "title",
+        "bpm",
+        "camelotKey",
+        "energy",
+        "durationSecs"
+      ],
+      "properties": {
+        "id": {
+          "description": "The collection's TrackID; the delivery predicate checks it against the upload.",
+          "type": "string"
+        },
+        "artist": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "bpm": {
+          "type": "number"
+        },
+        "camelotKey": {
+          "description": "Tonality as read from the file (normalised to Camelot from M2a, ruling R-X).",
+          "type": "string"
+        },
+        "energy": {
+          "description": "Mixed In Key energy 1-10 from the comment, or null.",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "durationSecs": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    },
+    "transition": {
+      "description": "summary.py:46-64.",
+      "type": "object",
+      "required": [
+        "mechanism",
+        "score",
+        "blendLabel",
+        "riskType"
+      ],
+      "properties": {
+        "mechanism": {
+          "type": "string"
+        },
+        "score": {
+          "description": "Composite mixability, 0.0 to 1.0 (transitions.py:59).",
+          "type": "number"
+        },
+        "blendLabel": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "riskType": {
+          "description": "Stage 2's annotation for this pair, or null (models.py:59-60).",
+          "$ref": "#/$defs/nullable_string"
+        }
+      }
+    },
+    "booth_step": {
+      "description": "summary.py:80-100; booth_sheet.py:46-61.",
+      "type": "object",
+      "required": [
+        "index",
+        "fromId",
+        "toId",
+        "fromLabel",
+        "toLabel",
+        "openAtSecs",
+        "outroBars",
+        "introBars",
+        "pitchPct",
+        "tier",
+        "chips",
+        "plan",
+        "fallback",
+        "scout"
+      ],
+      "properties": {
+        "index": {
+          "description": "1-based pair number.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "fromId": {
+          "type": "string"
+        },
+        "toId": {
+          "type": "string"
+        },
+        "fromLabel": {
+          "type": "string"
+        },
+        "toLabel": {
+          "type": "string"
+        },
+        "openAtSecs": {
+          "$ref": "#/$defs/nullable_number"
+        },
+        "outroBars": {
+          "$ref": "#/$defs/nullable_number"
+        },
+        "introBars": {
+          "$ref": "#/$defs/nullable_number"
+        },
+        "pitchPct": {
+          "$ref": "#/$defs/nullable_number"
+        },
+        "tier": {
+          "description": "booth_sheet.py:20.",
+          "enum": [
+            "relaxed",
+            "tight",
+            "hard"
+          ]
+        },
+        "chips": {
+          "description": "[text, isWarning] pairs in display order.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "plan": {
+          "type": "string"
+        },
+        "fallback": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "scout": {
+          "$ref": "#/$defs/nullable_string"
+        }
+      }
+    },
+    "llmCall": {
+      "description": "One LLM call (spec §3.2 step 5, D6; ledger L23).",
+      "type": "object",
+      "required": [
+        "model",
+        "purpose",
+        "inputTokens",
+        "outputTokens",
+        "stopReason"
+      ],
+      "properties": {
+        "model": {
+          "description": "The model id as sent to the provider, e.g. the Stage 2 model or MIXLAB_STAGE0_MODEL.",
+          "type": "string",
+          "minLength": 1
+        },
+        "purpose": {
+          "description": "Which call of the pipeline this was (docs/discovery/01-mixlab-audit.md, Stage 2's Anthropic calls): intent_brief is Stage 0; the rest are Stage 2.",
+          "enum": [
+            "intent_brief",
+            "selection",
+            "title_reroll",
+            "critique",
+            "report",
+            "revision",
+            "report_regeneration"
+          ]
+        },
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stopReason": {
+          "description": "The provider's stop reason verbatim (Anthropic: end_turn, max_tokens, stop_sequence and others). Not an enum, so a new provider value is recorded rather than refused.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "concept_record": {
+      "description": "ConceptRecord (MixLab src/mixlab/history.py:63-83), serialised by dataclasses.asdict, so snake_case.",
+      "type": "object",
+      "required": [
+        "concept_id",
+        "title",
+        "mood",
+        "track_ids",
+        "arc_type",
+        "role_pattern",
+        "feedback",
+        "feedback_notes",
+        "feedback_recorded_at"
+      ],
+      "properties": {
+        "concept_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "mood": {
+          "type": "string"
+        },
+        "track_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "arc_type": {
+          "description": "An arcType value, or an empty string when unknown.",
+          "type": "string"
+        },
+        "role_pattern": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "feedback": {
+          "enum": [
+            "",
+            "played",
+            "played_modified",
+            "rejected",
+            "unused"
+          ]
+        },
+        "feedback_notes": {
+          "type": "string"
+        },
+        "feedback_recorded_at": {
+          "type": "string"
+        }
+      }
+    },
+    "history_entry_core": {
+      "description": "The fields every HistoryEntry has carried since before the v0.10 additions (MixLab src/mixlab/history.py:88-103 @ 4631880; rating has a default and may be absent). The entries of GET /api/worker/runs/{runId}/history validate against this looser definition, because the engine's loader accepts older entries and fills the later fields with defaults (history.py:248-256); historyEntry in a summary uses the full history_entry definition.",
+      "type": "object",
+      "required": [
+        "run_id",
+        "created_at",
+        "mode",
+        "genre",
+        "selected_canvas_ids",
+        "dominant_bpm_clusters",
+        "dominant_camelot_keys",
+        "core_track_ids",
+        "anchor_track_ids",
+        "opener_candidates",
+        "closer_candidates",
+        "concept_title",
+        "concept_track_ids",
+        "energy_path",
+        "mood"
+      ],
+      "properties": {
+        "run_id": {
+          "description": "A uuid the engine mints for the history entry (history.py:213); not the API's runId.",
+          "type": "string"
+        },
+        "created_at": {
+          "description": "UTC, datetime.now(UTC).isoformat() (history.py:214).",
+          "type": "string",
+          "format": "date-time"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "genre": {
+          "type": "string"
+        },
+        "selected_canvas_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "dominant_bpm_clusters": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "dominant_camelot_keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "core_track_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "anchor_track_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "opener_candidates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "closer_candidates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "concept_title": {
+          "description": "concepts[0]'s title, kept for older readers (history.py:109-111).",
+          "type": "string"
+        },
+        "concept_track_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "energy_path": {
+          "type": "string"
+        },
+        "mood": {
+          "type": "string"
+        },
+        "rating": {
+          "$ref": "#/$defs/nullable_number"
+        }
+      }
+    },
+    "history_entry": {
+      "description": "HistoryEntry (MixLab src/mixlab/history.py:86-117), serialised by dataclasses.asdict as the history file stores it (history.py:304), so snake_case. Every field required: the engine writes all of them (history.py:104-117 are the v0.10 and later additions).",
+      "allOf": [
+        {
+          "$ref": "#/$defs/history_entry_core"
+        }
+      ],
+      "type": "object",
+      "required": [
+        "run_id",
+        "created_at",
+        "mode",
+        "genre",
+        "selected_canvas_ids",
+        "dominant_bpm_clusters",
+        "dominant_camelot_keys",
+        "core_track_ids",
+        "anchor_track_ids",
+        "opener_candidates",
+        "closer_candidates",
+        "concept_title",
+        "concept_track_ids",
+        "energy_path",
+        "mood",
+        "rating",
+        "canvas_score_breakdown",
+        "selected_canvas_risk_notes",
+        "bpm_band",
+        "role_pattern",
+        "concepts",
+        "block_label",
+        "block_resolved_count"
+      ],
+      "properties": {
+        "canvas_score_breakdown": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number"
+          }
+        },
+        "selected_canvas_risk_notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "bpm_band": {
+          "description": "[low, high]; [0.0, 0.0] when unknown.",
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "role_pattern": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "concepts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/concept_record"
+          }
+        },
+        "block_label": {
+          "description": "The --track-pool block's label, or null for a run not scoped to a block.",
+          "$ref": "#/$defs/nullable_string"
+        },
+        "block_resolved_count": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    }
+  },
+  "if": {
+    "properties": {
+      "schemaVersion": {
+        "const": 2
+      }
+    },
+    "required": [
+      "schemaVersion"
+    ]
+  },
+  "then": {
+    "required": [
+      "llmCalls"
+    ]
+  }
+}

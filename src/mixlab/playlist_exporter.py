@@ -7,6 +7,7 @@ from pathlib import Path
 
 from lxml import etree
 
+from mixlab.hardened_xml import parse_hardened
 from mixlab.models import MixConcept
 
 
@@ -14,7 +15,7 @@ def parse_raw_tracks(xml_path: Path) -> dict[str, etree._Element]:
     if not xml_path.exists():
         raise FileNotFoundError(f"Rekordbox XML not found: {xml_path}")
 
-    tree = etree.parse(str(xml_path))  # noqa: S320 — local file, not user-supplied input
+    tree = parse_hardened(xml_path)
     root = tree.getroot()
 
     collection = root.find(".//COLLECTION")

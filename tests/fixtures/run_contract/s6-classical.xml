@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- S6 classical keys: one spelling per Camelot code plus 8m (Open Key) and Hm, both unrecognised; spec 4.6 -->
+<DJ_PLAYLISTS Version="1.0.0">
+  <PRODUCT Name="rekordbox" Version="7.2.18" Company="AlphaTheta"/>
+  <COLLECTION Entries="26">
+    <TRACK TrackID="1" Name="Track 1" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Abm" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track1.mp3"/>
+    <TRACK TrackID="2" Name="Track 2" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="B" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track2.mp3"/>
+    <TRACK TrackID="3" Name="Track 3" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Ebm" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track3.mp3"/>
+    <TRACK TrackID="4" Name="Track 4" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Gb" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track4.mp3"/>
+    <TRACK TrackID="5" Name="Track 5" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Bbm" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track5.mp3"/>
+    <TRACK TrackID="6" Name="Track 6" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Db" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track6.mp3"/>
+    <TRACK TrackID="7" Name="Track 7" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Fm" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track7.mp3"/>
+    <TRACK TrackID="8" Name="Track 8" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Ab" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track8.mp3"/>
+    <TRACK TrackID="9" Name="Track 9" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Cm" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track9.mp3"/>
+    <TRACK TrackID="10" Name="Track 10" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Eb" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track10.mp3"/>
+    <TRACK TrackID="11" Name="Track 11" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Gm" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track11.mp3"/>
+    <TRACK TrackID="12" Name="Track 12" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Bb" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track12.mp3"/>
+    <TRACK TrackID="13" Name="Track 13" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Dm" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track13.mp3"/>
+    <TRACK TrackID="14" Name="Track 14" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="F" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track14.mp3"/>
+    <TRACK TrackID="15" Name="Track 15" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Am" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track15.mp3"/>
+    <TRACK TrackID="16" Name="Track 16" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="C" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track16.mp3"/>
+    <TRACK TrackID="17" Name="Track 17" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Em" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track17.mp3"/>
+    <TRACK TrackID="18" Name="Track 18" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="G" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track18.mp3"/>
+    <TRACK TrackID="19" Name="Track 19" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Bm" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track19.mp3"/>
+    <TRACK TrackID="20" Name="Track 20" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="D" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track20.mp3"/>
+    <TRACK TrackID="21" Name="Track 21" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="F#m" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track21.mp3"/>
+    <TRACK TrackID="22" Name="Track 22" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="A" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track22.mp3"/>
+    <TRACK TrackID="23" Name="Track 23" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="C#m" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track23.mp3"/>
+    <TRACK TrackID="24" Name="Track 24" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="E" TotalTime="360" DateAdded="2026-10-01" PlayCount="0" Location="file://localhost/Users/dj/Music/track24.mp3"/>
+    <TRACK TrackID="25" Name="Track 25" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="8m" TotalTime="360" DateAdded="2026-10-01" PlayCount="1" Location="file://localhost/Users/dj/Music/track25.mp3"/>
+    <TRACK TrackID="26" Name="Track 26" Artist="Fixture" Genre="House" AverageBpm="124" Tonality="Hm" TotalTime="360" DateAdded="2026-10-01" PlayCount="2" Location="file://localhost/Users/dj/Music/track26.mp3"/>
+  </COLLECTION>
+  <PLAYLISTS>
+    <NODE Type="0" Name="ROOT" Count="0"/>
+  </PLAYLISTS>
+</DJ_PLAYLISTS>

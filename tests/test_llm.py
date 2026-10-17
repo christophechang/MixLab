@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import importlib
 import json
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal, cast, get_args
 
@@ -10,7 +12,7 @@ import pytest
 import respx
 from httpx import Response
 
-from mixlab import llm
+from mixlab import llm, modes
 from mixlab.models import (
     CanvasRoleCandidates,
     CanvasScore,
@@ -7094,3 +7096,82 @@ def test_stage2_system_prompt_names_the_release_register() -> None:
 def test_stage2_rename_prompt_carries_the_register_rule() -> None:
     """A re-rolled replacement title must land in the same register as the original."""
     assert "the name of a released mix" in llm._STAGE2_RENAME_SYSTEM
+
+
+# ---------------------------------------------------------------------------
+# Played-source wording (spec 5.5, ADR 0012)
+# ---------------------------------------------------------------------------
+
+# The three fragments and the legend line exactly as at 5b33bda (src/mixlab/llm.py:841-855 and :1726).
+_FRAGMENT_UNPLAYED_AT_5B33BDA = (
+    "\nMODE: UNPLAYED\n"
+    "The candidate pool consists of tracks the user has NOT played live. Your job is to surface material worth "
+    "introducing into their sets \u2014 concepts that justify a debut. Prefer concepts that frame the unplayed tracks "
+    "as discoveries rather than safe additions to a familiar mix. A concept here is most successful when the user "
+    'finishes reading and thinks "I should have been playing these."'
+)
+_FRAGMENT_PLAYED_AT_5B33BDA = (
+    "\nMODE: PLAYED\n"
+    "The candidate pool consists of tracks the user has played live before. Familiarity is an asset \u2014 make "
+    "sequencing moves you would not try with unknown material. Bolder Camelot jumps, sharper energy contrasts, and "
+    "chapter pivots are more readily justified here. A concept here is most successful when the user finishes "
+    'reading and thinks "I never put these together that way."'
+)
+_FRAGMENT_ALL_AT_5B33BDA = (
+    "\nMODE: ALL\n"
+    "The candidate pool contains both played and unplayed tracks. Tracks marked `unplayed` have never been performed "
+    "live. Concepts that interleave played and unplayed material in deliberate combinations are most valuable "
+    "\u2014 a known weapon supported by unplayed texture, or an unplayed peak earned by familiar groove-locks. "
+    "Identify whether each concept leans played-anchored, unplayed-anchored, or balanced, and note this in the "
+    "report's thesis line."
+)
+_LEGEND_AT_5B33BDA = "  - `unplayed` \u2014 never played live. Available for debut."
+
+
+@pytest.fixture
+def played_source_file(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("MIXLAB_PLAYED_SOURCE", "file")
+    importlib.reload(modes)
+    yield
+    monkeypatch.delenv("MIXLAB_PLAYED_SOURCE", raising=False)
+    importlib.reload(modes)
+
+
+def test_mode_fragments_catalog_equal_literals() -> None:
+    assert llm._mode_fragments("catalog") == {
+        "unplayed": _FRAGMENT_UNPLAYED_AT_5B33BDA,
+        "played": _FRAGMENT_PLAYED_AT_5B33BDA,
+        "all": _FRAGMENT_ALL_AT_5B33BDA,
+    }
+    assert llm._unplayed_legend("catalog") == _LEGEND_AT_5B33BDA
+    assert llm._STAGE2_SYSTEM.count(_LEGEND_AT_5B33BDA) == 1
+    assert llm._STAGE2_SYSTEM.count(_LEGEND_AT_5B33BDA) == 1
+
+
+def test_mode_fragments_file_say_played_at_least_once() -> None:
+    texts = [*llm._mode_fragments("file").values(), llm._unplayed_legend("file")]
+
+    assert len(texts) == 4
+    for text in texts:
+        assert "played at least once" in text
+        assert "live" not in text
+
+
+@respx.mock
+@pytest.mark.usefixtures("played_source_file")
+async def test_stage2_system_under_file_uses_played_at_least_once_wording(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response(_curated_payload())))
+    shortlists = [MixConcept(title="Pool", mood="dark", track_ids=["1", "2", "3", "4"])]
+    tracks_by_id = {
+        str(i): Track(track_id=str(i), artist=f"A{i}", title=f"T{i}", bpm=174.0, camelot_key="8A", genre="DnB")
+        for i in range(1, 5)
+    }
+
+    await llm.stage2_curate_and_report(shortlists, tracks_by_id, mode="all")
+
+    system_prompt: str = json.loads(route.calls[0].request.content)["system"]
+    assert llm._unplayed_legend("file") in system_prompt
+    assert llm._mode_fragments("file")["all"] in system_prompt
+    assert "played live" not in system_prompt
+    assert "performed live" not in system_prompt

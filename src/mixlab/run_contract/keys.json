@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "source": "tunefinder-multi-tenant web/src/library/camelot.ts:23-62 @ 6c26226d; docs/discovery/04-library-exports.md, the MUSICAL_KEY table's Key and Camelot columns with both enharmonic spellings (ruling R-X, R-AT, R-DS; ADR 0013)",
+  "camelotForm": "^\\d{1,2}[AB]$",
+  "camelotFormNote": "the engine's own test, clustering.py:50 @ 5b33bda, case-insensitive; a match is kept as it is and upper-cased on output",
+  "classicalGrammar": "^\\s*([A-Ga-g])\\s*([#♯b♭])?\\s*(m|min|minor|maj|major)?\\s*$",
+  "classicalGrammarWords": "optional surrounding whitespace; a note letter A to G in either case; an optional accidental # or ♯ (sharp), b or ♭ (flat); optional whitespace; an optional quality m, min, minor, maj or major in either case; a minor spelling means the A ring, no quality or a major spelling the B ring; anything else is unrecognised and still admitted (normalisation never changes admission, CONTRACTS 6.1)",
+  "codes": {
+    "1A": [
+      "G#m",
+      "Abm"
+    ],
+    "1B": [
+      "B",
+      "Cb"
+    ],
+    "2A": [
+      "D#m",
+      "Ebm"
+    ],
+    "2B": [
+      "F#",
+      "Gb"
+    ],
+    "3A": [
+      "A#m",
+      "Bbm"
+    ],
+    "3B": [
+      "C#",
+      "Db"
+    ],
+    "4A": [
+      "Fm"
+    ],
+    "4B": [
+      "G#",
+      "Ab"
+    ],
+    "5A": [
+      "Cm"
+    ],
+    "5B": [
+      "D#",
+      "Eb"
+    ],
+    "6A": [
+      "Gm"
+    ],
+    "6B": [
+      "A#",
+      "Bb"
+    ],
+    "7A": [
+      "Dm"
+    ],
+    "7B": [
+      "F"
+    ],
+    "8A": [
+      "Am"
+    ],
+    "8B": [
+      "C"
+    ],
+    "9A": [
+      "Em"
+    ],
+    "9B": [
+      "G"
+    ],
+    "10A": [
+      "Bm"
+    ],
+    "10B": [
+      "D"
+    ],
+    "11A": [
+      "F#m",
+      "Gbm"
+    ],
+    "11B": [
+      "A"
+    ],
+    "12A": [
+      "C#m",
+      "Dbm"
+    ],
+    "12B": [
+      "E"
+    ]
+  },
+  "readBy": "the API's reader from M2a (MixLab.Core, embedded); the engine's reader from M2b behind MIXLAB_KEY_NOTATION=any, vendored with a hash test as flags.json is"
+}

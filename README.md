@@ -66,6 +66,8 @@ cd MixLab
 
 `setup.sh` creates the virtual environment, installs all dependencies, and copies `.env.example` to `.env` if it doesn't already exist.
 
+Runtime dependencies are pinned by `constraints.txt`, written by `pip freeze` and read by the Dockerfile; it is refreshed deliberately by a commit.
+
 ### 2. Configure environment variables
 
 Copy `.env.example` to `.env` and fill in your keys:
@@ -88,6 +90,8 @@ cp .env.example .env
 | `MIXLAB_DISCORD_CHANNEL` | No | Target channel name (default: `mix-lab`) |
 | `MIXLAB_STAGE2_MODEL` | No | Override the Stage 2 Anthropic model id (default: `claude-sonnet-4-6`; `claude-sonnet-5-5` supported) |
 | `MIXLAB_STAGE2_TEMPERATURE` | No | Override the Stage 2 selection-pass temperature (default: `0.5`; ignored on `claude-sonnet-5-5`, which rejects a non-default temperature) |
+| `MIXLAB_KEY_NOTATION` | No | `camelot` (default): Tonality is copied as written. `any`: classical spellings are normalised to Camelot codes as the multi-tenant API reads them, from the vendored `keys.json`; admission is unchanged |
+| `MIXLAB_PLAYED_SOURCE` | No | `catalog` (default): played status comes from the catalogue when `CATALOG_API_URL` is set, else the full collection is used. `file`: played means `PlayCount` ≥ 1 in the export, and the catalogue is never asked |
 
 `ANTHROPIC_API_KEY` is required for Stage 2 report generation. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only. `MIXLAB_STAGE2_MODEL` and `MIXLAB_STAGE2_TEMPERATURE` let you point Stage 2 at a different Anthropic model or tune selection-pass creativity without editing code — both fall back to the current defaults when unset or invalid.
 
@@ -630,6 +634,9 @@ MixLab/
 ├── src/mixlab/
 │   ├── __main__.py        # CLI entry point and pipeline orchestration
 │   ├── reader.py          # Rekordbox XML parsing and BPM correction
+│   ├── hardened_xml.py    # Hardened XML parse: refuses gzip, DOCTYPE and over-large collections
+│   ├── modes.py           # Run-mode switches, read from the environment once at import
+│   ├── run_contract/      # Vendored run contract (package data, hash-pinned)
 │   ├── client.py          # Catalog API client (played track history, optional)
 │   ├── matcher.py         # Fuzzy played-track exclusion
 │   ├── clustering.py      # Genre grouping, BPM pool partitioning, Mix Canvas builder and scoring
