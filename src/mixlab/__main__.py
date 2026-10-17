@@ -19,7 +19,7 @@ from typing import NoReturn, cast
 
 from dotenv import load_dotenv
 
-from mixlab import modes
+from mixlab import modes, tenant_worker
 from mixlab.cache import load_genre_cache, save_genre_cache
 from mixlab.client import fetch_mix_names, fetch_played_tracks
 from mixlab.clustering import (
@@ -97,6 +97,7 @@ from mixlab.prep import PrepItem, rank_prep_targets
 from mixlab.reader import apply_bpm_corrections, parse_collection, parse_playlists
 from mixlab.remote import MixLabRemote, RemoteConfig, RemoteConfigError
 from mixlab.summary import build_run_summary
+from mixlab.tenant_remote import TenantConfig, TenantConfigError, TenantRemote
 from mixlab.worker import WorkerConfig, run_worker
 
 
@@ -1643,14 +1644,41 @@ def _warn_intent(intent: str | None) -> None:
         )
 
 
-def _run_worker_cli(*, once: bool) -> None:
+def _run_tenant_worker_cli(*, once: bool, run_id: str | None) -> None:
+    """``--worker-once`` under ``MIXLAB_API_MODE=tenant``: one claim cycle of the tenant protocol (M2b-D2).
+
+    The run is ``--run`` or ``MIXLAB_RUN_ID``; without either, or with a worker variable missing,
+    it exits 1 before any call. ``--worker`` (the poll loop) is refused: one execution runs one run.
+    """
+    if not once:
+        print(
+            "--worker is not available in tenant mode: one execution runs one run (use --worker-once)", file=sys.stderr
+        )
+        sys.exit(1)
+    resolved = (run_id or os.environ.get("MIXLAB_RUN_ID", "")).strip()
+    if not resolved:
+        print("tenant mode needs the run to claim: --run <runId> or MIXLAB_RUN_ID", file=sys.stderr)
+        sys.exit(1)
+    try:
+        config = TenantConfig.from_env()
+        worker_config = tenant_worker.WorkerConfig.from_env()
+    except TenantConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+    sys.exit(tenant_worker.run_once(TenantRemote(config), resolved, worker_config))
+
+
+def _run_worker_cli(*, once: bool, run_id: str | None = None) -> None:
     """Handle ``mixlab --worker`` / ``--worker-once`` (#91 / M3).
 
     Builds the remote config from the environment (``MIXLAB_API_URL`` /
     ``MIXLAB_API_SECRET``) — a missing value prints the reason to stderr and exits 1 —
     then drives the worker loop. ``MIXLAB_WORKER_POLL_SECONDS`` (default 30) sets the
-    empty-poll cadence.
+    empty-poll cadence. In tenant mode the tenant worker runs instead (M2b-D2).
     """
+    if modes.TENANT_MODE:
+        _run_tenant_worker_cli(once=once, run_id=run_id)
+        return
     try:
         remote_config = RemoteConfig.from_env()
     except RemoteConfigError as exc:
@@ -2008,10 +2036,19 @@ examples:
         dest="worker_once",
         help="Run a single worker poll cycle then exit (for cron/agent/manual use). Takes precedence over --worker.",
     )
+    parser.add_argument(
+        "--run",
+        metavar="RUN_ID",
+        default=None,
+        help=(
+            "With --worker-once in tenant mode (MIXLAB_API_MODE=tenant): the run to claim. "
+            "Defaults to MIXLAB_RUN_ID. Ignored otherwise."
+        ),
+    )
     args = parser.parse_args()
 
     if args.worker or args.worker_once:
-        _run_worker_cli(once=args.worker_once)
+        _run_worker_cli(once=args.worker_once, run_id=args.run)
         return
 
     if args.map:
