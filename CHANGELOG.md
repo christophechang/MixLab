@@ -27,6 +27,34 @@
 - **A new leaf module, `modes.py`,** reads the run-mode switches
   (`MIXLAB_API_MODE`, `MIXLAB_LLM_STUB`, `MIXLAB_KEY_NOTATION`,
   `MIXLAB_PLAYED_SOURCE`) from the environment once and imports nothing of `mixlab`.
+- **Tenant mode has a token budget and typed exit codes.** With
+  `MIXLAB_API_MODE=tenant`, every Anthropic call reserves from `MIXLAB_TOKEN_BUDGET`
+  (`<input>,<output>`, default `150000,56000`) before it is sent; each attempt is
+  bounded to 480 seconds, a call makes one retry at most, a `retry-after` is honoured
+  up to 30 seconds, and the selection asks for 16,000 output tokens. Failures that end
+  the run now exit with their own code: 2 no shortlist, 3 token budget, 4 provider
+  spend cap, 5 refusal, 6 provider unavailable. A bad argument exits 1. Outside
+  tenant mode every refusal still exits 1 and the provider errors surface as before.
+- **Every Anthropic call is recorded.** An in-memory recorder keeps one entry per
+  attempt, a declined or truncated one included, with the model that answered, its
+  tokens and its stop reason. Nothing is written yet and no output changes.
+- **Stage 2 can use effort and thinking on 5-family models.** `MIXLAB_STAGE2_EFFORT`
+  (`low`, `medium`, `high`), set on a model id whose version number is 5 or more,
+  sends `output_config.effort` and a thinking mode per call and no `temperature`:
+  adaptive for the selection and revision, `between_tools` at the value for the
+  report and its regeneration, `between_tools` at `low` for the title re-roll and
+  critique. Unset or invalid, every request is exactly what it was.
+- **Stage 2 can ask for the server-side fallback.** `MIXLAB_FALLBACKS=default` adds
+  `fallbacks` and the `anthropic-beta: server-side-fallback-2026-07-01` header to
+  every Stage 2 call.
+- **Stage 0 can run on Anthropic.** `MIXLAB_STAGE0_MODEL` replaces the free provider
+  cascade with one call (60 seconds, no retry, effort `low` on a 5-family id). Any
+  failure falls back to the deterministic brief; in tenant mode a refusal, a budget
+  stop or a spend cap ends the run instead.
+- **A stub mode runs the whole pipeline without an LLM.** `MIXLAB_LLM_STUB=1`, in any
+  mode, makes no LLM request and needs no API key. The selection, the reports and
+  Stage 0 are deterministic, and the HTML report, the export and the history are
+  written as for a real run.
 
 ## v1.19.3 — 2026-10-15
 
