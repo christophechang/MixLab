@@ -46,6 +46,17 @@ jobs:
           echo "$out"
           echo "$out" | grep -E '^mixlab-image [^ ]+ [0-9a-f]{7,40} started [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z$'
 
+      # The pinned parser (lxml 6.1.1 over libxml2 2.14.6) and the vendored run contract's
+      # package data, both checked in the built image.
+      - name: Check the parser pins and the run contract
+        run: |
+          set -euo pipefail
+          versions="$(docker run --rm --platform linux/amd64 mixlab:probe python -c "import lxml.etree as e; print(e.LXML_VERSION, e.LIBXML_VERSION)")"
+          echo "$versions"
+          echo "$versions" | grep -Fx '(6, 1, 1, 0) (2, 14, 6)'
+          docker run --rm --platform linux/amd64 mixlab:probe python -c "import mixlab.run_contract as r; r.load('keys.json')"
+          echo "run contract loaded"
+
   publish:
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
@@ -78,6 +89,19 @@ jobs:
           build-args: |
             MIXLAB_IMAGE_VERSION=${{ github.event.release.tag_name }}
             MIXLAB_IMAGE_REVISION=${{ github.sha }}
+
+      # The same checks against the pushed image, by its digest.
+      - name: Check the parser pins and the run contract
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/christophechang/mixlab@$DIGEST"
+          versions="$(docker run --rm --platform linux/amd64 "$image" python -c "import lxml.etree as e; print(e.LXML_VERSION, e.LIBXML_VERSION)")"
+          echo "$versions"
+          echo "$versions" | grep -Fx '(6, 1, 1, 0) (2, 14, 6)'
+          docker run --rm --platform linux/amd64 "$image" python -c "import mixlab.run_contract as r; r.load('keys.json')"
+          echo "run contract loaded"
 
       # Append to the release notes, never replace them.
       - name: Record the digest in the release notes

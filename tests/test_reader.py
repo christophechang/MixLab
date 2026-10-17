@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import textwrap
 from pathlib import Path
 from typing import Literal
@@ -7,7 +8,14 @@ from typing import Literal
 import pytest
 
 from mixlab.models import GridAnchor, Track
-from mixlab.reader import _bars_between, apply_bpm_corrections, derive_mix_points, parse_collection, parse_playlists
+from mixlab.reader import (
+    BPM_GRAMMAR,
+    _bars_between,
+    apply_bpm_corrections,
+    derive_mix_points,
+    parse_collection,
+    parse_playlists,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -712,3 +720,44 @@ def test_derive_mix_points_single_mark_mix_out_none() -> None:
     assert mp.mix_in_secs == 10.0
     assert mp.mix_out_secs is None
     assert mp.cue_count == 1
+
+
+# ---------------------------------------------------------------------------
+# bpmGrammar (R-DR)
+# ---------------------------------------------------------------------------
+
+_RUN_CONTRACT_FIXTURES = Path(__file__).parent / "fixtures" / "run_contract"
+
+
+def _bpm_collection(values: list[str]) -> str:
+    rows = "\n".join(
+        f'    <TRACK TrackID="{i}" Name="T{i}" Artist="A" AverageBpm="{value}" Tonality="8A" Genre="House"/>'
+        for i, value in enumerate(values, start=1)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<DJ_PLAYLISTS Version="1.0.0">\n  <COLLECTION>\n'
+        f"{rows}\n  </COLLECTION>\n</DJ_PLAYLISTS>\n"
+    )
+
+
+def test_bpm_grammar_excludes_exotic_admits_plain(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    admitted = {" 120 ": 120.0, ".5": 0.5, "5.": 5.0, "1e2": 100.0, "1e999": math.inf, "&#9;-1.25E+1&#10;": -12.5}
+    excluded = ["1_000", "inf", "nan", "\uff11\uff12\uff10", "12,5", "   "]
+    xml_path = _write_xml(tmp_path, _bpm_collection([*admitted, *excluded]))
+
+    tracks = parse_collection(xml_path)
+
+    assert [t.bpm for t in tracks] == list(admitted.values())
+    err = capsys.readouterr().err
+    for i in range(len(admitted) + 1, len(admitted) + len(excluded) + 1):
+        assert f"WARNING: Excluding track 'A \u2014 T{i}' (id={i}): missing BPM\n" in err
+    assert f"Parsed {len(admitted)} valid tracks, excluded {len(excluded)} tracks." in err
+
+
+def test_bpm_grammar_equals_run_contract_copy() -> None:
+    assert BPM_GRAMMAR.pattern + "\n" == (_RUN_CONTRACT_FIXTURES / "bpm_grammar.txt").read_text(encoding="utf-8")
+
+
+def test_parse_collection_s6_standard_fixture_admits_40_tracks() -> None:
+    # Equals tests/fixtures/rekordbox/expected.json's trackCount for s6-standard.xml in mixlab-multi-tenant.
+    assert len(parse_collection(_RUN_CONTRACT_FIXTURES / "s6-standard.xml")) == 40

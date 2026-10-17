@@ -7,9 +7,16 @@ from typing import Literal
 
 from lxml import etree
 
+from mixlab.hardened_xml import parse_hardened
 from mixlab.models import GridAnchor, MixPoints, Track
 
 _MIK_ENERGY_RE: re.Pattern[str] = re.compile(r"\bEnergy\s+(\d+)", re.IGNORECASE)
+
+# preflight.json bpmGrammar (ruling R-DR / R-GC); preflight.json is not vendored, so the line is restated
+# here and held equal to tests/fixtures/run_contract/bpm_grammar.txt by a test.
+BPM_GRAMMAR: re.Pattern[str] = re.compile(r"^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$")
+
+_ASCII_WHITESPACE = " \t\r\n\f\v"
 
 _COLOUR_TO_CONFIDENCE: dict[str, Literal["high", "medium", "low"]] = {
     "#00ff00": "high",
@@ -19,6 +26,13 @@ _COLOUR_TO_CONFIDENCE: dict[str, Literal["high", "medium", "low"]] = {
     "#ff0000": "low",
     "0xff0000": "low",
 }
+
+
+def _parse_bpm(raw: str) -> float | None:
+    text = raw.strip(_ASCII_WHITESPACE)
+    if not BPM_GRAMMAR.fullmatch(text):
+        return None
+    return float(text)
 
 
 def _parse_mik_energy(comments: str) -> int | None:
@@ -165,7 +179,7 @@ def parse_collection(xml_path: Path) -> list[Track]:
     if not xml_path.exists():
         raise FileNotFoundError(f"Rekordbox XML not found: {xml_path}. Place it at import/rekordbox.xml.")
 
-    tree = etree.parse(str(xml_path))  # noqa: S320 — local file, not user-supplied input
+    tree = parse_hardened(xml_path)
     root = tree.getroot()
 
     collection = root.find(".//COLLECTION")
@@ -188,13 +202,14 @@ def parse_collection(xml_path: Path) -> list[Track]:
             excluded += 1
             continue
 
+        bpm = _parse_bpm(bpm_raw) if bpm_raw else None
         missing: list[str] = []
-        if not bpm_raw:
+        if bpm is None:
             missing.append("BPM")
         if not key_raw:
             missing.append("Camelot key")
 
-        if missing:
+        if missing or bpm is None:
             print(
                 f"WARNING: Excluding track '{artist} — {title}' (id={track_id}): missing {', '.join(missing)}",
                 file=sys.stderr,
@@ -217,7 +232,7 @@ def parse_collection(xml_path: Path) -> list[Track]:
                 track_id=track_id,
                 artist=artist,
                 title=title,
-                bpm=float(bpm_raw),
+                bpm=bpm,
                 camelot_key=key_raw,
                 genre=genre,
                 energy=_parse_mik_energy(comments),
@@ -245,7 +260,7 @@ def parse_playlists(xml_path: Path) -> dict[str, list[str]]:
     if not xml_path.exists():
         raise FileNotFoundError(f"Rekordbox XML not found: {xml_path}. Place it at import/rekordbox.xml.")
 
-    tree = etree.parse(str(xml_path))  # noqa: S320 — local file, not user-supplied input
+    tree = parse_hardened(xml_path)
     root = tree.getroot()
 
     playlists_root = root.find(".//PLAYLISTS")
