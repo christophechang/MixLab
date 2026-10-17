@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **`summary.schema.json` re-vendored** from mixlab-multi-tenant `5fad4c2` (v0.5.0): only
+  `llmCall.model`'s description changes, to the model that answered. Its pinned hash moves with it.
+
 ## v1.20.0 — 2026-10-17
 
 The engine for the multi-tenant MixLab (M2b). With no new variable set it behaves as
