@@ -8275,6 +8275,68 @@ async def test_four_family_payload_byte_identical_with_effort_set(monkeypatch: p
             assert "output_config" not in body, purpose
 
 
+def _stage2_shape(model: str, effort: str | None) -> dict[str, tuple[object, ...]]:
+    """Per purpose: the ordered payload fields bar system/messages, then the read timeout, for one request."""
+
+    def call(fields: dict[str, object], timeout: float) -> tuple[object, ...]:
+        return (list({"model": model, **fields}.items()), timeout)
+
+    if model == "claude-sonnet-4-6":
+        return {
+            "selection": call({"max_tokens": 64000, "temperature": 0.5}, 600),
+            "title_reroll": call({"max_tokens": 1024, "temperature": 0.7}, 60),
+            "critique": call({"max_tokens": 1024, "temperature": 0.7}, 120),
+            "report": call({"max_tokens": 2048, "temperature": 0.7}, 120),
+            "revision": call({"max_tokens": 4096, "temperature": 0.3}, 180),
+            "report_regeneration": call({"max_tokens": 2048, "temperature": 0.7}, 120),
+        }
+    if effort is None:
+        off = {"thinking": {"type": "between_tools"}, "output_config": {"effort": "high"}}
+        return {
+            "selection": call({"max_tokens": 64000, **off}, 600),
+            "title_reroll": call({"max_tokens": 1024, **off}, 60),
+            "critique": call({"max_tokens": 1024, **off}, 120),
+            "report": call({"max_tokens": 2048, **off}, 120),
+            "revision": call({"max_tokens": 4096, **off}, 180),
+            "report_regeneration": call({"max_tokens": 2048, **off}, 120),
+        }
+    adaptive = {"thinking": {"type": "adaptive"}, "output_config": {"effort": effort}}
+    between = {"thinking": {"type": "between_tools"}, "output_config": {"effort": effort}}
+    low = {"thinking": {"type": "between_tools"}, "output_config": {"effort": "low"}}
+    return {
+        "selection": call({"max_tokens": 64000, **adaptive}, 600),
+        "title_reroll": call({"max_tokens": 1024, **low}, 60),
+        "critique": call({"max_tokens": 1024, **low}, 120),
+        "report": call({"max_tokens": 2048, **between}, 120),
+        "revision": call({"max_tokens": 4096, **adaptive}, 180),
+        "report_regeneration": call({"max_tokens": 2048, **between}, 120),
+    }
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+@pytest.mark.parametrize("model", ["claude-sonnet-5-5", "claude-sonnet-4-6"])
+@pytest.mark.parametrize("effort", [None, "low", "medium", "high"])
+async def test_sonnet_stage2_payloads_unchanged_every_purpose(
+    monkeypatch: pytest.MonkeyPatch, model: str, effort: str | None
+) -> None:
+    # The fields and timeouts v1.20.0 sends for every Stage 2 purpose, with and without the
+    # effort set; the Opus 5.5 rules must leave both Sonnets byte for byte where they were.
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", model)
+    if effort is not None:
+        monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", effort)
+
+    by_purpose = await _run_every_stage2_call(monkeypatch)
+
+    expected = _stage2_shape(model, effort)
+    for purpose, requests in by_purpose.items():
+        for request in requests:
+            body = _body(request)
+            fields = [(k, v) for k, v in body.items() if k not in ("system", "messages")]
+            assert (fields, request.extensions["timeout"]["read"]) == expected[purpose], purpose
+            assert list(body)[:4] == ["model", "max_tokens", "system", "messages"], purpose
+
+
 @respx.mock
 @pytest.mark.usefixtures("llm_env")
 async def test_fallbacks_default_adds_field_and_header(monkeypatch: pytest.MonkeyPatch) -> None:
