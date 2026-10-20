@@ -499,6 +499,107 @@ def test_process_one_unknown_flag_fails_without_running_subprocess(tmp_path: Pat
     assert "nope" in body["error"]
 
 
+# ===========================================================================
+# The model flag — personal worker only, outside build_argv's allow-list
+# ===========================================================================
+
+
+def _run_with_flags(tmp_path: Path, flags: dict[str, object]) -> tuple[MagicMock, Path]:
+    """process_one on a manifest with these flags; (the subprocess.run mock, the export dir)."""
+    remote = _remote()
+    config = _config(tmp_path)
+    respx.post(_CLAIM_URL).mock(return_value=Response(200, json=_manifest_dict(flags=flags)))
+    respx.post(f"{_BASE}/api/mixlab/runs/r1/complete").mock(return_value=Response(200))
+    respx.post(f"{_BASE}/api/mixlab/runs/r1/fail").mock(return_value=Response(200))
+    stdout = _write_artifacts(tmp_path)
+    with (
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
+        patch("mixlab.worker.sync_up"),
+        patch.object(remote, "download_collection", return_value=config.xml_path),
+        patch("mixlab.worker.subprocess.run", return_value=_completed(stdout=stdout)) as run_mock,
+    ):
+        assert process_one(remote, config) is True
+    return run_mock, tmp_path / "output" / "worker-export"
+
+
+@respx.mock
+@pytest.mark.parametrize("flags", [{"genre": "house"}, {"genre": "house", "model": None}])
+def test_process_one_model_absent_or_null_adds_no_model_flag(tmp_path: Path, flags: dict[str, object]) -> None:
+    run_mock, export_dir = _run_with_flags(tmp_path, flags)
+
+    assert run_mock.call_args.args[0][3:] == ["--genre", "house", "--export", str(export_dir)]
+    assert run_mock.call_args.kwargs["timeout"] == 1200.0
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("model", "timeout"),
+    [("claude-sonnet-5-5", 1200.0), ("claude-opus-5-5", 2400.0), ("claude-haiku-5-5", 1200.0)],
+)
+def test_process_one_model_valid_appends_model_flag_and_scales_opus_timeout(
+    tmp_path: Path, model: str, timeout: float
+) -> None:
+    flags: dict[str, object] = {"genre": "house", "mode": "all", "resequence": True, "model": model}
+
+    run_mock, export_dir = _run_with_flags(tmp_path, flags)
+
+    # The other flags map exactly as build_argv maps them without the model key.
+    expected = [*build_argv({"genre": "house", "mode": "all", "resequence": True}), "--model", model]
+    assert run_mock.call_args.args[0][3:] == [*expected, "--export", str(export_dir)]
+    assert run_mock.call_args.kwargs["timeout"] == timeout
+
+
+@respx.mock
+def test_process_one_opus_timeout_doubles_configured_value(tmp_path: Path) -> None:
+    remote = _remote()
+    config = WorkerConfig(
+        xml_path=tmp_path / "import" / "rekordbox.xml", run_timeout=900.0, repo_root=tmp_path, worker_id="w"
+    )
+    flags: dict[str, object] = {"genre": "house", "model": "claude-opus-5-5"}
+    respx.post(_CLAIM_URL).mock(return_value=Response(200, json=_manifest_dict(flags=flags)))
+    fail_route = respx.post(f"{_BASE}/api/mixlab/runs/r1/fail").mock(return_value=Response(200))
+    timeout_exc = subprocess.TimeoutExpired(cmd="mixlab", timeout=1800.0, output="", stderr="")
+
+    with (
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
+        patch.object(remote, "download_collection", return_value=config.xml_path),
+        patch("mixlab.worker.subprocess.run", side_effect=timeout_exc) as run_mock,
+    ):
+        assert process_one(remote, config) is True
+
+    assert run_mock.call_args.kwargs["timeout"] == 1800.0
+    assert "1800" in json.loads(fail_route.calls.last.request.content)["error"]
+
+
+@respx.mock
+@pytest.mark.parametrize("model", ["claude-sonnet-4-6", "", 5, True, ["claude-opus-5-5"]])
+def test_process_one_model_invalid_fails_naming_model_without_running_subprocess(tmp_path: Path, model: object) -> None:
+    remote = _remote()
+    config = _config(tmp_path)
+    flags: dict[str, object] = {"genre": "house", "model": model}
+    respx.post(_CLAIM_URL).mock(return_value=Response(200, json=_manifest_dict(flags=flags)))
+    fail_route = respx.post(f"{_BASE}/api/mixlab/runs/r1/fail").mock(return_value=Response(200))
+
+    with (
+        patch("mixlab.worker.sync_down", return_value=SyncReport()),
+        patch.object(remote, "download_collection", return_value=config.xml_path),
+        patch("mixlab.worker.subprocess.run") as run_mock,
+    ):
+        assert process_one(remote, config) is True
+
+    run_mock.assert_not_called()
+    error = json.loads(fail_route.calls.last.request.content)["error"]
+    assert error.startswith("invalid run flags: ")
+    assert "'model'" in error
+
+
+def test_build_argv_still_rejects_model_key() -> None:
+    """The allow-list (shared with the tenant worker and the run contract) does not know ``model``."""
+    for model in ("claude-opus-5-5", None):
+        with pytest.raises(WorkerFlagError, match="model"):
+            build_argv({"genre": "house", "model": model})
+
+
 @respx.mock
 def test_process_one_sync_report_with_activity_printed_to_stdout(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
