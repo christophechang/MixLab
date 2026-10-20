@@ -579,7 +579,10 @@ def _thinking_and_effort(purpose: Purpose, configured: str) -> dict[str, object]
 # effort alone. Thinking is spent from max_tokens before the visible text, so each Stage 2 call
 # gets an allowance on top of its text cap, and the time to produce it at a conservative output
 # rate. Stage 0 (intent_brief) keeps its own payload: an effort of low, no temperature.
+# Haiku 5.5 runs every Stage 2 call at low: at medium a selection spent ~36K of 37K output tokens
+# thinking (162 s with nothing on the wire), and a production run's silent request never returned.
 _ADAPTIVE_ONLY_MODELS = ("claude-opus-5-5", "claude-haiku-5-5")
+_LOW_EFFORT_ONLY_MODELS = ("claude-haiku-5-5",)
 _ADAPTIVE_LOW_EFFORT_PURPOSES: frozenset[str] = frozenset({"title_reroll", "critique"})
 _THINKING_ALLOWANCE = {"low": 8_000, "medium": 16_000, "high": 32_000}
 _THINKING_TOKENS_PER_SEC = 50
@@ -591,11 +594,15 @@ def _is_adaptive_only(model: str) -> bool:
 
 
 def _adaptive_only_request(
-    purpose: Purpose | None, max_tokens: int, timeout: int
+    model: str, purpose: Purpose | None, max_tokens: int, timeout: int
 ) -> tuple[dict[str, object], int, int]:
-    """(thinking and effort, max_tokens, timeout) for one Stage 2 call on an adaptive-only model: the
-    title re-roll and critique at low, the rest at ``MIXLAB_STAGE2_EFFORT`` or medium."""
-    effort = "low" if purpose in _ADAPTIVE_LOW_EFFORT_PURPOSES else (_stage2_effort() or "medium")
+    """(thinking and effort, max_tokens, timeout) for one Stage 2 call on an adaptive-only model: Haiku
+    at low throughout; otherwise the title re-roll and critique at low, the rest at
+    ``MIXLAB_STAGE2_EFFORT`` or medium."""
+    if model.startswith(_LOW_EFFORT_ONLY_MODELS) or purpose in _ADAPTIVE_LOW_EFFORT_PURPOSES:
+        effort = "low"
+    else:
+        effort = _stage2_effort() or "medium"
     allowance = _THINKING_ALLOWANCE[effort]
     return (
         {"thinking": {"type": "adaptive"}, "output_config": {"effort": effort}},
@@ -937,7 +944,7 @@ async def _call_anthropic_http(
     max_attempts: int | None = None,
 ) -> str:
     model_rules = (
-        _adaptive_only_request(purpose, max_tokens, timeout)
+        _adaptive_only_request(model, purpose, max_tokens, timeout)
         if _is_adaptive_only(model) and purpose != "intent_brief"
         else None
     )

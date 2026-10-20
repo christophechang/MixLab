@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.21.1 — 2026-10-20
+
+- **Haiku 5.5 runs every Stage 2 call at effort `low`.** At `medium` its selection thought
+  for about 36,000 of 37,000 output tokens (162 s with nothing on the wire), and a production
+  run's selection never returned within its 920 s timeout. At `low` the same request answered
+  in 49 s with valid output. `MIXLAB_STAGE2_EFFORT` no longer applies to Haiku; Opus 5.5,
+  Sonnet 5.5 and Sonnet 4.6 are unchanged.
+
 ## v1.21.0 — 2026-10-20
 
 The Stage 2 model can be chosen per run: Haiku 5.5, Sonnet 5.5 (the new default) or Opus 5.5.
