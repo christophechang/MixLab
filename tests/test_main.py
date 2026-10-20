@@ -1337,10 +1337,11 @@ def _stage2_model_seen_by_run(monkeypatch: pytest.MonkeyPatch, argv: list[str]) 
     return seen[0]
 
 
-def test_main_model_flag_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("model", ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"])
+def test_main_model_flag_overrides_env(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
     monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-sonnet-4-6")
-    argv = ["mixlab", "--genre", "house", "--model", "claude-opus-5-5"]
-    assert _stage2_model_seen_by_run(monkeypatch, argv) == "claude-opus-5-5"
+    argv = ["mixlab", "--genre", "house", "--model", model]
+    assert _stage2_model_seen_by_run(monkeypatch, argv) == model
 
 
 def test_main_model_flag_absent_keeps_env(monkeypatch: pytest.MonkeyPatch) -> None:
