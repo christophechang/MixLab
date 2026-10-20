@@ -1318,6 +1318,49 @@ def test_main_directions_ignored_in_playlist_mode_with_note(
 
 
 # ---------------------------------------------------------------------------
+# main() — --model flag (Stage 2 model per run)
+# ---------------------------------------------------------------------------
+
+
+def _stage2_model_seen_by_run(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> str:
+    """The Stage 2 model id the pipeline would use, read when run() is awaited."""
+    from mixlab.llm import _stage2_model
+
+    seen: list[str] = []
+
+    async def fake_run(*_args: object, **_kwargs: object) -> None:
+        seen.append(_stage2_model())
+
+    monkeypatch.setattr("sys.argv", argv)
+    with patch("mixlab.__main__.load_dotenv"), patch("mixlab.__main__.run", fake_run):
+        main()
+    return seen[0]
+
+
+def test_main_model_flag_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-sonnet-4-6")
+    argv = ["mixlab", "--genre", "house", "--model", "claude-opus-5-5"]
+    assert _stage2_model_seen_by_run(monkeypatch, argv) == "claude-opus-5-5"
+
+
+def test_main_model_flag_absent_keeps_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-sonnet-4-6")
+    assert _stage2_model_seen_by_run(monkeypatch, ["mixlab", "--genre", "house"]) == "claude-sonnet-4-6"
+
+
+def test_main_model_flag_absent_and_env_unset_defaults_to_sonnet_5_5(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MIXLAB_STAGE2_MODEL", raising=False)
+    assert _stage2_model_seen_by_run(monkeypatch, ["mixlab", "--genre", "house"]) == "claude-sonnet-5-5"
+
+
+def test_main_model_flag_unknown_value_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.argv", ["mixlab", "--genre", "house", "--model", "claude-sonnet-4-6"])
+    with patch("mixlab.__main__.load_dotenv"), pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+
+
+# ---------------------------------------------------------------------------
 # main() — --risk flag parsing (#42)
 # ---------------------------------------------------------------------------
 

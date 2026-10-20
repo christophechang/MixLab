@@ -66,6 +66,7 @@ from mixlab.html_report import (
 from mixlab.library_map import MapMode, build_map_payload, render_map_json
 from mixlab.llm import (
     RECORDER,
+    STAGE2_MODEL_CHOICES,
     NoShortlistError,
     ProviderCapError,
     ProviderUnavailableError,
@@ -1729,6 +1730,7 @@ examples:
   mixlab --genre drum_and_bass --min-year 2020       tracks from 2020 onwards only
   mixlab --genre house --intent "warmup, melodic, outdoor afternoon"  creative direction
   mixlab --genre house --deep          opt-in critique pass per concept (2x Stage 2 cost)
+  mixlab --genre house --model claude-opus-5-5  run Stage 2 on Opus 5.5 instead of Sonnet 5.5
   mixlab --genre house --no-revise     skip the bounded self-revision pass (#55)
   mixlab --genre house --resequence    apply the sequencer's suggested order swaps (#61)
   mixlab --genre house --risk high     promote wildcard/anchor picks, relax jump thresholds (#42)
@@ -1885,6 +1887,16 @@ examples:
             "Run a Stage 2 self-critique pass between selection and report (opt-in, "
             "doubles Stage 2 cost). Each concept gets a peer-DJ review surfaced inline "
             "as a CRITIQUE block. Genre mode only — ignored for --playlist runs."
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        choices=list(STAGE2_MODEL_CHOICES),
+        default=None,
+        help=(
+            "Claude model for every Stage 2 call this run (selection, report, critique, revision, "
+            "title re-roll). Overrides MIXLAB_STAGE2_MODEL; default claude-sonnet-5-5. "
+            "claude-opus-5-5 always thinks, so it costs more and runs slower."
         ),
     )
     parser.add_argument(
@@ -2050,6 +2062,10 @@ examples:
     if args.worker or args.worker_once:
         _run_worker_cli(once=args.worker_once, run_id=args.run)
         return
+
+    if args.model:
+        # _stage2_model() reads the variable at call time, so the flag wins over .env for this run.
+        os.environ["MIXLAB_STAGE2_MODEL"] = args.model
 
     if args.map:
         raise SystemExit(_run_map_cli(args.mode, args.seed, args.out))
