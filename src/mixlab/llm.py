@@ -32,7 +32,7 @@ import random
 import re
 import statistics
 import sys
-from collections.abc import Coroutine
+from collections.abc import AsyncIterator, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, cast, get_args
@@ -928,6 +928,152 @@ def _provider_cap_reason(resp: httpx.Response) -> str | None:
     return None
 
 
+_ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+
+# Production Stage 2 requests on the adaptive-thinking models sometimes never got a response:
+# the request was sent and acknowledged, then nothing came back until the 760-920 s read
+# timeout. A healthy streamed request has its 200 and message_start within ~1.3 s, so an
+# attempt with no SSE event inside this window is abandoned and retried like a timeout.
+# Only the first event is bounded: thinking can go quiet for minutes once the stream is open.
+_FIRST_EVENT_SECS = 30
+
+_RETRYABLE_STREAM_ERRORS = frozenset({"overloaded_error", "api_error", "rate_limit_error"})
+
+
+class FirstEventTimeout(httpx.ReadTimeout):
+    """No SSE event arrived inside the first-event deadline; retried as a transport timeout."""
+
+
+class AnthropicStreamError(RuntimeError):
+    """An ``error`` event in the middle of a streamed response."""
+
+    def __init__(self, error_type: str, message: str) -> None:
+        super().__init__(f"Anthropic stream error ({error_type}): {message}")
+        self.error_type = error_type
+
+
+async def _sse_events(resp: httpx.Response) -> AsyncIterator[dict[str, Any]]:
+    """Each SSE event's JSON ``data``, its ``type`` taken from the ``event:`` line if the data lacks one."""
+    event_name = ""
+    data_lines: list[str] = []
+    async for line in resp.aiter_lines():
+        if line == "":
+            if data_lines:
+                data = json.loads("\n".join(data_lines))
+                if isinstance(data, dict):
+                    data.setdefault("type", event_name)
+                    yield data
+            event_name, data_lines = "", []
+            continue
+        if line.startswith(":"):
+            continue
+        name, _, value = line.partition(":")
+        value = value.removeprefix(" ")
+        if name == "event":
+            event_name = value
+        elif name == "data":
+            data_lines.append(value)
+    if data_lines:
+        data = json.loads("\n".join(data_lines))
+        if isinstance(data, dict):
+            data.setdefault("type", event_name)
+            yield data
+
+
+class _StreamedMessage:
+    """Builds the Message dict the non-streaming API returns from a stream's events."""
+
+    def __init__(self) -> None:
+        self.data: dict[str, Any] | None = None
+        self.stopped = False
+        self._blocks: dict[int, dict[str, Any]] = {}
+        self._json_parts: dict[int, list[str]] = {}
+
+    def feed(self, event: dict[str, Any]) -> None:
+        kind = event.get("type")
+        if kind == "error":
+            error = event.get("error") or {}
+            raise AnthropicStreamError(str(error.get("type") or "error"), str(error.get("message") or ""))
+        if kind == "message_start":
+            self.data = dict(event.get("message") or {})
+            self.data["content"] = []
+            return
+        if self.data is None:
+            return  # ping before message_start
+        if kind == "content_block_start":
+            index = int(event.get("index", len(self._blocks)))
+            block = dict(event.get("content_block") or {})
+            self._blocks[index] = block
+            self.data["content"].append(block)
+        elif kind == "content_block_delta":
+            index = int(event.get("index", -1))
+            target = self._blocks.get(index)
+            delta = event.get("delta") or {}
+            if target is None:
+                return
+            delta_type = delta.get("type")
+            if delta_type == "text_delta":
+                target["text"] = target.get("text", "") + delta.get("text", "")
+            elif delta_type == "thinking_delta":
+                target["thinking"] = target.get("thinking", "") + delta.get("thinking", "")
+            elif delta_type == "signature_delta":
+                target["signature"] = target.get("signature", "") + delta.get("signature", "")
+            elif delta_type == "input_json_delta":
+                self._json_parts.setdefault(index, []).append(delta.get("partial_json", ""))
+        elif kind == "content_block_stop":
+            index = int(event.get("index", -1))
+            parts = self._json_parts.pop(index, None)
+            if parts is not None and index in self._blocks and "".join(parts):
+                self._blocks[index]["input"] = json.loads("".join(parts))
+        elif kind == "message_delta":
+            # stop_reason, stop_sequence and stop_details; usage is cumulative, so it overwrites.
+            self.data.update(event.get("delta") or {})
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                merged = dict(self.data.get("usage") or {})
+                merged.update({key: value for key, value in usage.items() if value is not None})
+                self.data["usage"] = merged
+        elif kind == "message_stop":
+            self.stopped = True
+
+
+def _is_event_stream(resp: httpx.Response) -> bool:
+    content_type = str(resp.headers.get("content-type", ""))
+    return content_type.split(";")[0].strip() == "text/event-stream"
+
+
+async def _anthropic_attempt(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    payload: dict[str, object],
+    first_event_secs: float,
+) -> tuple[httpx.Response, dict[str, Any] | None]:
+    """One streamed request: the response (body read unless streamed) and the assembled Message.
+
+    The Message is ``None`` for an error status or a plain JSON body, which the caller handles
+    as it handled the non-streaming response. The first-event deadline covers the send, the
+    headers and the first SSE event; after that only the caller's timeouts apply.
+    """
+    deadline = asyncio.timeout(first_event_secs)
+    try:
+        async with deadline, client.stream("POST", _ANTHROPIC_MESSAGES_URL, headers=headers, json=payload) as resp:
+            if resp.status_code != 200 or not _is_event_stream(resp):
+                deadline.reschedule(None)
+                await resp.aread()
+                return resp, None
+            message = _StreamedMessage()
+            async for event in _sse_events(resp):
+                deadline.reschedule(None)
+                message.feed(event)
+            if message.data is None or not message.stopped:
+                raise httpx.RemoteProtocolError("Anthropic stream ended before message_stop.", request=resp.request)
+            return resp, message.data
+    except TimeoutError as exc:
+        if deadline.expired():
+            raise FirstEventTimeout(f"No Anthropic stream event within {first_event_secs:g}s.") from exc
+        raise
+
+
 async def _call_anthropic_http(
     api_key: str,
     model: str,
@@ -976,6 +1122,7 @@ async def _call_anthropic_http(
     if fallbacks:
         payload["fallbacks"] = "default"  # M2b spec §6.8, Stage 2 only
         headers["anthropic-beta"] = _FALLBACKS_BETA_HEADER
+    payload["stream"] = True  # last, so every other field keeps its bytes and order
     # Tenant mode (M2b spec §6.2, §6.3, §6.5): a budget reservation per call, each attempt
     # wall-clock bounded, one retry, retry-after capped, and the typed errors. Outside it
     # every line below behaves as before. A caller's attempt_secs bounds each attempt in any
@@ -990,6 +1137,7 @@ async def _call_anthropic_http(
         if attempt_secs is not None
         else (httpx.TimeoutException, httpx.TransportError)
     )
+    first_event_secs = min(_FIRST_EVENT_SECS, attempt_secs) if attempt_secs is not None else _FIRST_EVENT_SECS
     budget = TOKEN_BUDGET.get() if tenant else None
     input_estimate = _input_estimate(system, prompt)
     if budget is not None:
@@ -1001,11 +1149,26 @@ async def _call_anthropic_http(
                 try:
                     if attempt_secs is not None:
                         async with asyncio.timeout(attempt_secs):
-                            resp = await client.post(
-                                "https://api.anthropic.com/v1/messages", headers=headers, json=payload
-                            )
+                            resp, streamed = await _anthropic_attempt(client, headers, payload, first_event_secs)
                     else:
-                        resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
+                        resp, streamed = await _anthropic_attempt(client, headers, payload, first_event_secs)
+                except AnthropicStreamError as exc:
+                    # A mid-stream overload is the 529 a non-streaming call would have had.
+                    if exc.error_type not in _RETRYABLE_STREAM_ERRORS:
+                        raise
+                    if is_final_attempt:
+                        if tenant:
+                            raise ProviderUnavailableError(
+                                f"Anthropic unavailable after {max_attempts} attempts ({exc.error_type})."
+                            ) from exc
+                        raise
+                    delay = _ANTHROPIC_BACKOFFS_SECS[attempt - 1]
+                    print(
+                        f"Anthropic retry {attempt}/{max_attempts} after {exc.error_type} (waiting {delay:.1f}s)",
+                        file=sys.stderr,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 except transport_errors as exc:
                     if is_final_attempt:
                         if tenant:
@@ -1054,7 +1217,7 @@ async def _call_anthropic_http(
                     continue
 
                 resp.raise_for_status()  # non-retryable 4xx raises immediately
-                data = resp.json()
+                data = streamed if streamed is not None else resp.json()
                 usage = data.get("usage") or {}
                 print(
                     f"Anthropic usage: model={model} in={usage.get('input_tokens')} out={usage.get('output_tokens')}",

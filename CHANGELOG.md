@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.21.2 — 2026-10-20
+
+- **An Anthropic call no longer hangs for 15 minutes when no response comes back.** Production
+  selections on Haiku 5.5 and Opus 5.5 sometimes got nothing at all after the request was sent
+  and acknowledged: no status, no bytes, until the 760–920 s read timeout, then a retry. All four
+  first attempts in real runs hung, while the same request sent standalone answered every time.
+  Every Anthropic call is now streamed, and an attempt with no stream event within 30 seconds of
+  sending (a healthy one has it in about a second) is abandoned and retried exactly like a
+  timeout: the same `Anthropic retry n/m` line, backoff and attempt count, and
+  `ProviderUnavailableError` on the last attempt in tenant mode. Stage 0 gets the same deadline,
+  bounded by its own 60 s. After the first event the existing timeouts apply unchanged, since
+  thinking can go quiet for minutes.
+- **The stream is assembled into the message a non-streamed call returns**, so the usage line,
+  the recorded `llmCalls`, the token budget, refusals, the truncation dump and fallbacks behave
+  as before. An `overloaded_error` mid-stream is retried like a `529`. A plain JSON response is
+  still accepted.
+- **Every Anthropic payload now ends with `"stream": true`.** Nothing else in any payload moves,
+  Sonnet 5.5, Stage 0 and the multi-tenant bodies included.
+
 ## v1.21.1 — 2026-10-20
 
 - **Haiku 5.5 runs every Stage 2 call at effort `low`.** At `medium` its selection thought

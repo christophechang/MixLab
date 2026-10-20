@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
-from typing import Literal, cast, get_args
+from typing import Any, Literal, cast, get_args
 
 import httpx
 import pytest
@@ -7701,7 +7701,8 @@ async def test_tenant_mode_attempt_wall_clock_480s(monkeypatch: pytest.MonkeyPat
     with pytest.raises(llm.ProviderUnavailableError) as exc_info:
         await llm._call_anthropic_http("key", "m", "system", "prompt", purpose="report")
 
-    assert bounds == [480, 480]
+    # Each attempt's 480 s bound, then the first-event deadline inside it (the headers came at once).
+    assert bounds == [480, 30, 480, 30]
     assert route.call_count == 2
     assert isinstance(exc_info.value.__cause__, TimeoutError)
     assert sleeps == [1.0]
@@ -7735,11 +7736,16 @@ async def test_default_mode_timeout_600_three_attempts_uncapped_retry_after(
         timeouts.append(timeout)
         return real_client(timeout=timeout)
 
-    def no_attempt_bound(delay: float | None) -> asyncio.Timeout:
-        raise AssertionError(f"asyncio.timeout({delay}) used outside tenant mode")
+    real_timeout = asyncio.timeout
+
+    def first_event_only(delay: float | None) -> asyncio.Timeout:
+        # Outside tenant mode the only wall-clock bound is the first-event deadline.
+        if delay != llm._FIRST_EVENT_SECS:
+            raise AssertionError(f"asyncio.timeout({delay}) used outside tenant mode")
+        return real_timeout(delay)
 
     monkeypatch.setattr("mixlab.llm.httpx.AsyncClient", recording_client)
-    monkeypatch.setattr("mixlab.llm.asyncio.timeout", no_attempt_bound)
+    monkeypatch.setattr("mixlab.llm.asyncio.timeout", first_event_only)
     route = respx.post(_ANTHROPIC_URL).mock(
         side_effect=[
             Response(429, headers={"retry-after": "600"}, json={"error": "rate_limited"}),
@@ -8127,6 +8133,7 @@ async def test_effort_unset_payload_byte_identical_every_model(monkeypatch: pyte
                 "messages": [{"role": "user", "content": "prompt"}],
                 "thinking": {"type": "between_tools"},
                 "output_config": {"effort": "high"},
+                "stream": True,
             },
             {
                 "model": "claude-sonnet-5-5",
@@ -8135,6 +8142,7 @@ async def test_effort_unset_payload_byte_identical_every_model(monkeypatch: pyte
                 "messages": [{"role": "user", "content": "prompt"}],
                 "thinking": {"type": "between_tools"},
                 "output_config": {"effort": "high"},
+                "stream": True,
             },
         ),
         _GENERIC_FIVE_FAMILY: (
@@ -8144,6 +8152,7 @@ async def test_effort_unset_payload_byte_identical_every_model(monkeypatch: pyte
                 "system": "system",
                 "messages": [{"role": "user", "content": "prompt"}],
                 "temperature": 0.5,
+                "stream": True,
             },
             {
                 "model": _GENERIC_FIVE_FAMILY,
@@ -8151,6 +8160,7 @@ async def test_effort_unset_payload_byte_identical_every_model(monkeypatch: pyte
                 "system": "system",
                 "messages": [{"role": "user", "content": "prompt"}],
                 "temperature": 0.7,
+                "stream": True,
             },
         ),
         "claude-sonnet-4-6": (
@@ -8160,6 +8170,7 @@ async def test_effort_unset_payload_byte_identical_every_model(monkeypatch: pyte
                 "system": "system",
                 "messages": [{"role": "user", "content": "prompt"}],
                 "temperature": 0.5,
+                "stream": True,
             },
             {
                 "model": "claude-sonnet-4-6",
@@ -8167,6 +8178,7 @@ async def test_effort_unset_payload_byte_identical_every_model(monkeypatch: pyte
                 "system": "system",
                 "messages": [{"role": "user", "content": "prompt"}],
                 "temperature": 0.7,
+                "stream": True,
             },
         ),
     }
@@ -8174,7 +8186,7 @@ async def test_effort_unset_payload_byte_identical_every_model(monkeypatch: pyte
     assert _httpx_json_bytes(expected["claude-sonnet-5-5"][0]) == (
         b'{"model":"claude-sonnet-5-5","max_tokens":64000,"system":"system",'
         b'"messages":[{"role":"user","content":"prompt"}],'
-        b'"thinking":{"type":"between_tools"},"output_config":{"effort":"high"}}'
+        b'"thinking":{"type":"between_tools"},"output_config":{"effort":"high"},"stream":true}'
     )
     route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response()))
 
@@ -8266,6 +8278,7 @@ async def test_four_family_payload_byte_identical_with_effort_set(monkeypatch: p
             "system": "system",
             "messages": [{"role": "user", "content": "prompt"}],
             "temperature": 0.5,
+            "stream": True,
         }
     )
 
@@ -8282,7 +8295,7 @@ def _stage2_shape(model: str, effort: str | None) -> dict[str, tuple[object, ...
     """Per purpose: the ordered payload fields bar system/messages, then the read timeout, for one request."""
 
     def call(fields: dict[str, object], timeout: float) -> tuple[object, ...]:
-        return (list({"model": model, **fields}.items()), timeout)
+        return (list({"model": model, **fields, "stream": True}.items()), timeout)
 
     if model == "claude-sonnet-4-6":
         return {
@@ -8402,6 +8415,7 @@ async def test_adaptive_only_stage0_keeps_its_own_payload(monkeypatch: pytest.Mo
             "system": llm._STAGE0_SYSTEM,
             "messages": [{"role": "user", "content": _stage0_prompt(_seed_tracks())}],
             "output_config": {"effort": "low"},
+            "stream": True,
         }
     )
     assert route.calls[0].request.extensions["timeout"]["read"] == 60
@@ -8469,7 +8483,8 @@ async def test_tenant_sonnet_5_5_medium_fallbacks_selection_and_report_payloads_
     assert selection.content == (
         b'{"model":"claude-sonnet-5-5","max_tokens":16000,"system":"system",'
         b'"messages":[{"role":"user","content":"prompt"}],'
-        b'"thinking":{"type":"adaptive"},"output_config":{"effort":"medium"},"fallbacks":"default"}'
+        b'"thinking":{"type":"adaptive"},"output_config":{"effort":"medium"},"fallbacks":"default",'
+        b'"stream":true}'
     )
     report_body = _body(report)
     assert [(k, v) for k, v in report_body.items() if k not in ("system", "messages")] == [
@@ -8478,6 +8493,7 @@ async def test_tenant_sonnet_5_5_medium_fallbacks_selection_and_report_payloads_
         ("thinking", {"type": "between_tools"}),
         ("output_config", {"effort": "medium"}),
         ("fallbacks", "default"),
+        ("stream", True),
     ]
     assert list(report_body)[:4] == ["model", "max_tokens", "system", "messages"]
     for request in (selection, report):
@@ -8511,6 +8527,7 @@ async def test_fallbacks_default_adds_field_and_header(monkeypatch: pytest.Monke
             "messages": [{"role": "user", "content": "prompt"}],
             "temperature": 0.5,
             "fallbacks": "default",
+            "stream": True,
         }
     )
 
@@ -8601,6 +8618,7 @@ async def test_fallbacks_other_value_ignored(
                 "system": "system",
                 "messages": [{"role": "user", "content": "prompt"}],
                 "temperature": 0.5,
+                "stream": True,
             }
         )
         assert "anthropic-beta" not in call.request.headers
@@ -8643,10 +8661,11 @@ async def test_stage0_model_set_calls_anthropic_low_effort_once_60s_no_retry(
             "system": llm._STAGE0_SYSTEM,
             "messages": [{"role": "user", "content": _stage0_prompt(_seed_tracks())}],
             "output_config": {"effort": "low"},
+            "stream": True,
         }
     )
     assert client_timeouts == [60]
-    assert attempt_bounds == [60]
+    assert attempt_bounds == [60, 30]  # the attempt bound, then the first-event deadline inside it
     assert all(not free.called for free in free_routes)
     # Parsed and merged exactly as the cascade does.
     assert brief.overall_vibe == "Deep hypnotic groove"
@@ -8929,3 +8948,315 @@ async def test_stub_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.delenv("ANTHROPIC_API_KEY")
     with pytest.raises(RuntimeError, match="^ANTHROPIC_API_KEY is not set"):
         await llm.stage2_curate_and_report(shortlists, _eight_tracks())
+
+
+# ---------------------------------------------------------------------------
+# Streamed Anthropic responses and the first-event deadline (v1.21.2)
+# ---------------------------------------------------------------------------
+
+
+def _stream_events(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """The SSE events the streaming API sends for ``message`` (a non-streaming body)."""
+    usage = cast(dict[str, Any], message.get("usage") or {})
+    start = {key: value for key, value in message.items() if key not in ("content", "stop_details", "usage")}
+    start.update(
+        content=[],
+        stop_reason=None,
+        stop_sequence=None,
+        usage={"input_tokens": usage.get("input_tokens", 0), "output_tokens": 1},
+    )
+    events: list[dict[str, Any]] = [{"type": "message_start", "message": start}, {"type": "ping"}]
+    for index, block in enumerate(cast(list[dict[str, Any]], message["content"])):
+        kind = block["type"]
+        if kind in ("text", "thinking"):
+            empty = {"type": kind, kind: ""}
+            if kind == "thinking":
+                empty["signature"] = ""
+            events.append({"type": "content_block_start", "index": index, "content_block": empty})
+            value = str(block[kind])
+            for chunk in (value[: len(value) // 2], value[len(value) // 2 :]):
+                events.append(
+                    {"type": "content_block_delta", "index": index, "delta": {"type": f"{kind}_delta", kind: chunk}}
+                )
+            if kind == "thinking":
+                events.append(
+                    {
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {"type": "signature_delta", "signature": block["signature"]},
+                    }
+                )
+        else:
+            events.append({"type": "content_block_start", "index": index, "content_block": block})
+        events.append({"type": "content_block_stop", "index": index})
+    delta: dict[str, Any] = {"stop_reason": message["stop_reason"], "stop_sequence": None}
+    if "stop_details" in message:
+        delta["stop_details"] = message["stop_details"]
+    delta_usage = {key: value for key, value in usage.items() if key != "input_tokens"}
+    events += [{"type": "message_delta", "delta": delta, "usage": delta_usage}, {"type": "message_stop"}]
+    return events
+
+
+def _sse_body(events: list[dict[str, Any]]) -> bytes:
+    return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events).encode()
+
+
+def _sse_response(message: dict[str, Any]) -> Response:
+    return Response(200, headers={"content-type": "text/event-stream"}, content=_sse_body(_stream_events(message)))
+
+
+def _thinking_response() -> dict[str, Any]:
+    return {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-haiku-5-5",
+        "content": [
+            {"type": "thinking", "thinking": "weighing the canvases", "signature": "sig-abc"},
+            {"type": "text", "text": "the chosen mix"},
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 120, "output_tokens": 45},
+    }
+
+
+@pytest.fixture
+def first_event_secs(monkeypatch: pytest.MonkeyPatch) -> float:
+    monkeypatch.setattr(llm, "_FIRST_EVENT_SECS", 0.05)
+    return 0.05
+
+
+async def _stall_before_headers(request: httpx.Request) -> Response:
+    await _REAL_SLEEP(5)
+    raise AssertionError("the first-event deadline should have abandoned this attempt")
+
+
+def _stall_after_headers(request: httpx.Request) -> Response:
+    async def silent() -> AsyncIterator[bytes]:
+        await _REAL_SLEEP(5)
+        yield b""
+
+    return Response(200, headers={"content-type": "text/event-stream"}, content=silent())
+
+
+@respx.mock
+@pytest.mark.usefixtures("modes_restored")
+async def test_streamed_response_assembles_message_like_non_streaming(capsys: pytest.CaptureFixture[str]) -> None:
+    message = _thinking_response()
+    route = respx.post(_ANTHROPIC_URL).mock(side_effect=[Response(200, json=message), _sse_response(message)])
+
+    from_json = await llm._call_anthropic_http("key", "claude-haiku-5-5", "system", "prompt", purpose="selection")
+    json_err = capsys.readouterr().err
+    from_stream = await llm._call_anthropic_http("key", "claude-haiku-5-5", "system", "prompt", purpose="selection")
+    stream_err = capsys.readouterr().err
+
+    assert from_json == from_stream == "the chosen mix"
+    assert "Anthropic usage: model=claude-haiku-5-5 in=120 out=45" in stream_err
+    assert json_err == stream_err
+    assert llm.RECORDER.calls[0] == llm.RECORDER.calls[1]
+    assert route.call_count == 2
+
+    assembled = llm._StreamedMessage()
+    for event in _stream_events(message):
+        assembled.feed(event)
+    assert assembled.stopped
+    assert assembled.data == {**message, "stop_sequence": None}
+
+
+@respx.mock
+@pytest.mark.usefixtures("modes_restored", "first_event_secs")
+async def test_first_event_deadline_retries_then_succeeds(
+    sleeps: list[float], capsys: pytest.CaptureFixture[str]
+) -> None:
+    attempts: list[httpx.Request] = []
+
+    async def answer(request: httpx.Request) -> Response:
+        # Stalled before its headers, then headers but no event, then a normal stream.
+        attempts.append(request)
+        if len(attempts) == 1:
+            return await _stall_before_headers(request)
+        if len(attempts) == 2:
+            return _stall_after_headers(request)
+        return _sse_response(_thinking_response())
+
+    respx.post(_ANTHROPIC_URL).mock(side_effect=answer)
+
+    text = await llm._call_anthropic_http("key", "claude-haiku-5-5", "system", "prompt", purpose="selection")
+
+    assert text == "the chosen mix"
+    assert len(attempts) == 3
+    assert sleeps == [1.0, 2.0]
+    err = capsys.readouterr().err
+    assert "Anthropic retry 1/3 after FirstEventTimeout (waiting 1.0s)" in err
+    assert "Anthropic retry 2/3 after FirstEventTimeout (waiting 2.0s)" in err
+
+
+@respx.mock
+@pytest.mark.usefixtures("modes_restored", "first_event_secs")
+async def test_first_event_deadline_final_attempt_raises(monkeypatch: pytest.MonkeyPatch, sleeps: list[float]) -> None:
+    route = respx.post(_ANTHROPIC_URL).mock(side_effect=_stall_after_headers)
+
+    # Outside tenant mode the transport timeout itself propagates, as a read timeout did.
+    with pytest.raises(httpx.ReadTimeout) as exc_info:
+        await llm._call_anthropic_http("key", "m", "system", "prompt", purpose="selection")
+    assert isinstance(exc_info.value, llm.FirstEventTimeout)
+    assert route.call_count == 3
+
+    _set_tenant(monkeypatch, True)
+    route.calls.clear()
+    with pytest.raises(llm.ProviderUnavailableError, match="after 2 attempts \\(FirstEventTimeout\\)"):
+        await llm._call_anthropic_http("key", "m", "system", "prompt", purpose="selection")
+    assert route.call_count == 2
+    assert llm.RECORDER.calls == []
+
+
+@respx.mock
+@pytest.mark.usefixtures("modes_restored")
+async def test_first_event_deadline_bounded_by_attempt_secs(monkeypatch: pytest.MonkeyPatch) -> None:
+    bounds: list[float | None] = []
+    real_timeout = asyncio.timeout
+
+    def recording_timeout(delay: float | None) -> asyncio.Timeout:
+        bounds.append(delay)
+        return real_timeout(delay)
+
+    monkeypatch.setattr("mixlab.llm.asyncio.timeout", recording_timeout)
+    respx.post(_ANTHROPIC_URL).mock(return_value=_sse_response(_thinking_response()))
+
+    await llm._call_anthropic_http("key", "m", "system", "prompt", attempt_secs=10, max_attempts=1)
+    await llm._call_anthropic_http("key", "m", "system", "prompt")
+
+    assert bounds == [10, 10, 30]
+
+
+@respx.mock
+@pytest.mark.usefixtures("modes_restored")
+async def test_sse_error_event_overloaded_is_retried(
+    monkeypatch: pytest.MonkeyPatch, sleeps: list[float], capsys: pytest.CaptureFixture[str]
+) -> None:
+    started = _stream_events(_thinking_response())[:2]
+    overloaded = Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        content=_sse_body([*started, _error_body("overloaded_error", "Overloaded")]),
+    )
+    route = respx.post(_ANTHROPIC_URL).mock(side_effect=[overloaded, _sse_response(_thinking_response())])
+
+    text = await llm._call_anthropic_http("key", "claude-haiku-5-5", "system", "prompt", purpose="selection")
+
+    assert text == "the chosen mix"
+    assert route.call_count == 2
+    assert sleeps == [1.0]
+    assert "Anthropic retry 1/3 after overloaded_error (waiting 1.0s)" in capsys.readouterr().err
+    assert len(llm.RECORDER.calls) == 1  # the overloaded attempt never finished, so is not recorded
+
+    # On the final attempt: the stream error outside tenant mode, ProviderUnavailableError in it.
+    route.mock(side_effect=lambda request: overloaded)
+    with pytest.raises(llm.AnthropicStreamError, match="overloaded_error"):
+        await llm._call_anthropic_http("key", "m", "system", "prompt")
+    _set_tenant(monkeypatch, True)
+    with pytest.raises(llm.ProviderUnavailableError, match="after 2 attempts \\(overloaded_error\\)"):
+        await llm._call_anthropic_http("key", "m", "system", "prompt", purpose="selection")
+
+
+@respx.mock
+@pytest.mark.usefixtures("modes_restored")
+async def test_stream_refusal_stop_reason_handled_as_before(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    respx.post(_ANTHROPIC_URL).mock(side_effect=lambda request: _sse_response(_refusal_response("bio")))
+
+    with pytest.raises(RuntimeError, match="category=bio"):
+        await llm._call_anthropic_http("key", "m", "system", "prompt", purpose="selection")
+    assert "WARNING: Anthropic refused (model=m, category=bio)." in capsys.readouterr().err
+    assert [(c.stop_reason, c.input_tokens) for c in llm.RECORDER.calls] == [("refusal", 12)]
+
+    _set_tenant(monkeypatch, True)
+    with pytest.raises(llm.RefusalError) as exc_info:
+        await llm._call_anthropic_http("key", "m", "system", "prompt", purpose="selection")
+    assert exc_info.value.category == "bio"
+
+
+@respx.mock
+async def test_stream_max_tokens_truncation_dumps_as_before(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MIXLAB_DIAGNOSTICS_DIR", str(tmp_path))
+    truncated = {"content": [{"type": "text", "text": '[{"title": "cut off'}], "stop_reason": "max_tokens"}
+    respx.post(_ANTHROPIC_URL).mock(return_value=_sse_response(truncated))
+
+    text = await llm._call_anthropic_http("key", "claude-sonnet-4-6", "system", "prompt", max_tokens=256)
+
+    assert text == '[{"title": "cut off'
+    dumps = list(tmp_path.glob("truncated-claude-sonnet-4-6-*.txt"))
+    assert len(dumps) == 1
+    assert '[{"title": "cut off' in dumps[0].read_text(encoding="utf-8")
+    err = capsys.readouterr().err
+    assert "WARNING: Anthropic response truncated at max_tokens=256" in err
+    assert str(dumps[0]) in err
+
+
+@respx.mock
+@pytest.mark.usefixtures("modes_restored")
+async def test_stream_fallback_iterations_recorded() -> None:
+    message = _fallback_response()
+    message["content"] = [{"type": "fallback", "from_model": "claude-sonnet-5-5"}, {"type": "text", "text": "answered"}]
+    respx.post(_ANTHROPIC_URL).mock(return_value=_sse_response(message))
+
+    text = await llm._call_anthropic_http("key", "claude-sonnet-5-5", "system", "prompt", purpose="selection")
+
+    assert text == "answered"
+    assert [(c.model, c.input_tokens, c.output_tokens, c.stop_reason) for c in llm.RECORDER.calls] == [
+        ("claude-sonnet-5-5", 20, 0, "refusal"),
+        ("claude-opus-4-8", 30, 40, "end_turn"),
+    ]
+    assembled = llm._StreamedMessage()
+    for event in _stream_events(message):
+        assembled.feed(event)
+    assert assembled.data is not None
+    assert assembled.data["content"][0] == {"type": "fallback", "from_model": "claude-sonnet-5-5"}
+    assert assembled.data["usage"]["iterations"] == cast(dict[str, Any], message["usage"])["iterations"]
+
+
+@respx.mock
+async def test_json_200_still_parsed() -> None:
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_anthropic_response("plain json")))
+
+    assert await llm._call_anthropic_http("key", "m", "system", "prompt") == "plain json"
+    assert route.calls[0].request.headers["content-type"] == "application/json"
+
+
+def test_stream_unknown_delta_and_tool_input_assembled() -> None:
+    assembled = llm._StreamedMessage()
+    events: list[dict[str, Any]] = [
+        {"type": "message_start", "message": {"model": "m", "content": [], "usage": {"input_tokens": 3}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t", "input": {}}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"a":'}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": " 1}"}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "future_delta", "x": "y"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 9}},
+        {"type": "message_stop"},
+    ]
+    for event in events:
+        assembled.feed(event)
+    assert assembled.data == {
+        "model": "m",
+        "content": [{"type": "tool_use", "id": "t", "input": {"a": 1}}],
+        "usage": {"input_tokens": 3, "output_tokens": 9},
+        "stop_reason": "tool_use",
+    }
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+@pytest.mark.parametrize("model", ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"])
+async def test_selection_payload_streams_every_model(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", model)
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response()))
+
+    await llm._call_stage2_raw("prompt", "system", "key")
+
+    body = _body(route.calls[0].request)
+    assert body["stream"] is True
+    assert list(body)[-1] == "stream"
