@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v1.21.0 — 2026-10-20
+
+The Stage 2 model can be chosen per run: Haiku 5.5, Sonnet 5.5 (the new default) or Opus 5.5.
+Deploy this before the API's `model` run flag, whose manifests carry `"model": null` that the
+previous worker refuses.
 
 - **Stage 2 runs on Claude Sonnet 5.5 by default.** Every run's selection, title re-roll,
   critique, report and revision now go to `claude-sonnet-5-5` (no `temperature`,
