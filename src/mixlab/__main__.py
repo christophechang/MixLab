@@ -1896,7 +1896,8 @@ examples:
         help=(
             "Claude model for every Stage 2 call this run (selection, report, critique, revision, "
             "title re-roll). Overrides MIXLAB_STAGE2_MODEL; default claude-sonnet-5-5. "
-            "claude-opus-5-5 always thinks, so it costs more and runs slower."
+            "claude-opus-5-5 and claude-haiku-5-5 think on every call; Opus costs more and runs slower, "
+            "Haiku is the cheapest."
         ),
     )
     parser.add_argument(
