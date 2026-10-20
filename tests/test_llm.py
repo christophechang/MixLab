@@ -427,7 +427,7 @@ def test_stage2_model_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> Non
     from mixlab.llm import _stage2_model
 
     monkeypatch.delenv("MIXLAB_STAGE2_MODEL", raising=False)
-    assert _stage2_model() == "claude-sonnet-4-6"
+    assert _stage2_model() == "claude-sonnet-5-5"
 
 
 def test_stage2_temperature_env_override_returns_env_value(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -532,7 +532,7 @@ async def test_stage2_returns_curated_concepts_and_report(monkeypatch: pytest.Mo
     assert concepts[0].title == "Dark Rollers"
     assert concepts[0].track_ids == ["1", "2", "3", "4"]
     assert "CONCEPT: Dark Rollers" in report
-    assert "claude-sonnet-4-6" in report
+    assert "claude-sonnet-5-5" in report
     # Practicality line surfaces in genre-mode reports (#21).
     assert "Practicality" in report
     assert "bpm_smoothness" in report
@@ -8192,7 +8192,8 @@ async def test_effort_unset_payload_byte_identical_every_model(monkeypatch: pyte
 @respx.mock
 @pytest.mark.usefixtures("llm_env")
 async def test_effort_set_sends_per_call_thinking_and_levels(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-opus-5-5")
+    # A 5-family id without rules of its own (Opus 5.5 has its own: see the opus_5_5 tests).
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-haiku-5-5")
     monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "medium")
 
     by_purpose = await _run_every_stage2_call(monkeypatch)
@@ -8227,7 +8228,7 @@ async def test_effort_invalid_warns_and_uses_unset_payload(
     monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "max")
     route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response()))
 
-    for model in ("claude-sonnet-5-5", "claude-opus-5-5"):
+    for model in ("claude-sonnet-5-5", "claude-haiku-5-5"):
         monkeypatch.setenv("MIXLAB_STAGE2_MODEL", model)
         await llm._call_stage2_raw("prompt", "system", "key")
         await llm._call_stage2_raw("prompt", "system", "key")
@@ -8335,6 +8336,93 @@ async def test_sonnet_stage2_payloads_unchanged_every_purpose(
             fields = [(k, v) for k, v in body.items() if k not in ("system", "messages")]
             assert (fields, request.extensions["timeout"]["read"]) == expected[purpose], purpose
             assert list(body)[:4] == ["model", "max_tokens", "system", "messages"], purpose
+
+
+# Opus 5.5: per effort, the thinking allowance added to max_tokens and the seconds added to the timeout.
+_OPUS_ALLOWANCE = {"low": (8_000, 160), "medium": (16_000, 320), "high": (32_000, 640)}
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+@pytest.mark.parametrize("effort", [None, "low", "medium", "high"])
+async def test_opus_5_5_stage2_payloads_adaptive_no_temperature_with_thinking_headroom(
+    monkeypatch: pytest.MonkeyPatch, effort: str | None
+) -> None:
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-opus-5-5")
+    monkeypatch.setenv("MIXLAB_STAGE2_TEMPERATURE", "0.9")  # never sent: Opus 5.5 400s on it
+    if effort is not None:
+        monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", effort)
+
+    by_purpose = await _run_every_stage2_call(monkeypatch)
+
+    configured = effort or "medium"
+    tokens, secs = _OPUS_ALLOWANCE[configured]
+    low_tokens, low_secs = _OPUS_ALLOWANCE["low"]
+    expected = {
+        "selection": (configured, 64000 + tokens, 600 + secs),
+        "revision": (configured, 4096 + tokens, 180 + secs),
+        "report": (configured, 2048 + tokens, 120 + secs),
+        "report_regeneration": (configured, 2048 + tokens, 120 + secs),
+        "critique": ("low", 1024 + low_tokens, 120 + low_secs),
+        "title_reroll": ("low", 1024 + low_tokens, 60 + low_secs),
+    }
+    for purpose, (level, max_tokens, timeout) in expected.items():
+        for request in by_purpose[purpose]:
+            body = _body(request)
+            assert body["thinking"] == {"type": "adaptive"}, purpose
+            assert body["output_config"] == {"effort": level}, purpose
+            assert body["max_tokens"] == max_tokens, purpose
+            assert request.extensions["timeout"]["read"] == timeout, purpose
+            for key in ("temperature", "top_p", "top_k"):
+                assert key not in body, (purpose, key)
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+async def test_opus_5_5_intent_brief_low_effort_with_headroom(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cascade's Anthropic provider runs on the Stage 2 model too."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-opus-5-5")
+    monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "high")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response()))
+
+    await llm._try_anthropic("prompt")
+
+    body = _body(route.calls[0].request)
+    assert body["thinking"] == {"type": "adaptive"}
+    assert body["output_config"] == {"effort": "low"}
+    assert body["max_tokens"] == 2048 + 8_000
+    assert "temperature" not in body
+    assert route.calls[0].request.extensions["timeout"]["read"] == 90 + 160
+
+
+@pytest.mark.usefixtures("llm_env")
+def test_opus_5_5_request_caps_max_tokens_at_model_output_limit() -> None:
+    _, max_tokens, _ = llm._opus_5_5_request("selection", 120_000, 600)
+    assert max_tokens == 128_000
+
+
+@pytest.mark.usefixtures("llm_env")
+def test_opus_5_5_request_invalid_effort_falls_back_to_medium(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "max")
+    payload, max_tokens, timeout = llm._opus_5_5_request("report", 2048, 120)
+    assert payload == {"thinking": {"type": "adaptive"}, "output_config": {"effort": "medium"}}
+    assert (max_tokens, timeout) == (2048 + 16_000, 120 + 320)
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+async def test_opus_5_5_response_thinking_blocks_first_returns_text_block() -> None:
+    response = {
+        "content": [{"type": "thinking", "thinking": "", "signature": "sig"}, {"type": "text", "text": "the answer"}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 20},
+    }
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=response))
+
+    text = await llm._call_anthropic_http("key", "claude-opus-5-5", "system", "prompt", purpose="selection")
+
+    assert text == "the answer"
 
 
 @respx.mock

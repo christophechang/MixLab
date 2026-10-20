@@ -499,9 +499,15 @@ def _dump_truncated_response(model: str, max_tokens: int, text: str) -> Path | N
         return None
 
 
+# The models the --model flag offers; any other id still works through MIXLAB_STAGE2_MODEL,
+# claude-sonnet-4-6 (the default before Sonnet 5.5) being the rollback.
+STAGE2_MODEL_CHOICES = ("claude-sonnet-5-5", "claude-opus-5-5")
+_DEFAULT_STAGE2_MODEL = "claude-sonnet-5-5"
+
+
 def _stage2_model() -> str:
-    """Anthropic model id for Stage 2 (selection, report, critique) — overridable for eval/rollback."""
-    return os.environ.get("MIXLAB_STAGE2_MODEL", "claude-sonnet-4-6")
+    """Anthropic model id for Stage 2 (selection, report, critique) — ``--model`` sets it per run."""
+    return os.environ.get("MIXLAB_STAGE2_MODEL", _DEFAULT_STAGE2_MODEL)
 
 
 def _stage2_temperature() -> float:
@@ -566,6 +572,32 @@ def _thinking_and_effort(purpose: Purpose, configured: str) -> dict[str, object]
     if purpose in ("title_reroll", "critique"):
         return {"thinking": {"type": "between_tools"}, "output_config": {"effort": "low"}}
     raise ValueError(f"{purpose} is not a Stage 2 call")
+
+
+# Opus 5.5 400s on temperature, top_p and top_k, and on any thinking setting that turns it off
+# (disabled, budget_tokens, between_tools): it always thinks adaptively, depth set by effort
+# alone. Thinking is spent from max_tokens before the visible text, so each call gets an
+# allowance on top of its text cap, and the time to produce it at a conservative output rate.
+_OPUS_5_5_LOW_EFFORT_PURPOSES: frozenset[str] = frozenset({"intent_brief", "title_reroll", "critique"})
+_OPUS_5_5_THINKING_ALLOWANCE = {"low": 8_000, "medium": 16_000, "high": 32_000}
+_OPUS_5_5_TOKENS_PER_SEC = 50
+_MAX_OUTPUT_TOKENS = 128_000
+
+
+def _is_opus_5_5(model: str) -> bool:
+    return model.startswith("claude-opus-5-5")
+
+
+def _opus_5_5_request(purpose: Purpose | None, max_tokens: int, timeout: int) -> tuple[dict[str, object], int, int]:
+    """(thinking and effort, max_tokens, timeout) for one Opus 5.5 call: small calls at low, the rest at
+    ``MIXLAB_STAGE2_EFFORT`` or medium."""
+    effort = "low" if purpose in _OPUS_5_5_LOW_EFFORT_PURPOSES else (_stage2_effort() or "medium")
+    allowance = _OPUS_5_5_THINKING_ALLOWANCE[effort]
+    return (
+        {"thinking": {"type": "adaptive"}, "output_config": {"effort": effort}},
+        min(max_tokens + allowance, _MAX_OUTPUT_TOKENS),
+        timeout + allowance // _OPUS_5_5_TOKENS_PER_SEC,
+    )
 
 
 def _fallbacks() -> bool:
@@ -900,6 +932,9 @@ async def _call_anthropic_http(
     attempt_secs: int | None = None,
     max_attempts: int | None = None,
 ) -> str:
+    opus_rules = _opus_5_5_request(purpose, max_tokens, timeout) if _is_opus_5_5(model) else None
+    if opus_rules is not None:
+        opus_payload, max_tokens, timeout = opus_rules
     headers = {
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
@@ -911,7 +946,10 @@ async def _call_anthropic_http(
         "system": system,
         "messages": [{"role": "user", "content": prompt}],
     }
-    if effort_payload is not None:
+    if opus_rules is not None:
+        # Opus 5.5's own rules replace any effort payload: adaptive thinking, never a temperature.
+        payload.update(opus_payload)
+    elif effort_payload is not None:
         # A 5-family call with its own thinking and effort (M2b spec §6.4, §6.6): no temperature.
         payload.update(effort_payload)
     elif _is_sonnet_5_5(model):
