@@ -131,7 +131,7 @@ These variables are read at run time. Each is unset by default, and with none se
 
 A 4-family model id is unchanged whatever the variable says, `MIXLAB_STAGE2_TEMPERATURE` included.
 
-**`claude-opus-5-5` and `claude-haiku-5-5` have their own rules**, set or unset: both refuse `temperature` (Haiku: any non-default value), `budget_tokens` and `between_tools`, which is Sonnet 5.5's alone, so every Stage 2 call sends `thinking: adaptive`, no `temperature`, and an explicit effort — `low` for the title re-roll and the critique, and the variable's value (default `medium`) for selection, revision, report and report regeneration. Their thinking is spent from `max_tokens` before the answer, so each call adds a thinking allowance to its usual cap and the time to write it at 50 tokens a second:
+**`claude-opus-5-5` and `claude-haiku-5-5` have their own rules**, set or unset: both refuse `temperature` (Haiku: any non-default value), `budget_tokens` and `between_tools`, which is Sonnet 5.5's alone, so every Stage 2 call sends `thinking: adaptive`, no `temperature`, and an explicit effort. Opus uses `low` for the title re-roll and the critique, and the variable's value (default `medium`) for selection, revision, report and report regeneration. Haiku uses `low` for every call whatever the variable says: at `medium` its selection spent about 36,000 of 37,000 output tokens thinking, with nothing on the wire for minutes. Their thinking is spent from `max_tokens` before the answer, so each call adds a thinking allowance to its usual cap and the time to write it at 50 tokens a second:
 
 | Effort | Added to `max_tokens` | Added to the timeout |
 |---|---|---|

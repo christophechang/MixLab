@@ -8359,7 +8359,8 @@ async def test_adaptive_only_stage2_payloads_adaptive_no_temperature_with_thinki
 
     by_purpose = await _run_every_stage2_call(monkeypatch)
 
-    configured = effort or "medium"
+    # Haiku runs every Stage 2 call at low whatever MIXLAB_STAGE2_EFFORT says.
+    configured = "low" if model == "claude-haiku-5-5" else (effort or "medium")
     tokens, secs = _THINKING_ALLOWANCE[configured]
     low_tokens, low_secs = _THINKING_ALLOWANCE["low"]
     expected = {
@@ -8408,16 +8409,27 @@ async def test_adaptive_only_stage0_keeps_its_own_payload(monkeypatch: pytest.Mo
 
 @pytest.mark.usefixtures("llm_env")
 def test_adaptive_only_request_caps_max_tokens_at_model_output_limit() -> None:
-    _, max_tokens, _ = llm._adaptive_only_request("selection", 120_000, 600)
+    _, max_tokens, _ = llm._adaptive_only_request("claude-opus-5-5", "selection", 120_000, 600)
     assert max_tokens == 128_000
 
 
 @pytest.mark.usefixtures("llm_env")
 def test_adaptive_only_request_invalid_effort_falls_back_to_medium(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "max")
-    payload, max_tokens, timeout = llm._adaptive_only_request("report", 2048, 120)
+    payload, max_tokens, timeout = llm._adaptive_only_request("claude-opus-5-5", "report", 2048, 120)
     assert payload == {"thinking": {"type": "adaptive"}, "output_config": {"effort": "medium"}}
     assert (max_tokens, timeout) == (2048 + 16_000, 120 + 320)
+
+
+@pytest.mark.usefixtures("llm_env")
+@pytest.mark.parametrize("purpose", ["selection", "revision", "report", "report_regeneration"])
+def test_adaptive_only_request_haiku_is_low_whatever_the_effort_variable(
+    monkeypatch: pytest.MonkeyPatch, purpose: str
+) -> None:
+    monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "high")
+    payload, max_tokens, timeout = llm._adaptive_only_request("claude-haiku-5-5", cast("llm.Purpose", purpose), 2048, 120)
+    assert payload == {"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}}
+    assert (max_tokens, timeout) == (2048 + 8_000, 120 + 160)
 
 
 @respx.mock
