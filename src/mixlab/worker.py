@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType
 
+from mixlab.llm import STAGE2_MODEL_CHOICES
 from mixlab.remote import MixLabRemote, RemoteError, RunManifest
 from mixlab.sync import sync_down, sync_up
 
@@ -212,6 +213,27 @@ class _ArtifactError(RuntimeError):
     """Internal: a required artifact line/file was missing from a successful run."""
 
 
+# The run's Stage 2 model (mixlab-web's model dropdown). Personal worker only: it is not in
+# _FLAG_SPECS, so build_argv, and with it the tenant worker and the run contract, still
+# refuse a manifest carrying it. An Opus 5.5 run thinks on every call and gets twice the time.
+_MODEL_KEY = "model"
+_SLOW_MODEL = "claude-opus-5-5"
+_SLOW_MODEL_TIMEOUT_FACTOR = 2
+
+
+def _split_model_flag(flags: Mapping[str, object]) -> tuple[dict[str, object], str | None]:
+    """(the other flags, the run's model or None): absent or null is no override; anything
+    but one of the ``--model`` choices raises :class:`WorkerFlagError` naming ``model``."""
+    rest = dict(flags)
+    model = rest.pop(_MODEL_KEY, None)
+    if model is None:
+        return rest, None
+    if not isinstance(model, str) or model not in STAGE2_MODEL_CHOICES:
+        allowed = ", ".join(sorted(STAGE2_MODEL_CHOICES))
+        raise WorkerFlagError(f"flag {_MODEL_KEY!r} must be one of [{allowed}], got {model!r}")
+    return rest, model
+
+
 def _as_text(value: object) -> str:
     """Coerce captured subprocess output (str, bytes, or None) to text."""
     if value is None:
@@ -331,10 +353,14 @@ def _run_claimed(remote: MixLabRemote, config: WorkerConfig, manifest: RunManife
 
     # Step 4 — map flags to argv. A rejected flag never reaches a subprocess.
     try:
-        argv = build_argv(manifest.flags)
+        flags, model = _split_model_flag(manifest.flags)
+        argv = build_argv(flags)
     except WorkerFlagError as exc:
         _safe_fail(remote, run_id, error=f"invalid run flags: {exc}", log_tail="")
         return True
+    if model is not None:
+        argv = [*argv, "--model", model]
+    run_timeout = config.run_timeout * (_SLOW_MODEL_TIMEOUT_FACTOR if model == _SLOW_MODEL else 1)
 
     # Always request the merged Rekordbox playlist XML alongside the report + summary so the
     # API can serve it (SPA download button). ``--export`` is a worker-local operational flag,
@@ -353,14 +379,14 @@ def _run_claimed(remote: MixLabRemote, config: WorkerConfig, manifest: RunManife
             [sys.executable, "-m", "mixlab", *argv],
             capture_output=True,
             text=True,
-            timeout=config.run_timeout,
+            timeout=run_timeout,
             cwd=config.repo_root,
             env=run_env,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
         log_tail = _combine_tail(_as_text(exc.stdout), _as_text(exc.stderr))
-        _safe_fail(remote, run_id, error=f"pipeline timed out after {config.run_timeout:g}s", log_tail=log_tail)
+        _safe_fail(remote, run_id, error=f"pipeline timed out after {run_timeout:g}s", log_tail=log_tail)
         return True
 
     # Step 7 — non-zero exit is a pipeline failure; report it with the log tail.

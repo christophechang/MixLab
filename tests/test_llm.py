@@ -427,7 +427,7 @@ def test_stage2_model_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> Non
     from mixlab.llm import _stage2_model
 
     monkeypatch.delenv("MIXLAB_STAGE2_MODEL", raising=False)
-    assert _stage2_model() == "claude-sonnet-4-6"
+    assert _stage2_model() == "claude-sonnet-5-5"
 
 
 def test_stage2_temperature_env_override_returns_env_value(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -532,7 +532,7 @@ async def test_stage2_returns_curated_concepts_and_report(monkeypatch: pytest.Mo
     assert concepts[0].title == "Dark Rollers"
     assert concepts[0].track_ids == ["1", "2", "3", "4"]
     assert "CONCEPT: Dark Rollers" in report
-    assert "claude-sonnet-4-6" in report
+    assert "claude-sonnet-5-5" in report
     # Practicality line surfaces in genre-mode reports (#21).
     assert "Practicality" in report
     assert "bpm_smoothness" in report
@@ -8031,6 +8031,9 @@ async def test_max_tokens_without_text_block_returns_empty_in_tenant_mode(
 _NEW_LLM_VARS = ("MIXLAB_STAGE2_EFFORT", "MIXLAB_FALLBACKS", "MIXLAB_STAGE0_MODEL", "MIXLAB_STAGE2_MODEL")
 _FALLBACKS_BETA = "server-side-fallback-2026-07-01"
 _FREE_PROVIDER_URLS = (_GROQ_URL, _GEMINI_URL, _MISTRAL_URL, _OPENROUTER_URL)
+# A 5-family id with no rules of its own (Sonnet 5.5, Opus 5.5 and Haiku 5.5 each have some):
+# it exercises the generic MIXLAB_STAGE2_EFFORT branch.
+_GENERIC_FIVE_FAMILY = "claude-future-5-9"
 
 
 def _httpx_json_bytes(payload: dict[str, object]) -> bytes:
@@ -8134,16 +8137,16 @@ async def test_effort_unset_payload_byte_identical_every_model(monkeypatch: pyte
                 "output_config": {"effort": "high"},
             },
         ),
-        "claude-haiku-5-5": (
+        _GENERIC_FIVE_FAMILY: (
             {
-                "model": "claude-haiku-5-5",
+                "model": _GENERIC_FIVE_FAMILY,
                 "max_tokens": 64000,
                 "system": "system",
                 "messages": [{"role": "user", "content": "prompt"}],
                 "temperature": 0.5,
             },
             {
-                "model": "claude-haiku-5-5",
+                "model": _GENERIC_FIVE_FAMILY,
                 "max_tokens": 2048,
                 "system": "system",
                 "messages": [{"role": "user", "content": "prompt"}],
@@ -8192,7 +8195,7 @@ async def test_effort_unset_payload_byte_identical_every_model(monkeypatch: pyte
 @respx.mock
 @pytest.mark.usefixtures("llm_env")
 async def test_effort_set_sends_per_call_thinking_and_levels(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-opus-5-5")
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", _GENERIC_FIVE_FAMILY)
     monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "medium")
 
     by_purpose = await _run_every_stage2_call(monkeypatch)
@@ -8227,7 +8230,7 @@ async def test_effort_invalid_warns_and_uses_unset_payload(
     monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "max")
     route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response()))
 
-    for model in ("claude-sonnet-5-5", "claude-opus-5-5"):
+    for model in ("claude-sonnet-5-5", _GENERIC_FIVE_FAMILY):
         monkeypatch.setenv("MIXLAB_STAGE2_MODEL", model)
         await llm._call_stage2_raw("prompt", "system", "key")
         await llm._call_stage2_raw("prompt", "system", "key")
@@ -8273,6 +8276,202 @@ async def test_four_family_payload_byte_identical_with_effort_set(monkeypatch: p
             assert "temperature" in body, purpose
             assert "thinking" not in body, purpose
             assert "output_config" not in body, purpose
+
+
+def _stage2_shape(model: str, effort: str | None) -> dict[str, tuple[object, ...]]:
+    """Per purpose: the ordered payload fields bar system/messages, then the read timeout, for one request."""
+
+    def call(fields: dict[str, object], timeout: float) -> tuple[object, ...]:
+        return (list({"model": model, **fields}.items()), timeout)
+
+    if model == "claude-sonnet-4-6":
+        return {
+            "selection": call({"max_tokens": 64000, "temperature": 0.5}, 600),
+            "title_reroll": call({"max_tokens": 1024, "temperature": 0.7}, 60),
+            "critique": call({"max_tokens": 1024, "temperature": 0.7}, 120),
+            "report": call({"max_tokens": 2048, "temperature": 0.7}, 120),
+            "revision": call({"max_tokens": 4096, "temperature": 0.3}, 180),
+            "report_regeneration": call({"max_tokens": 2048, "temperature": 0.7}, 120),
+        }
+    if effort is None:
+        off = {"thinking": {"type": "between_tools"}, "output_config": {"effort": "high"}}
+        return {
+            "selection": call({"max_tokens": 64000, **off}, 600),
+            "title_reroll": call({"max_tokens": 1024, **off}, 60),
+            "critique": call({"max_tokens": 1024, **off}, 120),
+            "report": call({"max_tokens": 2048, **off}, 120),
+            "revision": call({"max_tokens": 4096, **off}, 180),
+            "report_regeneration": call({"max_tokens": 2048, **off}, 120),
+        }
+    adaptive = {"thinking": {"type": "adaptive"}, "output_config": {"effort": effort}}
+    between = {"thinking": {"type": "between_tools"}, "output_config": {"effort": effort}}
+    low = {"thinking": {"type": "between_tools"}, "output_config": {"effort": "low"}}
+    return {
+        "selection": call({"max_tokens": 64000, **adaptive}, 600),
+        "title_reroll": call({"max_tokens": 1024, **low}, 60),
+        "critique": call({"max_tokens": 1024, **low}, 120),
+        "report": call({"max_tokens": 2048, **between}, 120),
+        "revision": call({"max_tokens": 4096, **adaptive}, 180),
+        "report_regeneration": call({"max_tokens": 2048, **between}, 120),
+    }
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+@pytest.mark.parametrize("model", ["claude-sonnet-5-5", "claude-sonnet-4-6"])
+@pytest.mark.parametrize("effort", [None, "low", "medium", "high"])
+async def test_sonnet_stage2_payloads_unchanged_every_purpose(
+    monkeypatch: pytest.MonkeyPatch, model: str, effort: str | None
+) -> None:
+    # The fields and timeouts v1.20.0 sends for every Stage 2 purpose, with and without the
+    # effort set; the Opus 5.5 rules must leave both Sonnets byte for byte where they were.
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", model)
+    if effort is not None:
+        monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", effort)
+
+    by_purpose = await _run_every_stage2_call(monkeypatch)
+
+    expected = _stage2_shape(model, effort)
+    for purpose, requests in by_purpose.items():
+        for request in requests:
+            body = _body(request)
+            fields = [(k, v) for k, v in body.items() if k not in ("system", "messages")]
+            assert (fields, request.extensions["timeout"]["read"]) == expected[purpose], purpose
+            assert list(body)[:4] == ["model", "max_tokens", "system", "messages"], purpose
+
+
+# Opus and Haiku 5.5: per effort, the thinking allowance added to max_tokens and the seconds added to the timeout.
+_THINKING_ALLOWANCE = {"low": (8_000, 160), "medium": (16_000, 320), "high": (32_000, 640)}
+_ADAPTIVE_ONLY = ["claude-opus-5-5", "claude-haiku-5-5"]
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+@pytest.mark.parametrize("model", _ADAPTIVE_ONLY)
+@pytest.mark.parametrize("effort", [None, "low", "medium", "high"])
+async def test_adaptive_only_stage2_payloads_adaptive_no_temperature_with_thinking_headroom(
+    monkeypatch: pytest.MonkeyPatch, model: str, effort: str | None
+) -> None:
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", model)
+    monkeypatch.setenv("MIXLAB_STAGE2_TEMPERATURE", "0.9")  # never sent: both 400 on it
+    if effort is not None:
+        monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", effort)
+
+    by_purpose = await _run_every_stage2_call(monkeypatch)
+
+    configured = effort or "medium"
+    tokens, secs = _THINKING_ALLOWANCE[configured]
+    low_tokens, low_secs = _THINKING_ALLOWANCE["low"]
+    expected = {
+        "selection": (configured, 64000 + tokens, 600 + secs),
+        "revision": (configured, 4096 + tokens, 180 + secs),
+        "report": (configured, 2048 + tokens, 120 + secs),
+        "report_regeneration": (configured, 2048 + tokens, 120 + secs),
+        "critique": ("low", 1024 + low_tokens, 120 + low_secs),
+        "title_reroll": ("low", 1024 + low_tokens, 60 + low_secs),
+    }
+    for purpose, (level, max_tokens, timeout) in expected.items():
+        for request in by_purpose[purpose]:
+            body = _body(request)
+            assert body["model"] == model, purpose
+            assert body["thinking"] == {"type": "adaptive"}, purpose
+            assert body["output_config"] == {"effort": level}, purpose
+            assert body["max_tokens"] == max_tokens, purpose
+            assert request.extensions["timeout"]["read"] == timeout, purpose
+            for key in ("temperature", "top_p", "top_k"):
+                assert key not in body, (purpose, key)
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+@pytest.mark.parametrize("model", _ADAPTIVE_ONLY)
+async def test_adaptive_only_stage0_keeps_its_own_payload(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+    """Stage 0 is not a Stage 2 call: 4,096 tokens, effort low, no thinking field, 60 s (tenant runs Haiku here)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("MIXLAB_STAGE0_MODEL", model)
+    monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "high")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response(_STAGE0_ANSWER)))
+
+    await _stage0()
+
+    assert route.calls[0].request.content == _httpx_json_bytes(
+        {
+            "model": model,
+            "max_tokens": 4096,
+            "system": llm._STAGE0_SYSTEM,
+            "messages": [{"role": "user", "content": _stage0_prompt(_seed_tracks())}],
+            "output_config": {"effort": "low"},
+        }
+    )
+    assert route.calls[0].request.extensions["timeout"]["read"] == 60
+
+
+@pytest.mark.usefixtures("llm_env")
+def test_adaptive_only_request_caps_max_tokens_at_model_output_limit() -> None:
+    _, max_tokens, _ = llm._adaptive_only_request("selection", 120_000, 600)
+    assert max_tokens == 128_000
+
+
+@pytest.mark.usefixtures("llm_env")
+def test_adaptive_only_request_invalid_effort_falls_back_to_medium(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "max")
+    payload, max_tokens, timeout = llm._adaptive_only_request("report", 2048, 120)
+    assert payload == {"thinking": {"type": "adaptive"}, "output_config": {"effort": "medium"}}
+    assert (max_tokens, timeout) == (2048 + 16_000, 120 + 320)
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env")
+@pytest.mark.parametrize("model", _ADAPTIVE_ONLY)
+async def test_adaptive_only_response_thinking_blocks_first_returns_text_block(model: str) -> None:
+    response = {
+        "content": [{"type": "thinking", "thinking": "", "signature": "sig"}, {"type": "text", "text": "the answer"}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 20},
+    }
+    respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=response))
+
+    text = await llm._call_anthropic_http("key", model, "system", "prompt", purpose="selection")
+
+    assert text == "the answer"
+
+
+@respx.mock
+@pytest.mark.usefixtures("llm_env", "tenant_mode")
+async def test_tenant_sonnet_5_5_medium_fallbacks_selection_and_report_payloads_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Multi-tenant MixLab's configuration: these bodies must not move.
+    monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-sonnet-5-5")
+    monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "medium")
+    monkeypatch.setenv("MIXLAB_FALLBACKS", "default")
+    monkeypatch.setenv("MIXLAB_STAGE0_MODEL", "claude-haiku-5-5")
+    monkeypatch.setenv("MIXLAB_TOKEN_BUDGET", "150000,56000")
+    route = respx.post(_ANTHROPIC_URL).mock(return_value=Response(200, json=_usage_response()))
+
+    await llm._call_stage2_raw("prompt", "system", "key")
+    concept = MixConcept(title="Pool", mood="dark", track_ids=[str(i) for i in range(1, 9)])
+    await llm._call_stage2_report_single(concept, _eight_tracks(), None, None, "key")
+
+    selection, report = route.calls[0].request, route.calls[1].request
+    assert selection.content == (
+        b'{"model":"claude-sonnet-5-5","max_tokens":16000,"system":"system",'
+        b'"messages":[{"role":"user","content":"prompt"}],'
+        b'"thinking":{"type":"adaptive"},"output_config":{"effort":"medium"},"fallbacks":"default"}'
+    )
+    report_body = _body(report)
+    assert [(k, v) for k, v in report_body.items() if k not in ("system", "messages")] == [
+        ("model", "claude-sonnet-5-5"),
+        ("max_tokens", 2048),
+        ("thinking", {"type": "between_tools"}),
+        ("output_config", {"effort": "medium"}),
+        ("fallbacks", "default"),
+    ]
+    assert list(report_body)[:4] == ["model", "max_tokens", "system", "messages"]
+    for request in (selection, report):
+        assert request.headers["anthropic-beta"] == _FALLBACKS_BETA
+    assert selection.extensions["timeout"]["read"] == 600
+    assert report.extensions["timeout"]["read"] == 120
 
 
 @respx.mock

@@ -370,7 +370,7 @@
       ],
       "properties": {
         "model": {
-          "description": "The model id as sent to the provider, e.g. the Stage 2 model or MIXLAB_STAGE0_MODEL.",
+          "description": "The id of the model that answered, from the response's model field; after a server-side fallback it is the sibling model's id, not the one requested (M2b spec §6.1).",
           "type": "string",
           "minLength": 1
         },

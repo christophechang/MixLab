@@ -609,6 +609,16 @@ def test_fail_invalid_flags_before_engine(harness: Harness) -> None:
     assert {"stage": "engine-started"} not in [c.json() for c in harness.api.calls("POST progress")]
 
 
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5", None])
+def test_fail_model_flag_refused_before_engine(harness: Harness, model: str | None) -> None:
+    """``model`` is a personal-worker flag only: not in the run contract, so refused here."""
+    harness.scenario.flags = {"genre": "techno", "model": model}
+
+    assert harness.run() == 0
+    assert harness.fail_body()["errorCode"] == "invalid_flags"
+    assert harness.engine_record() is None
+
+
 # ---------------------------------------------------------------------------
 # The subprocess (spec §4.5, M2b-D4, M2b-D5)
 # ---------------------------------------------------------------------------

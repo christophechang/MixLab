@@ -88,7 +88,7 @@ cp .env.example .env
 | `DISCORD_GUILD_ID` | No | Discord server ID |
 | `MIXLAB_DISCORD_CHANNEL_ID` | No | Target channel ID (preferred over name) |
 | `MIXLAB_DISCORD_CHANNEL` | No | Target channel name (default: `mix-lab`) |
-| `MIXLAB_STAGE2_MODEL` | No | Override the Stage 2 Anthropic model id (default: `claude-sonnet-4-6`; `claude-sonnet-5-5` supported) |
+| `MIXLAB_STAGE2_MODEL` | No | Override the Stage 2 Anthropic model id (default: `claude-sonnet-5-5`; `claude-opus-5-5`, `claude-haiku-5-5` and `claude-sonnet-4-6` supported). `--model` overrides it for one run |
 | `MIXLAB_STAGE2_TEMPERATURE` | No | Override the Stage 2 selection-pass temperature (default: `0.5`; ignored on `claude-sonnet-5-5`, which rejects a non-default temperature) |
 | `MIXLAB_KEY_NOTATION` | No | `camelot` (default): Tonality is copied as written. `any`: classical spellings are normalised to Camelot codes as the multi-tenant API reads them, from the vendored `keys.json`; admission is unchanged |
 | `MIXLAB_PLAYED_SOURCE` | No | `catalog` (default): played status comes from the catalogue when `CATALOG_API_URL` is set, else the full collection is used. `file`: played means `PlayCount` ≥ 1 in the export, and the catalogue is never asked |
@@ -103,7 +103,7 @@ cp .env.example .env
 | `MIXLAB_ENGINE_DIGEST` | No | Tenant mode: the image digest (`sha256:` and 64 hex digits) copied into `summary.json`; any other value is left out |
 | `MIXLAB_PROTOCOL_VERSION` | No | Tenant mode: the worker protocol version, sent in the claim and copied into `summary.json` as an integer |
 
-`ANTHROPIC_API_KEY` is required for Stage 2 report generation. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only. `MIXLAB_STAGE2_MODEL` and `MIXLAB_STAGE2_TEMPERATURE` let you point Stage 2 at a different Anthropic model or tune selection-pass creativity without editing code — both fall back to the current defaults when unset or invalid.
+`ANTHROPIC_API_KEY` is required for Stage 2 report generation. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only. `MIXLAB_STAGE2_MODEL` and `MIXLAB_STAGE2_TEMPERATURE` let you point Stage 2 at a different Anthropic model or tune selection-pass creativity without editing code — both fall back to the current defaults when unset or invalid. `MIXLAB_STAGE2_TEMPERATURE` is sent only to models that take a temperature (`claude-sonnet-4-6`, not the 5.5 models).
 
 #### Tenant mode and the LLM layer
 
@@ -121,7 +121,7 @@ These variables are read at run time. Each is unset by default, and with none se
 
 **`MIXLAB_TOKEN_BUDGET=<input>,<output>`** sets the run's allowances (default `150000,56000`); tenant mode only, ignored otherwise. Before a call, its estimated input (one token per three characters of system and prompt, a deliberate over-estimate) and its `max_tokens` are reserved against what is already spent and reserved; a call that does not fit raises the token-budget error. Actual usage, thinking tokens included, replaces the reservation after the response, and a retry keeps its call's reservation. Two positive integers separated by a comma, spaces allowed; anything else prints a warning and uses the default.
 
-**`MIXLAB_STAGE2_EFFORT`** (`low`, `medium` or `high`, case-sensitive) applies only to a 5-family model id, one whose version number is 5 or more (`claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`; not `claude-sonnet-4-6`). Unset, or any other value (which warns once on stderr), the request is exactly what it was before for every model, including `claude-sonnet-5-5`'s existing `between_tools` thinking at effort `high`. Set, a 5-family model sends no `temperature` and, per call:
+**`MIXLAB_STAGE2_EFFORT`** (`low`, `medium` or `high`, case-sensitive) applies only to a 5-family model id, one whose version number is 5 or more (`claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`; not `claude-sonnet-4-6`). Unset, or any other value (which warns once on stderr), the request is exactly what it was before for every model, including `claude-sonnet-5-5`'s existing `between_tools` thinking at effort `high`. Set, a 5-family model other than `claude-opus-5-5` and `claude-haiku-5-5` (below) sends no `temperature` and, per call:
 
 | Call | `output_config.effort` | `thinking` |
 |---|---|---|
@@ -130,6 +130,16 @@ These variables are read at run time. Each is unset by default, and with none se
 | Title re-roll, critique | `low` | `between_tools` |
 
 A 4-family model id is unchanged whatever the variable says, `MIXLAB_STAGE2_TEMPERATURE` included.
+
+**`claude-opus-5-5` and `claude-haiku-5-5` have their own rules**, set or unset: both refuse `temperature` (Haiku: any non-default value), `budget_tokens` and `between_tools`, which is Sonnet 5.5's alone, so every Stage 2 call sends `thinking: adaptive`, no `temperature`, and an explicit effort — `low` for the title re-roll and the critique, and the variable's value (default `medium`) for selection, revision, report and report regeneration. Their thinking is spent from `max_tokens` before the answer, so each call adds a thinking allowance to its usual cap and the time to write it at 50 tokens a second:
+
+| Effort | Added to `max_tokens` | Added to the timeout |
+|---|---|---|
+| `low` | 8,000 | 160 s |
+| `medium` | 16,000 | 320 s |
+| `high` | 32,000 | 640 s |
+
+Capped at the model's 128,000-token output limit. At the default effort the selection call asks for 80,000 tokens with a 920-second timeout (32,000 in tenant mode), a report 18,000 or more with 440 seconds, and the title re-roll and critique 9,024 each. Stage 0 is not covered: `MIXLAB_STAGE0_MODEL` on either model sends its usual payload (below), with no `thinking` field, so the model thinks adaptively within 4,096 tokens and 60 seconds.
 
 **`MIXLAB_FALLBACKS=default`** adds `"fallbacks": "default"` and the header `anthropic-beta: server-side-fallback-2026-07-01` to every Stage 2 call, so Anthropic may answer with a fallback model. Stage 0 never sends it. Any other value warns once and changes nothing. The attempts a fallback reports are recorded and counted against the token budget.
 
@@ -358,6 +368,24 @@ In `mixed`, the two families are composed rather than concatenated: directions a
 
 `--risk` composes with `--directions`: it changes how canvases are scored and validated regardless of whether they came from classic BPM strata or a concept direction. It is genre mode only — playlist mode derives its own risk tolerance from the Stage 0 intent brief (see `--intent` above) and prints a stderr note if `--risk` is passed alongside `--playlist`.
 
+### Stage 2 model (`--model`)
+
+`--model {claude-sonnet-5-5,claude-opus-5-5,claude-haiku-5-5}` picks the Claude model for every Stage 2 call of one run: selection, title re-roll, critique, report, revision and report regeneration. It overrides `MIXLAB_STAGE2_MODEL`; without either, Stage 2 runs on `claude-sonnet-5-5`.
+
+```sh
+./mixlab --genre house                            # Sonnet 5.5, the default
+./mixlab --genre house --model claude-opus-5-5    # Opus 5.5: dearest and slowest
+./mixlab --genre house --model claude-haiku-5-5   # Haiku 5.5: cheapest
+```
+
+| Model | Input / output, per million tokens |
+|---|---|
+| `claude-haiku-5-5` | $0.10 / $0.50 up to 100K prompt tokens, $0.50 / $2.50 beyond |
+| `claude-sonnet-5-5` | $2 / $10 |
+| `claude-opus-5-5` | $4 / $20 |
+
+Opus 5.5 and Haiku 5.5 think on every call, so their calls ask for more output tokens and wait longer (see `MIXLAB_STAGE2_EFFORT` above). The MixLab Anywhere worker passes a run's `model` through as `--model` (see below). Any other model id, `claude-sonnet-4-6` included, still works through `MIXLAB_STAGE2_MODEL`.
+
 ### Mix Engine (genre mode)
 
 When your Rekordbox export carries a beat grid and memory/hot cues, MixLab parses each track's structure into mix points (intro/outro bar counts, loop zones, cue count) and uses them across genre mode:
@@ -512,6 +540,8 @@ Run MixLab as a remote worker that pulls queued runs from the MixLab Anywhere AP
 
 The worker mode is purely additive — your normal CLI workflow (`./mixlab --genre house`, etc.) is unchanged. All other pipeline flags are ignored when `--worker` is active; the run's flags come from the queued manifest instead.
 
+A manifest's `model` (mixlab-web's model picker) becomes `--model <id>` when it is one of the `--model` choices; absent or `null` leaves the run on the engine's default, and any other value fails the run as an invalid flag. Only this worker reads it: the tenant worker and the run contract do not know `model`, so a tenant manifest carrying it is still refused.
+
 **Required environment variables:**
 
 - `MIXLAB_API_URL` — base URL of the MixLab Anywhere API (e.g. `https://api.example.com`)
@@ -521,7 +551,7 @@ The worker mode is purely additive — your normal CLI workflow (`./mixlab --gen
 
 - `MIXLAB_WORKER_POLL_SECONDS` (default `30`) — empty-poll cadence in seconds
 - `MIXLAB_WORKER_XML_PATH` (default `.mixlab/worker-collection.xml`) — where the worker writes each run's downloaded collection. Deliberately off `import/rekordbox.xml` so a remote run never overwrites the collection a local run uses; the worker points the pipeline at this path via `MIXLAB_COLLECTION_PATH`.
-- `MIXLAB_WORKER_RUN_TIMEOUT` (default `1200`) — hard per-run subprocess timeout in seconds
+- `MIXLAB_WORKER_RUN_TIMEOUT` (default `1200`) — hard per-run subprocess timeout in seconds. A run whose manifest `model` is `claude-opus-5-5` gets twice the value (2400 s by default); Sonnet and Haiku runs get the value as set
 
 The worker also syncs concept history and feedback with the API: it pulls pending feedback events, applies them to the local history, and pushes back any changes — bidirectional sync so verdicts and ratings you record in the web UI feed into future runs.
 
@@ -640,7 +670,7 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 
 ### LLM Stage 2 — report generation
 
-- Uses Claude Sonnet 4.6 by default, or Claude Sonnet 5.5 via `MIXLAB_STAGE2_MODEL=claude-sonnet-5-5` (Anthropic-only, no fallback provider)
+- Uses Claude Sonnet 5.5 by default, or Claude Opus 5.5 or Haiku 5.5 via `--model` (or `MIXLAB_STAGE2_MODEL`); `MIXLAB_STAGE2_MODEL=claude-sonnet-4-6` restores the previous default (Anthropic-only, no fallback provider)
 - Before sequencing, chooses an explicit energy path (Slow Climb, Wave, Plateau With Detail, Double Peak, Front-Loaded Hook, Dark to Light, Light to Dark) and assigns every track to one of five sections: Invitation, Groove Lock, Development, Peak/Payoff, Resolution
 - Assigns each track a role from a focused 10-role vocabulary: opener, groove, hook, pivot, lift, vocal-moment, texture-change, peak, resolution, closer (a track may carry more than one)
 - Each report includes: named energy path, structured `arc_type` field, section breakdown with track numbers, per-track role and transition risk, dedicated opener and closer rationale, excluded tracks with reasons, a `Bold moves:` summary of bridge/wildcard usage with the mechanism that justified each pick, and a one-line `Practicality:` score (bpm_smoothness, harmonic_ratio, risk_justified, overall) for triage

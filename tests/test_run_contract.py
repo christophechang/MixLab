@@ -20,7 +20,7 @@ from mixlab.worker import _FLAG_SPECS
 
 _FILES = {
     "flags.json": "9fccbf0eeac533942559d777692599599dbca85aee9d431591dcf93382dcf316",
-    "summary.schema.json": "740d2990bddfd67ecdd64dd2eb2f69766f3931f2693999a5a4255a84d14ef018",
+    "summary.schema.json": "2a86253e08b9d1c6eebeea61f6b118fa798c68f7cc4587534b26c870a86d33fe",
     "genres.json": "9e28f1e2f53391b6647bef6e8b61c13b4397cdc86282f45fb38dec951596bd7f",
     "keys.json": "448b065be3da0c728f0c2e60793a030fdad146d32033988f8717879b6f01ce4f",
 }
