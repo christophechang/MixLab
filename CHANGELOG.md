@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Stage 2 runs on Claude Sonnet 5.5 by default.** Every run's selection, title re-roll,
+  critique, report and revision now go to `claude-sonnet-5-5` (no `temperature`,
+  `between_tools` thinking at effort `high`) instead of `claude-sonnet-4-6`.
+  `MIXLAB_STAGE2_MODEL=claude-sonnet-4-6` rolls back, with its payload unchanged.
+- **`--model` picks the Stage 2 model per run.** `claude-sonnet-5-5`, `claude-opus-5-5` or
+  `claude-haiku-5-5`; it overrides `MIXLAB_STAGE2_MODEL`.
+- **The MixLab Anywhere worker passes a run's model.** A manifest's `model` becomes
+  `--model <id>`; absent or `null` keeps the default, any other value fails the run as an
+  invalid flag. An Opus 5.5 run gets twice `MIXLAB_WORKER_RUN_TIMEOUT` (2400 s by default).
+  The tenant worker and the run contract are unchanged and still refuse `model`.
+- **Opus 5.5 and Haiku 5.5 requests are valid.** Neither gets a `temperature` or
+  `between_tools`; every Stage 2 call sends adaptive thinking and an explicit effort (`low` for
+  the title re-roll and critique; `MIXLAB_STAGE2_EFFORT` or `medium` for the rest). Because
+  thinking is spent from `max_tokens`, each call adds 8,000, 16,000 or 32,000 tokens (effort
+  low, medium, high, capped at 128,000) and 160, 320 or 640 seconds to its timeout. Stage 0
+  keeps its own payload, and Sonnet 5.5 and 4.6 payloads and timeouts are unchanged.
 - **`summary.schema.json` re-vendored** from mixlab-multi-tenant `5fad4c2` (v0.5.0): only
   `llmCall.model`'s description changes, to the model that answered. Its pinned hash moves with it.
 
