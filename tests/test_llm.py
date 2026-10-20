@@ -8380,7 +8380,7 @@ async def test_opus_5_5_stage2_payloads_adaptive_no_temperature_with_thinking_he
 @respx.mock
 @pytest.mark.usefixtures("llm_env")
 async def test_opus_5_5_intent_brief_low_effort_with_headroom(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The cascade's Anthropic provider runs on the Stage 2 model too."""
+    """_try_anthropic sends purpose intent_brief on the Stage 2 model: the low-effort rule."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setenv("MIXLAB_STAGE2_MODEL", "claude-opus-5-5")
     monkeypatch.setenv("MIXLAB_STAGE2_EFFORT", "high")

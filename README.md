@@ -88,7 +88,7 @@ cp .env.example .env
 | `DISCORD_GUILD_ID` | No | Discord server ID |
 | `MIXLAB_DISCORD_CHANNEL_ID` | No | Target channel ID (preferred over name) |
 | `MIXLAB_DISCORD_CHANNEL` | No | Target channel name (default: `mix-lab`) |
-| `MIXLAB_STAGE2_MODEL` | No | Override the Stage 2 Anthropic model id (default: `claude-sonnet-4-6`; `claude-sonnet-5-5` supported) |
+| `MIXLAB_STAGE2_MODEL` | No | Override the Stage 2 Anthropic model id (default: `claude-sonnet-5-5`; `claude-opus-5-5` and `claude-sonnet-4-6` supported). `--model` overrides it for one run |
 | `MIXLAB_STAGE2_TEMPERATURE` | No | Override the Stage 2 selection-pass temperature (default: `0.5`; ignored on `claude-sonnet-5-5`, which rejects a non-default temperature) |
 | `MIXLAB_KEY_NOTATION` | No | `camelot` (default): Tonality is copied as written. `any`: classical spellings are normalised to Camelot codes as the multi-tenant API reads them, from the vendored `keys.json`; admission is unchanged |
 | `MIXLAB_PLAYED_SOURCE` | No | `catalog` (default): played status comes from the catalogue when `CATALOG_API_URL` is set, else the full collection is used. `file`: played means `PlayCount` ≥ 1 in the export, and the catalogue is never asked |
@@ -103,7 +103,7 @@ cp .env.example .env
 | `MIXLAB_ENGINE_DIGEST` | No | Tenant mode: the image digest (`sha256:` and 64 hex digits) copied into `summary.json`; any other value is left out |
 | `MIXLAB_PROTOCOL_VERSION` | No | Tenant mode: the worker protocol version, sent in the claim and copied into `summary.json` as an integer |
 
-`ANTHROPIC_API_KEY` is required for Stage 2 report generation. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only. `MIXLAB_STAGE2_MODEL` and `MIXLAB_STAGE2_TEMPERATURE` let you point Stage 2 at a different Anthropic model or tune selection-pass creativity without editing code — both fall back to the current defaults when unset or invalid.
+`ANTHROPIC_API_KEY` is required for Stage 2 report generation. Without a catalog API URL, played-track exclusion is skipped and the full collection is used. Without a Discord token the report is printed to stdout only. `MIXLAB_STAGE2_MODEL` and `MIXLAB_STAGE2_TEMPERATURE` let you point Stage 2 at a different Anthropic model or tune selection-pass creativity without editing code — both fall back to the current defaults when unset or invalid. `MIXLAB_STAGE2_TEMPERATURE` is sent only to models that take a temperature (`claude-sonnet-4-6`, not the 5.5 models).
 
 #### Tenant mode and the LLM layer
 
@@ -121,7 +121,7 @@ These variables are read at run time. Each is unset by default, and with none se
 
 **`MIXLAB_TOKEN_BUDGET=<input>,<output>`** sets the run's allowances (default `150000,56000`); tenant mode only, ignored otherwise. Before a call, its estimated input (one token per three characters of system and prompt, a deliberate over-estimate) and its `max_tokens` are reserved against what is already spent and reserved; a call that does not fit raises the token-budget error. Actual usage, thinking tokens included, replaces the reservation after the response, and a retry keeps its call's reservation. Two positive integers separated by a comma, spaces allowed; anything else prints a warning and uses the default.
 
-**`MIXLAB_STAGE2_EFFORT`** (`low`, `medium` or `high`, case-sensitive) applies only to a 5-family model id, one whose version number is 5 or more (`claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`; not `claude-sonnet-4-6`). Unset, or any other value (which warns once on stderr), the request is exactly what it was before for every model, including `claude-sonnet-5-5`'s existing `between_tools` thinking at effort `high`. Set, a 5-family model sends no `temperature` and, per call:
+**`MIXLAB_STAGE2_EFFORT`** (`low`, `medium` or `high`, case-sensitive) applies only to a 5-family model id, one whose version number is 5 or more (`claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`; not `claude-sonnet-4-6`). Unset, or any other value (which warns once on stderr), the request is exactly what it was before for every model, including `claude-sonnet-5-5`'s existing `between_tools` thinking at effort `high`. Set, a 5-family model other than `claude-opus-5-5` (below) sends no `temperature` and, per call:
 
 | Call | `output_config.effort` | `thinking` |
 |---|---|---|
@@ -130,6 +130,16 @@ These variables are read at run time. Each is unset by default, and with none se
 | Title re-roll, critique | `low` | `between_tools` |
 
 A 4-family model id is unchanged whatever the variable says, `MIXLAB_STAGE2_TEMPERATURE` included.
+
+**`claude-opus-5-5` has its own rules**, set or unset: it refuses `temperature` and any thinking mode that turns thinking off (`between_tools` included), so every call sends `thinking: adaptive`, no `temperature`, and an explicit effort — `low` for the title re-roll, the critique and the intent brief, and the variable's value (default `medium`) for selection, revision, report and report regeneration. Its thinking is spent from `max_tokens` before the answer, so each call adds a thinking allowance to its usual cap and the time to write it at 50 tokens a second:
+
+| Effort | Added to `max_tokens` | Added to the timeout |
+|---|---|---|
+| `low` | 8,000 | 160 s |
+| `medium` | 16,000 | 320 s |
+| `high` | 32,000 | 640 s |
+
+Capped at the model's 128,000-token output limit. At the default effort the selection call asks for 80,000 tokens with a 920-second timeout (32,000 in tenant mode), a report 18,000 or more with 440 seconds, and the title re-roll and critique 9,024 each. The same rules apply to `MIXLAB_STAGE0_MODEL=claude-opus-5-5`, but Stage 0 keeps its 60-second bound, which Opus thinking can exceed; the run then uses the deterministic brief.
 
 **`MIXLAB_FALLBACKS=default`** adds `"fallbacks": "default"` and the header `anthropic-beta: server-side-fallback-2026-07-01` to every Stage 2 call, so Anthropic may answer with a fallback model. Stage 0 never sends it. Any other value warns once and changes nothing. The attempts a fallback reports are recorded and counted against the token budget.
 
@@ -357,6 +367,17 @@ In `mixed`, the two families are composed rather than concatenated: directions a
 ```
 
 `--risk` composes with `--directions`: it changes how canvases are scored and validated regardless of whether they came from classic BPM strata or a concept direction. It is genre mode only — playlist mode derives its own risk tolerance from the Stage 0 intent brief (see `--intent` above) and prints a stderr note if `--risk` is passed alongside `--playlist`.
+
+### Stage 2 model (`--model`)
+
+`--model {claude-sonnet-5-5,claude-opus-5-5}` picks the Claude model for every Stage 2 call of one run: selection, title re-roll, critique, report, revision and report regeneration. It overrides `MIXLAB_STAGE2_MODEL`; without either, Stage 2 runs on `claude-sonnet-5-5`.
+
+```sh
+./mixlab --genre house                           # Sonnet 5.5, the cheapest
+./mixlab --genre house --model claude-opus-5-5   # Opus 5.5: always thinks, so dearer and slower
+```
+
+Opus 5.5 always thinks, so its calls ask for more output tokens and wait longer (see `MIXLAB_STAGE2_EFFORT` above). Any other model id, `claude-sonnet-4-6` included, still works through `MIXLAB_STAGE2_MODEL`.
 
 ### Mix Engine (genre mode)
 
@@ -640,7 +661,7 @@ Tracks within each concept are sorted for harmonic compatibility. The algorithm 
 
 ### LLM Stage 2 — report generation
 
-- Uses Claude Sonnet 4.6 by default, or Claude Sonnet 5.5 via `MIXLAB_STAGE2_MODEL=claude-sonnet-5-5` (Anthropic-only, no fallback provider)
+- Uses Claude Sonnet 5.5 by default, or Claude Opus 5.5 via `--model claude-opus-5-5` (or `MIXLAB_STAGE2_MODEL`); `MIXLAB_STAGE2_MODEL=claude-sonnet-4-6` restores the previous default (Anthropic-only, no fallback provider)
 - Before sequencing, chooses an explicit energy path (Slow Climb, Wave, Plateau With Detail, Double Peak, Front-Loaded Hook, Dark to Light, Light to Dark) and assigns every track to one of five sections: Invitation, Groove Lock, Development, Peak/Payoff, Resolution
 - Assigns each track a role from a focused 10-role vocabulary: opener, groove, hook, pivot, lift, vocal-moment, texture-change, peak, resolution, closer (a track may carry more than one)
 - Each report includes: named energy path, structured `arc_type` field, section breakdown with track numbers, per-track role and transition risk, dedicated opener and closer rationale, excluded tracks with reasons, a `Bold moves:` summary of bridge/wildcard usage with the mechanism that justified each pick, and a one-line `Practicality:` score (bpm_smoothness, harmonic_ratio, risk_justified, overall) for triage

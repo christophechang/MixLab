@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Stage 2 runs on Claude Sonnet 5.5 by default.** Every run's selection, title re-roll,
+  critique, report and revision now go to `claude-sonnet-5-5` (no `temperature`,
+  `between_tools` thinking at effort `high`) instead of `claude-sonnet-4-6`.
+  `MIXLAB_STAGE2_MODEL=claude-sonnet-4-6` rolls back, with its payload unchanged.
+- **`--model` picks the Stage 2 model per run.** `claude-sonnet-5-5` or `claude-opus-5-5`;
+  it overrides `MIXLAB_STAGE2_MODEL`. The worker cannot pass it from a run manifest yet.
+- **Opus 5.5 requests are valid.** `claude-opus-5-5` never gets a `temperature` or
+  `between_tools`; every call sends adaptive thinking and an explicit effort (`low` for the
+  title re-roll, critique and intent brief; `MIXLAB_STAGE2_EFFORT` or `medium` for the rest).
+  Because its thinking is spent from `max_tokens`, each call adds 8,000, 16,000 or 32,000
+  tokens (effort low, medium, high, capped at 128,000) and 160, 320 or 640 seconds to its
+  timeout. Sonnet 5.5 and 4.6 payloads and timeouts are unchanged.
 - **`summary.schema.json` re-vendored** from mixlab-multi-tenant `5fad4c2` (v0.5.0): only
   `llmCall.model`'s description changes, to the model that answered. Its pinned hash moves with it.
 
